@@ -140,7 +140,7 @@ create index submissions_order_idx on submissions (hunt_id, x_created_at);
 create table winners (
   id            bigint generated always as identity primary key,
   hunt_id       bigint not null unique references hunts (id),
-  submission_id bigint not null references submissions (id),
+  submission_id bigint references submissions (id),  -- nullable: audit lives in submissions
   winner_x_id   text not null,
   wallet        text not null,
   prize_fmml    numeric(38,0) not null,
