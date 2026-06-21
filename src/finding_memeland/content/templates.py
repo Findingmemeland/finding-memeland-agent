@@ -50,11 +50,13 @@ def clue_followup(clue_index: int, clue_text: str, taunt: str) -> str:
 
 def winner_announcement(d: WinnerData) -> str:
     """Long-post (X Premium). Reveals winner + integrity ingredients + teaser."""
+    winner = d.winner_handle.lstrip("@")
+    persona = d.persona_handle.lstrip("@")
     return (
         f"Hunt #{d.hunt_n} is halted. We have a winner!\n\n"
-        f"Congratulations @{d.winner_handle} — solved in {d.time_to_win}.\n"
+        f"Congratulations @{winner} — solved in {d.time_to_win}.\n"
         f"{d.prize_amount} $FMML transferred to your wallet ({d.tx_link}).\n"
-        f"The hidden persona was @{d.persona_handle} (dormant in 1 hour).\n\n"
+        f"The hidden persona was @{persona} (dormant in 1 hour).\n\n"
         f"Integrity check — recompute SHA-256 of:\n"
         f"  user_id: {d.persona_user_id}\n"
         f"  claim_code: {d.claim_code}\n"

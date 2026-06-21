@@ -28,6 +28,11 @@ def generate_claim_code(length: int = 8) -> str:
     return "".join(secrets.choice(_SAFE_ALPHABET) for _ in range(length))
 
 
+def generate_salt() -> str:
+    """A fresh high-entropy salt per hunt; revealed in the Winner Announcement."""
+    return secrets.token_hex(16)
+
+
 def compute_integrity_hash(persona_user_id: str, claim_code: str, salt: str) -> str:
     """The committed value. Order and utf-8 encoding are part of the protocol."""
     payload = f"{persona_user_id}{claim_code}{salt}".encode("utf-8")
