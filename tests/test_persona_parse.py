@@ -8,6 +8,7 @@ GOOD = {
     "no longer exist. Clues lean on the paradox of mapping the unmappable.",
     "voice": "wry, terse, fond of geographic metaphors",
     "avatar_prompt": "weathered antique map fragment, sepia, candlelight",
+    "solution_terms": ["the cartographer of nowhere", "phantom island"],
 }
 
 

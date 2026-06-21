@@ -33,6 +33,7 @@ class GeneratedPersona:
     voice: str
     backstory: str            # internal — drives clue generation, never posted
     archetype: str
+    solution_terms: list[str]  # the literal answer words a clue must NEVER contain
 
 
 ARCHETYPES = (
@@ -110,9 +111,13 @@ clues will later draw on. This is INTERNAL and never published.
 - voice: one short line describing how this persona posts.
 - avatar_prompt: a vivid image-generation prompt for a fitting profile picture, \
 no real-person likenesses.
+- solution_terms: a JSON array of the literal answer words/names that would solve \
+the puzzle outright — the true identity's name and its most direct give-aways \
+(e.g. for Icarus: ["Icarus", "Daedalus"]). Clues must NEVER contain these, so be \
+thorough. Do NOT include generic words that would over-block normal clue writing.
 
 Respond with ONLY a JSON object, no prose, with keys: archetype, display_name, \
-bio, backstory, voice, avatar_prompt."""
+bio, backstory, voice, avatar_prompt, solution_terms."""
 
 
 def _extract_json(text: str) -> dict:
@@ -126,7 +131,10 @@ def _extract_json(text: str) -> dict:
 
 def _to_persona(data: dict) -> GeneratedPersona:
     """Validate + sanitize raw model output into a safe GeneratedPersona."""
-    required = {"archetype", "display_name", "bio", "backstory", "voice", "avatar_prompt"}
+    required = {
+        "archetype", "display_name", "bio", "backstory", "voice",
+        "avatar_prompt", "solution_terms",
+    }
     missing = required - data.keys()
     if missing:
         raise ValueError(f"persona JSON missing keys: {sorted(missing)}")
@@ -138,6 +146,13 @@ def _to_persona(data: dict) -> GeneratedPersona:
     if not bio:
         raise ValueError("empty bio after sanitization")
 
+    raw_terms = data["solution_terms"]
+    if not isinstance(raw_terms, list):
+        raise ValueError("solution_terms must be a list")
+    solution_terms = [str(t).strip() for t in raw_terms if str(t).strip()]
+    if not solution_terms:
+        raise ValueError("solution_terms is empty — the answer must be specified")
+
     return GeneratedPersona(
         display_name=name,
         bio=bio,
@@ -145,6 +160,7 @@ def _to_persona(data: dict) -> GeneratedPersona:
         voice=str(data["voice"]).strip(),
         backstory=str(data["backstory"]).strip(),
         archetype=str(data["archetype"]).strip(),
+        solution_terms=solution_terms,
     )
 
 

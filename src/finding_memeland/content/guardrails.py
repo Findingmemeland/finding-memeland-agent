@@ -18,12 +18,26 @@ class GuardrailResult:
     reasons: list[str]
 
 
-# Tokens that must never appear literally in any clue.
-def _forbidden_tokens(display_name: str, handle: str, bio: str) -> set[str]:
+# Common words that are NOT identity leaks even if they appear in a name.
+STOPWORDS = frozenset({
+    "the", "and", "for", "with", "into", "that", "this", "from", "just", "here",
+    "are", "but", "not", "never", "than", "then", "over", "ever", "all", "you",
+    "your", "its", "was", "were", "has", "have", "of", "a", "an", "in", "on",
+})
+
+
+# Distinctive tokens that must never appear literally in any clue.
+# NOTE: we deliberately do NOT block generic bio words — the bio is public and
+# oblique by design, and blocking common words ("never", "first") strangles clue
+# writing. The real leak risks are the persona's name/handle and the answer
+# (solution_terms, handled separately).
+def _forbidden_tokens(display_name: str, handle: str) -> set[str]:
     tokens: set[str] = set()
-    for source in (display_name, handle, bio):
+    for source in (display_name, handle):
         for word in re.findall(r"[A-Za-z]{3,}", source or ""):
-            tokens.add(word.lower())
+            w = word.lower()
+            if w not in STOPWORDS:
+                tokens.add(w)
     tokens.add(handle.lstrip("@").lower())
     return tokens
 
@@ -35,20 +49,30 @@ def check_clue(
     persona_display_name: str,
     persona_handle: str,
     persona_bio: str,
+    solution_terms: list[str] | tuple[str, ...] = (),
     max_len: int = 280,
     is_long_post: bool = False,
 ) -> GuardrailResult:
     reasons: list[str] = []
     text_lower = clue_text.lower()
 
-    # 1. Never leak identity literally (all clues).
+    # 1. Never leak identity literally (all clues): persona name/handle tokens.
     leaked = sorted(
         tok
-        for tok in _forbidden_tokens(persona_display_name, persona_handle, persona_bio)
+        for tok in _forbidden_tokens(persona_display_name, persona_handle)
         if re.search(rf"\b{re.escape(tok)}\b", text_lower)
     )
     if leaked:
         reasons.append(f"clue leaks persona identity tokens: {leaked}")
+
+    # 1b. Never write the literal answer (solution terms) — in ANY clue.
+    answer_leaks = sorted(
+        term
+        for term in solution_terms
+        if term.strip() and term.strip().lower() in text_lower
+    )
+    if answer_leaks:
+        reasons.append(f"clue contains solution term(s): {answer_leaks}")
 
     # 2. No URLs in clues — $0.20 each on the X API, and a tell.
     if re.search(r"https?://|\bwww\.", text_lower):
