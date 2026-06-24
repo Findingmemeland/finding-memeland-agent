@@ -22,18 +22,26 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from ..social.x_text import MAX_BIO_LEN, MAX_NAME_LEN, sanitize_bio, sanitize_name
+from ..social.x_text import (
+    MAX_BIO_LEN,
+    MAX_NAME_LEN,
+    sanitize_bio,
+    sanitize_name,
+    sanitize_x_text,
+)
 
 
 @dataclass
 class GeneratedPersona:
     display_name: str
     bio: str
-    avatar_prompt: str        # fed to the image generator
+    avatar_prompt: str        # fed to the image generator (profile picture)
+    banner_prompt: str        # fed to the image generator (header banner)
     voice: str
     backstory: str            # internal — drives clue generation, never posted
     archetype: str
     solution_terms: list[str]  # the literal answer words a clue must NEVER contain
+    findable_post: str         # distinctive pinned post — the searchable locator anchor
 
 
 ARCHETYPES = (
@@ -95,9 +103,24 @@ person, artifact, or concept — pick the archetype that honestly matches.
 Tone/difficulty: a balanced pool — sometimes erudite and hard, sometimes light \
 and meme-native. Follow the difficulty register given in the user message.
 
+Findability matters: players must be able to LOCATE the account once they're on
+the right track. So the persona must be DISTINCTIVE and searchable, never a
+generic name that drowns in thousands of look-alikes.
+
 Output rules:
-- display_name: max 50 chars, plain characters only (letters, digits, spaces, and \
-simple punctuation . , ' -). NO square brackets, emoji, or markup characters.
+- display_name: max 50 chars, plain characters (letters, digits, spaces, simple \
+punctuation . , ' -). DISTINCTIVE and searchable — a search of this name should \
+return a SMALL set, not thousands. NEVER a hyper-common real-person name like \
+"Mike T" or "Sarah K". Prefer an uncommon combination, a memorable handle-style \
+name, or a distinctive phrase — without literally giving away the identity.
+- banner_prompt: a vivid image-generation prompt for a header banner that fits \
+the persona and can be hinted at by clues (a distinct scene/motif, no text, no \
+real-person likeness). Different from the avatar.
+- findable_post: a single short, in-character post (max ~250 chars) the persona \
+pins. It MUST contain an unusual, distinctive, easily-searchable phrase (the \
+locator anchor a late clue can point players to). It must NOT contain the \
+solution terms or otherwise state the identity — it is how you FIND the account, \
+not how you SOLVE it. No URLs, no hashtags, no square brackets.
 - bio: max 130 chars, short and ambiguous, in-character, plausible as a normal \
 niche account. Must NOT state or imply it is a real living human. No URLs, no \
 @handles, no hashtags, no square brackets or special markup characters.
@@ -117,7 +140,8 @@ the puzzle outright — the true identity's name and its most direct give-aways 
 thorough. Do NOT include generic words that would over-block normal clue writing.
 
 Respond with ONLY a JSON object, no prose, with keys: archetype, display_name, \
-bio, backstory, voice, avatar_prompt, solution_terms."""
+bio, backstory, voice, avatar_prompt, banner_prompt, solution_terms, \
+findable_post."""
 
 
 def _extract_json(text: str) -> dict:
@@ -133,7 +157,7 @@ def _to_persona(data: dict) -> GeneratedPersona:
     """Validate + sanitize raw model output into a safe GeneratedPersona."""
     required = {
         "archetype", "display_name", "bio", "backstory", "voice",
-        "avatar_prompt", "solution_terms",
+        "avatar_prompt", "banner_prompt", "solution_terms", "findable_post",
     }
     missing = required - data.keys()
     if missing:
@@ -153,14 +177,25 @@ def _to_persona(data: dict) -> GeneratedPersona:
     if not solution_terms:
         raise ValueError("solution_terms is empty — the answer must be specified")
 
+    # The findable post is a real X post: X-safe chars, post-length, and it must
+    # not leak the answer (you find the account by it, you don't solve by it).
+    findable_post = sanitize_x_text(str(data["findable_post"]))[:250].strip()
+    if not findable_post:
+        raise ValueError("empty findable_post after sanitization")
+    low = findable_post.lower()
+    if any(t.lower() in low for t in solution_terms):
+        raise ValueError("findable_post contains a solution term — it must not reveal the answer")
+
     return GeneratedPersona(
         display_name=name,
         bio=bio,
         avatar_prompt=str(data["avatar_prompt"]).strip(),
+        banner_prompt=str(data["banner_prompt"]).strip(),
         voice=str(data["voice"]).strip(),
         backstory=str(data["backstory"]).strip(),
         archetype=str(data["archetype"]).strip(),
         solution_terms=solution_terms,
+        findable_post=findable_post,
     )
 
 

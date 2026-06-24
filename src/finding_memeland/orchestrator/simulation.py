@@ -99,16 +99,21 @@ class FakePersonaGenerator:
             display_name="burning daylight",
             bio="clocks are a conspiracy and i arrived late to my own funeral",
             avatar_prompt="a sundial dissolving into fog, painterly",
+            banner_prompt="a blank map with one coastline drawn, sepia",
             voice="terse, ironic",
             backstory="A famous explorer whose name ended up on two continents.",
             archetype="historical figure (dead 50+ years)",
             solution_terms=["Amerigo", "Vespucci"],
+            findable_post="still charting the hum of a coastline nobody named yet",
         )
 
 
 class FakeAvatarGenerator:
     def generate_png(self, prompt: str) -> bytes:
         return b""  # empty -> orchestrator skips avatar upload
+
+    def generate_banner_png(self, prompt: str) -> bytes:
+        return b""  # empty -> orchestrator skips banner upload
 
 
 class FakeClueEngine:

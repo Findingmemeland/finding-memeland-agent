@@ -61,12 +61,14 @@ def main() -> int:
             all_ok = False
 
         print(f"\n===== persona [{i}]  register={register}  ({flag}) =====")
-        print(f"archetype : {p.archetype}")
-        print(f"name      : {p.display_name}")
-        print(f"bio       : {p.bio}")
-        print(f"voice     : {p.voice}")
-        print(f"backstory : {p.backstory}")
-        print(f"avatar    : {p.avatar_prompt}")
+        print(f"archetype    : {p.archetype}")
+        print(f"name         : {p.display_name}")
+        print(f"bio          : {p.bio}")
+        print(f"voice        : {p.voice}")
+        print(f"backstory    : {p.backstory}")
+        print(f"avatar       : {p.avatar_prompt}")
+        print(f"banner       : {p.banner_prompt}")
+        print(f"findable post: {p.findable_post}")
         print(f"--- dressed bio preview (with claim code) ---\n{sample_bio}")
 
     print("\nALL OK" if all_ok else "\nSOME ISSUES — see CHECK notes above")

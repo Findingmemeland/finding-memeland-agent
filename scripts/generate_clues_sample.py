@@ -14,7 +14,12 @@ import sys
 from anthropic import Anthropic
 
 from finding_memeland.config import get_settings
-from finding_memeland.content.clue_engine import ClueEngine, PersonaContext, obliqueness_for
+from finding_memeland.content.clue_engine import (
+    ClueEngine,
+    PersonaContext,
+    clue_vector_for,
+    obliqueness_for,
+)
 from finding_memeland.content.templates import clue_followup, clue_one
 from finding_memeland.persona.generator import PersonaGenerator
 
@@ -48,7 +53,8 @@ def main() -> int:
             print(f"\n[clue {i}] FAIL — {e!r}")
             return 1
         prior.append(draft.text)
-        print(f"\n--- clue {i}  (obliqueness {obliqueness_for(i)}) ---")
+        vector = clue_vector_for(i, ctx)
+        print(f"\n--- clue {i}  (obliqueness {obliqueness_for(i)}, facet: {vector}) ---")
         print(draft.text)
         if draft.taunt:
             print(f"taunt: {draft.taunt}")

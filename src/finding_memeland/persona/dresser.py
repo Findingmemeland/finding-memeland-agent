@@ -11,9 +11,13 @@ read the code that the winner must DM to the main account.
 
 from __future__ import annotations
 
-from ..social.x_client import Profile, XClient
+from typing import TYPE_CHECKING
+
 from ..social.x_text import MAX_BIO_LEN, sanitize_bio, sanitize_name
 from .generator import GeneratedPersona
+
+if TYPE_CHECKING:
+    from ..social.x_client import Profile, XClient
 
 # Neutral state a retired account is reset to (no game identity).
 DORMANT_NAME = "—"
@@ -44,16 +48,25 @@ class PersonaDresser:
         identity: GeneratedPersona,
         claim_code: str,
         avatar_path: str | None = None,
+        banner_path: str | None = None,
     ) -> Profile:
-        """Apply identity + embed the claim code in the bio. Returns the profile
-        X reports back, so the orchestrator can verify the write took."""
+        """Apply identity (name, bio+claim code, avatar, banner) and publish the
+        findable locator post so the account becomes searchable. Returns the
+        profile X reports back, so the orchestrator can verify the write took."""
         bio = compose_bio(identity.bio, claim_code)
         name = sanitize_name(identity.display_name)
         if avatar_path:
             self._x.set_avatar(access_token, access_secret, avatar_path)
-        return self._x.update_profile(
+        if banner_path:
+            self._x.set_banner(access_token, access_secret, banner_path)
+        profile = self._x.update_profile(
             access_token, access_secret, name=name, description=bio
         )
+        # Publish the locator anchor (distinctive searchable post) as the persona.
+        locator = getattr(identity, "findable_post", "")
+        if locator:
+            self._x.post_as_persona(access_token, access_secret, locator)
+        return profile
 
     def retire(self, *, access_token: str, access_secret: str) -> Profile:
         """Reset the account to a neutral dormant state after the reveal window.

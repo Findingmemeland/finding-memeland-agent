@@ -44,6 +44,8 @@ class PersonaContext:
     voice: str
     backstory: str
     solution_terms: list[str] = field(default_factory=list)
+    banner_description: str = ""
+    findable_post: str = ""
 
     @classmethod
     def from_generated(cls, generated, handle: str) -> "PersonaContext":
@@ -56,6 +58,8 @@ class PersonaContext:
             voice=generated.voice,
             backstory=generated.backstory,
             solution_terms=list(generated.solution_terms),
+            banner_description=getattr(generated, "banner_prompt", ""),
+            findable_post=getattr(generated, "findable_post", ""),
         )
 
 
@@ -68,6 +72,45 @@ class ClueDraft:
 def obliqueness_for(clue_index: int) -> float:
     """1.0 (max oblique) easing down. clue_index is 1-based."""
     return round(EASING_FACTOR ** (clue_index - 1), 3)
+
+
+# Each clue targets one facet of the persona, cryptically signalled so players
+# know whether to look at the name, the picture, the banner, or a pinned post.
+# Progression: concept first → visual disambiguators → name → the searchable
+# pinned post as the last-resort LOCATOR if the hunt drags on.
+VECTOR_GUIDANCE = {
+    "identity": "the hidden IDENTITY itself — hint who/what it is by inference "
+    "(paradoxes, structure). Cryptically signal this clue is about *who they are*.",
+    "avatar": "the PROFILE PICTURE — hint at a visual element of the avatar so "
+    "players can recognise the right account among look-alikes. Cryptically signal "
+    "you mean the picture.",
+    "banner": "the HEADER BANNER — hint at a visual element of the banner. "
+    "Cryptically signal you mean the header/banner image.",
+    "first_name": "the FIRST word of the display name — hint at it without writing "
+    "it. Signal you mean the start of what they call themselves.",
+    "last_name": "the LAST word of the display name — hint at it without writing "
+    "it. Signal you mean the rest of the name.",
+    "name": "the display NAME — hint at it without writing it. Signal you mean what "
+    "they call themselves.",
+    "signature_post": "the pinned LOCATOR POST — point players (cryptically, more "
+    "directly as clues ease) toward finding the distinctive pinned post so they can "
+    "land on the exact account. Never quote the answer.",
+}
+
+
+def clue_plan(persona: "PersonaContext") -> list[str]:
+    """Ordered facet plan for a hunt. Name split into first/last when it has 2+
+    words. Ends on the locator post (the findability safety net)."""
+    parts = persona.display_name.split()
+    name_vectors = ["first_name", "last_name"] if len(parts) >= 2 else ["name"]
+    return ["identity", "identity", "avatar", "banner", *name_vectors, "signature_post"]
+
+
+def clue_vector_for(clue_index: int, persona: "PersonaContext") -> str:
+    """Facet this clue targets. Beyond the plan it stays on 'signature_post' —
+    the longer a hunt runs, the more the clues point at the searchable post."""
+    plan = clue_plan(persona)
+    return plan[min(clue_index - 1, len(plan) - 1)]
 
 
 def next_clue_due(now: datetime | None = None) -> datetime:
@@ -97,6 +140,11 @@ lookup. From clue 4 onward you may be structurally direct, but STILL never write
 the literal answer.
 - Each clue must add a NEW angle, roughly 30% more obvious than the previous one. \
 Do not repeat earlier clues.
+- FACET TARGETING: each clue focuses on ONE facet of the persona (given below) and \
+must CRYPTICALLY signal which facet it is — so players know whether to look at the \
+name, the profile picture, the banner, or a pinned post. Signal it indirectly \
+(e.g. "a picture's worth a thousand...", "check what hangs above their head"), \
+never naming the facet outright until obviousness is high (clue 5+).
 
 For clue #1 only, set taunt to "". For clue #2 and later, also write a short, \
 varying jeer that pokes fun at players for not solving it yet (e.g. "c'mon you \
@@ -107,6 +155,7 @@ Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
 
 def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: list[str]) -> str:
     prior = "\n".join(f"- {c}" for c in prior_clues) if prior_clues else "(none — this is the first clue)"
+    vector = clue_vector_for(clue_index, persona)
     return (
         "SECRET — do NOT reveal any of this literally:\n"
         f"- true identity / backstory: {persona.backstory}\n"
@@ -114,8 +163,11 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"- persona display name: {persona.display_name}\n"
         f"- persona @handle: {persona.handle}\n"
         f"- persona bio: {persona.bio}\n"
-        f"- avatar: {persona.avatar_description}\n\n"
+        f"- avatar (profile picture): {persona.avatar_description}\n"
+        f"- banner (header): {persona.banner_description}\n"
+        f"- pinned locator post: {persona.findable_post}\n\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness_for(clue_index)}.\n"
+        f"FACET for this clue: {vector} — {VECTOR_GUIDANCE[vector]}\n"
         f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )

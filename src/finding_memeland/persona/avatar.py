@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import base64
 
-# Appended to every avatar prompt.
-AVATAR_STYLE_SUFFIX = (
-    ", profile picture composition, no text, no watermark, no logos, "
-    "not a real living person, no recognizable real-person likeness"
-)
+_SAFETY = ", no text, no watermark, no logos, not a real living person, no recognizable real-person likeness"
+AVATAR_STYLE_SUFFIX = ", profile picture composition" + _SAFETY
+BANNER_STYLE_SUFFIX = ", wide header banner composition" + _SAFETY
+BANNER_SIZE = "1536x1024"  # closest wide size to X's 3:1 banner; X crops to fit
 
 
 class AvatarGenerator:
@@ -26,11 +25,9 @@ class AvatarGenerator:
         self._model = model
         self._size = size
 
-    def generate_png(self, avatar_prompt: str) -> bytes:
-        """Generate the avatar and return PNG bytes."""
-        prompt = avatar_prompt.strip() + AVATAR_STYLE_SUFFIX
+    def _generate(self, prompt: str, suffix: str, size: str) -> bytes:
         resp = self._client.images.generate(
-            model=self._model, prompt=prompt, size=self._size, n=1
+            model=self._model, prompt=prompt.strip() + suffix, size=size, n=1
         )
         b64 = getattr(resp.data[0], "b64_json", None)
         if not b64:
@@ -38,6 +35,14 @@ class AvatarGenerator:
                 "image API returned no b64_json — check the model id / response format"
             )
         return base64.b64decode(b64)
+
+    def generate_png(self, avatar_prompt: str) -> bytes:
+        """Generate the profile picture and return PNG bytes."""
+        return self._generate(avatar_prompt, AVATAR_STYLE_SUFFIX, self._size)
+
+    def generate_banner_png(self, banner_prompt: str) -> bytes:
+        """Generate the header banner and return PNG bytes (wide)."""
+        return self._generate(banner_prompt, BANNER_STYLE_SUFFIX, BANNER_SIZE)
 
 
 def save_png(data: bytes, path: str) -> str:

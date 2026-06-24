@@ -2,7 +2,13 @@ import base64
 import os
 import tempfile
 
-from finding_memeland.persona.avatar import AVATAR_STYLE_SUFFIX, AvatarGenerator, save_png
+from finding_memeland.persona.avatar import (
+    AVATAR_STYLE_SUFFIX,
+    BANNER_SIZE,
+    BANNER_STYLE_SUFFIX,
+    AvatarGenerator,
+    save_png,
+)
 
 
 class _FakeImage:
@@ -22,9 +28,11 @@ class _FakeClient:
         self._b64 = b64
         self.images = self
         self.last_prompt = None
+        self.last_size = None
 
     def generate(self, *, model, prompt, size, n):  # noqa: A003
         self.last_prompt = prompt
+        self.last_size = size
         return _FakeResponse(self._b64)
 
 
@@ -35,6 +43,16 @@ def test_generate_png_decodes_b64_and_appends_style():
     out = gen.generate_png("a calm three-headed dog at a stone gate")
     assert out == raw
     assert client.last_prompt.endswith(AVATAR_STYLE_SUFFIX)
+
+
+def test_generate_banner_uses_banner_suffix_and_wide_size():
+    raw = b"\x89PNG banner"
+    client = _FakeClient(base64.b64encode(raw).decode())
+    gen = AvatarGenerator(client, model="gpt-image-1")
+    out = gen.generate_banner_png("a night sky with a faint planet")
+    assert out == raw
+    assert client.last_prompt.endswith(BANNER_STYLE_SUFFIX)
+    assert client.last_size == BANNER_SIZE
 
 
 def test_generate_png_raises_without_b64():

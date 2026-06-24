@@ -102,6 +102,31 @@ class XClient:
     def set_avatar(self, access_token: str, access_secret: str, image_path: str) -> None:
         self._api_for(access_token, access_secret).update_profile_image(image_path)
 
+    def set_banner(self, access_token: str, access_secret: str, image_path: str) -> None:
+        self._api_for(access_token, access_secret).update_profile_banner(image_path)
+
+    def post_as_persona(self, access_token: str, access_secret: str, text: str) -> str:
+        """Post from a PERSONA account (its own OAuth context). Used to publish the
+        findable locator post so it becomes searchable."""
+        client = tweepy.Client(
+            consumer_key=self._api_key, consumer_secret=self._api_secret,
+            access_token=access_token, access_token_secret=access_secret,
+        )
+        resp = client.create_tweet(text=text, user_auth=True)
+        return str(resp.data["id"])
+
+    def search_recent(self, query: str, *, max_results: int = 10) -> list[dict]:
+        """Search recent tweets (v2) — used for the pre-hunt findability check:
+        does the persona's locator post actually surface for a given phrase?"""
+        resp = self._v2().search_recent_tweets(
+            query=query, max_results=max_results,
+            tweet_fields=["author_id", "created_at"], user_auth=True,
+        )
+        return [
+            {"tweet_id": str(t.id), "author_id": str(getattr(t, "author_id", "")), "text": t.text}
+            for t in (resp.data or [])
+        ]
+
     # ------------------------------------------------------------------
     # v2 — main-account operations
     # ------------------------------------------------------------------

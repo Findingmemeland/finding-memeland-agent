@@ -187,12 +187,18 @@ class Orchestrator:
         if png and self._avatar_writer is not None:
             avatar_path = self._avatar_writer(png)
 
+        banner_path = None
+        bpng = self._avatar_generator.generate_banner_png(identity.banner_prompt)
+        if bpng and self._avatar_writer is not None:
+            banner_path = self._avatar_writer(bpng)
+
         self._dresser.dress(
             access_token=persona.access_token,
             access_secret=persona.access_secret,
             identity=identity,
             claim_code=claim_code,
             avatar_path=avatar_path,
+            banner_path=banner_path,
         )
 
         hunt_id = self._repo.create_hunt(
