@@ -9,6 +9,7 @@ from finding_memeland.runtime import (
     ManualPriceFeed,
     SystemClock,
     env_token_resolver,
+    round_sig,
     write_temp_png,
 )
 from finding_memeland.social.publisher import XPublisher
@@ -41,6 +42,21 @@ def test_publisher_posts_and_replies():
 def test_price_feed_converts_usd_to_whole_tokens():
     feed = ManualPriceFeed(usd_per_token=0.0001)
     assert feed.usd_to_fmml(500) == 5_000_000
+
+
+def test_price_feed_rounds_to_clean_number():
+    # 200 / 0.0000123 = 16,260,162.6 -> rounded to 3 sig figs -> 16,300,000
+    feed = ManualPriceFeed(usd_per_token=0.0000123)
+    out = feed.usd_to_fmml(200)
+    assert out == 16_300_000
+    assert out % 100_000 == 0  # clean, no ugly trailing digits
+
+
+def test_round_sig_examples():
+    assert round_sig(16_260_163) == 16_300_000
+    assert round_sig(20_000_000) == 20_000_000
+    assert round_sig(1234, 3) == 1230
+    assert round_sig(0) == 0
 
 
 def test_price_feed_raises_on_use_when_price_unset():

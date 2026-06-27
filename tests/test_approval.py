@@ -1,37 +1,38 @@
 from finding_memeland.telegram.approval_queue import ApprovalQueue, route_command
 
 
-# --- command routing + auth ---
+# --- command routing + auth (actions take the arg string) ---
 def _actions(log):
     return {
-        "launch": lambda: log.append("launch") or "hunt launching",
-        "silence": lambda: log.append("silence") or "paused",
-        "resume": lambda: log.append("resume") or "resumed",
-        "status": lambda: "idle",
+        "launch": lambda arg="": log.append(("launch", arg)) or f"launching {arg}",
+        "silence": lambda arg="": log.append(("silence", arg)) or "paused",
+        "resume": lambda arg="": "resumed",
+        "status": lambda arg="": "idle",
     }
 
 
 def test_non_admin_blocked():
     log = []
-    assert route_command("/launch", is_admin=False, actions=_actions(log)) == "unauthorized"
+    assert route_command("/launch 200", is_admin=False, actions=_actions(log)) == "unauthorized"
     assert log == []
 
 
-def test_admin_launch_routes():
+def test_admin_launch_passes_argument():
     log = []
-    assert route_command("/launch", is_admin=True, actions=_actions(log)) == "hunt launching"
-    assert log == ["launch"]
+    out = route_command("/launch 250", is_admin=True, actions=_actions(log))
+    assert out == "launching 250"
+    assert log == [("launch", "250")]
+
+
+def test_command_without_arg_gives_empty_arg():
+    log = []
+    route_command("/silence", is_admin=True, actions=_actions(log))
+    assert log == [("silence", "")]
 
 
 def test_unknown_command():
     out = route_command("/frobnicate", is_admin=True, actions=_actions([]))
     assert "unknown command" in out
-
-
-def test_command_with_args_takes_first_word():
-    log = []
-    assert route_command("/silence now please", is_admin=True, actions=_actions(log)) == "paused"
-    assert log == ["silence"]
 
 
 # --- approval queue ---

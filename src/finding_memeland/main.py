@@ -95,19 +95,38 @@ def build_agent(settings: Settings | None = None) -> Agent:
         avatar_writer=write_temp_png,
     )
 
-    # Admin/approval surface. /launch fires a hunt in the BACKGROUND (it can run for
-    # hours) so the bot stays responsive; the command returns immediately.
+    # Admin/approval surface. /launch <prize_usd> fires a hunt in the BACKGROUND
+    # (it can run for hours) so the bot stays responsive. The prize is set per hunt
+    # by the operator; the agent converts $ -> $FMML at the current price and posts
+    # the token amount. The dynamic rule (economics.suggested_prize) is a guide.
     import threading
 
-    def _launch() -> str:
-        threading.Thread(target=orchestrator.run_hunt, daemon=True).start()
-        return "hunt launching 🏴"
+    from .economics import fdv_from_price, suggested_prize
+
+    def _suggestion() -> str:
+        try:
+            fdv = fdv_from_price(s.fmml_usd_price, s.total_supply) if s.fmml_usd_price else 0
+        except Exception:  # noqa: BLE001
+            fdv = 0
+        return f" (suggested at current FDV: ${suggested_prize(fdv):.0f})" if fdv else ""
+
+    def _launch(arg: str) -> str:
+        if not arg:
+            return f"usage: /launch <prize in $>, e.g. /launch 250{_suggestion()}"
+        try:
+            prize_usd = float(arg)
+        except ValueError:
+            return f"'{arg}' isn't a number. usage: /launch <prize in $>"
+        if prize_usd < s.min_prize_usd:
+            return f"minimum prize is ${s.min_prize_usd:.0f} — nobody plays for less."
+        threading.Thread(target=lambda: orchestrator.run_hunt(prize_usd=prize_usd), daemon=True).start()
+        return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 
     actions = {
         "launch": _launch,
-        "status": lambda: "idle",
-        "silence": lambda: "pause requested (supervisor wiring pending)",
-        "resume": lambda: "resume requested",
+        "status": lambda arg="": "idle",
+        "silence": lambda arg="": "pause requested (supervisor wiring pending)",
+        "resume": lambda arg="": "resume requested",
     }
     telegram = TelegramAdmin(
         bot_token=s.telegram_bot_token, admin_chat_id=s.telegram_admin_chat_id,

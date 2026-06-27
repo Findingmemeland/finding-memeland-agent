@@ -6,9 +6,19 @@ heavy clients are built in the composition root (main.py) and injected.
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
+
+
+def round_sig(n: float, sig: int = 3) -> int:
+    """Round to `sig` significant figures and return a clean whole number,
+    e.g. 16,260,163 -> 16,300,000. Keeps prize/holding amounts readable."""
+    if n <= 0:
+        return 0
+    digits = sig - int(math.floor(math.log10(n))) - 1
+    return int(round(n, digits))
 
 
 class SystemClock:
@@ -39,15 +49,18 @@ class ManualPriceFeed:
     `usd_per_token` (e.g. 0.0001). usd_to_fmml(500) -> 5_000_000 tokens at that price.
     """
 
-    def __init__(self, usd_per_token: float):
+    def __init__(self, usd_per_token: float, *, sig_figs: int = 3):
         # Allow 0 at construction so the agent can boot before the token exists;
         # it fails clearly only when a hunt actually tries to price a prize.
         self._price = usd_per_token
+        self._sig = sig_figs
 
     def usd_to_fmml(self, usd: float) -> int:
         if self._price <= 0:
             raise RuntimeError("FMML_USD_PRICE not set — set it before launching a hunt")
-        return int(usd / self._price)
+        # Round to a clean whole number so the post and payout show e.g.
+        # 16,300,000 $FMML, not 16,260,163. Same value used for post AND transfer.
+        return round_sig(usd / self._price, self._sig)
 
 
 class StdoutNotifier:

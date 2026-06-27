@@ -151,9 +151,9 @@ class Orchestrator:
         self._avatar_writer = avatar_writer  # callable(bytes) -> path, or None
 
     # ------------------------------------------------------------------
-    def run_hunt(self) -> PreparedHunt:
+    def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
         self._settings.assert_ready_for_hunt()
-        hunt = self._prepare()
+        hunt = self._prepare(prize_usd if prize_usd is not None else self._settings.prize_usd_max)
         self._go_live(hunt)
         winner = self._clue_and_dm_loop(hunt)
         receipt = self._pay(hunt, winner)
@@ -172,14 +172,14 @@ class Orchestrator:
         self._notifier.notify(text)
 
     # ------------------------------------------------------------------
-    def _prepare(self) -> PreparedHunt:
+    def _prepare(self, prize_usd: float) -> PreparedHunt:
         persona = self._persona_source.acquire_ready()
         identity = self._persona_generator.generate(register=self._register)
         claim_code = generate_claim_code()
         salt = generate_salt()
         integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
 
-        prize_fmml = self._price_feed.usd_to_fmml(self._settings.prize_usd_max)
+        prize_fmml = self._price_feed.usd_to_fmml(prize_usd)
         min_balance_fmml = self._price_feed.usd_to_fmml(self._holding_floor_usd)
 
         avatar_path = None
@@ -206,7 +206,7 @@ class Orchestrator:
             claim_code=claim_code,
             integrity_salt=salt,
             integrity_hash=integrity_hash,
-            prize_usd=self._settings.prize_usd_max,
+            prize_usd=prize_usd,
             prize_fmml=prize_fmml,
             min_balance_fmml=min_balance_fmml,
             holding_hours=self._holding_hours,
@@ -220,7 +220,7 @@ class Orchestrator:
             claim_code=claim_code,
             salt=salt,
             integrity_hash=integrity_hash,
-            prize_usd=self._settings.prize_usd_max,
+            prize_usd=prize_usd,
             prize_fmml=prize_fmml,
             min_balance_fmml=min_balance_fmml,
             holding_hours=self._holding_hours,

@@ -26,16 +26,19 @@ _GAME_KINDS = frozenset({"clue_one", "clue", "winner_announcement"})
 def route_command(command: str, *, is_admin: bool, actions: dict) -> str:
     """Authenticate + route an admin command to an action callback.
 
-    `actions` maps "launch"/"silence"/"resume"/"status" to callables returning a
-    response string (or None). Pure and side-effect-free except via the callbacks.
+    `actions` maps "launch"/"silence"/"resume"/"status" to callables that take the
+    argument string (text after the command, e.g. "200" for "/launch 200") and
+    return a response string. Pure and side-effect-free except via the callbacks.
     """
     if not is_admin:
         return "unauthorized"
-    name = command.lstrip("/").strip().split()[0].lower() if command.strip() else ""
+    parts = command.lstrip("/").strip().split(maxsplit=1)
+    name = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
     fn = actions.get(name)
     if fn is None:
         return f"unknown command: /{name}" if name else "no command"
-    return fn() or "ok"
+    return fn(arg) or "ok"
 
 
 class ApprovalQueue:
