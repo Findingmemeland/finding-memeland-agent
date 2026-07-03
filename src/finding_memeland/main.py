@@ -97,7 +97,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     # Admin/approval surface. /launch <prize_usd> fires a hunt in the BACKGROUND
     # (it can run for hours) so the bot stays responsive. The prize is set per hunt
-    # by the operator; the agent converts $ -> $FMML at the current price and posts
+    # by the operator; the agent converts $ -> $FIND at the current price and posts
     # the token amount. The dynamic rule (economics.suggested_prize) is a guide.
     import threading
 

@@ -320,7 +320,7 @@ class Orchestrator:
             hunt_id=hunt.id, wallet=winner.wallet,
             amount_fmml=hunt.prize_fmml, tx_hash=receipt.tx_hash, status="sent",
         )
-        self._notify(f"paid {hunt.prize_fmml:,} $FMML to {winner.wallet} ({receipt.tx_hash})")
+        self._notify(f"paid {hunt.prize_fmml:,} $FIND to {winner.wallet} ({receipt.tx_hash})")
         return receipt
 
     def _reveal(self, hunt: PreparedHunt, winner: Winner, receipt) -> None:

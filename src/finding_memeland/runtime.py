@@ -59,7 +59,7 @@ class ManualPriceFeed:
         if self._price <= 0:
             raise RuntimeError("FMML_USD_PRICE not set — set it before launching a hunt")
         # Round to a clean whole number so the post and payout show e.g.
-        # 16,300,000 $FMML, not 16,260,163. Same value used for post AND transfer.
+        # 16,300,000 $FIND, not 16,260,163. Same value used for post AND transfer.
         return round_sig(usd / self._price, self._sig)
 
 

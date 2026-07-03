@@ -18,7 +18,7 @@ class WinnerData:
     hunt_n: int
     winner_handle: str
     time_to_win: str
-    prize_amount: str          # formatted $FMML amount
+    prize_amount: str          # formatted $FIND amount
     tx_link: str
     persona_handle: str
     # Integrity reveal:
@@ -36,7 +36,7 @@ def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> st
         f"Hunt #{hunt_n} is live:\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
-        f"The first to find me wins {prize} $FMML.\n"
+        f"The first to find me wins {prize} $FIND.\n"
         f"Reshare this post to enter.\n\n"
         f"integrity: {integrity_hash}\n\n"
         f"Check pinned for rules."
@@ -55,7 +55,7 @@ def winner_announcement(d: WinnerData) -> str:
     return (
         f"Hunt #{d.hunt_n} is halted. We have a winner!\n\n"
         f"Congratulations @{winner} — solved in {d.time_to_win}.\n"
-        f"{d.prize_amount} $FMML transferred to your wallet ({d.tx_link}).\n"
+        f"{d.prize_amount} $FIND transferred to your wallet ({d.tx_link}).\n"
         f"The hidden persona was @{persona} (dormant in 1 hour).\n\n"
         f"Integrity check — recompute SHA-256 of:\n"
         f"  user_id: {d.persona_user_id}\n"
