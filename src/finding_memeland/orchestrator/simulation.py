@@ -48,7 +48,27 @@ class FakeRepo:
         self.submissions: list[dict] = []
         self.winners: list[dict] = []
         self.payouts: list[dict] = []
+        self.holding_samples_store: list[dict] = []
         self._next_id = 1
+
+    # --- holding samples (used by the on-chain integration test) ---
+    def add_holding_sample(self, wallet: str, balance: int) -> None:
+        self.holding_samples_store.append(
+            {"wallet": wallet.lower(), "balance_fmml": balance,
+             "sampled_at": datetime.now(timezone.utc)}
+        )
+
+    def seed_holding_sample(self, wallet: str, balance: int, sampled_at) -> None:
+        """Insert a sample at a specific time (for seeding continuity in tests)."""
+        self.holding_samples_store.append(
+            {"wallet": wallet.lower(), "balance_fmml": balance, "sampled_at": sampled_at}
+        )
+
+    def holding_samples(self, wallet: str, since) -> list:
+        return [
+            s for s in self.holding_samples_store
+            if s["wallet"] == wallet.lower() and s["sampled_at"] >= since
+        ]
 
     def create_hunt(self, **fields) -> int:
         hid = self._next_id

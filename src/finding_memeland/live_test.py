@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .config import Settings, get_settings
 from .orchestrator.ports import PayoutReceipt, ReadyPersona
@@ -184,6 +184,43 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
     )
     repo = FakeRepo()  # in-memory: no Supabase writes, no FK constraints during the test
 
+    # Chain adapters: stubbed by default; REAL (Base Sepolia + test ERC-20) when
+    # FMML_TEST_ONCHAIN=1, to validate the holding check + ERC-20 payout live.
+    onchain = os.environ.get("FMML_TEST_ONCHAIN", "").lower() in ("1", "true", "yes")
+    holding_hours = int(os.environ.get("FMML_TEST_HOLDING_HOURS", "2"))
+    if onchain:
+        from web3 import Web3
+
+        from .chain.holdings import Holdings
+        from .chain.payout import PayoutEngine
+        from .runtime import ManualPriceFeed
+
+        web3 = Web3(Web3.HTTPProvider(s.base_rpc_url))
+        chain = Holdings(web3=web3, token_address=s.fmml_token_address, repo=repo)
+        payout = PayoutEngine(
+            web3=web3,
+            token_address=s.fmml_token_address,
+            hot_wallet_key=s.hot_wallet_private_key,
+            per_hunt_cap=int(s.payout_cap_fmml or 0),
+        )
+        price_feed = ManualPriceFeed(s.fmml_usd_price)
+        # Seed continuity samples for the designated winner wallet(s) so a wallet
+        # that REALLY holds the test token passes has_continuous_holding.
+        min_bal = price_feed.usd_to_fmml(s.holding_floor_usd)
+        now = datetime.now(timezone.utc)
+        winners = [w.strip() for w in os.environ.get("FMML_TEST_WINNER_WALLETS", "").split(",") if w.strip()]
+        for w in winners:
+            repo.seed_holding_sample(w, min_bal * 10, now - timedelta(minutes=30))
+            repo.seed_holding_sample(w, min_bal * 10, now)
+        print(
+            f"[live_test] ON-CHAIN mode — RPC={s.base_rpc_url} token={s.fmml_token_address} "
+            f"min_balance={min_bal} winners_seeded={winners}"
+        )
+    else:
+        chain = _AlwaysHeldHoldings()
+        payout = _TestPayout()
+        price_feed = _TestPriceFeed()
+
     orchestrator = Orchestrator(
         settings=_TestSettings(s),
         clock=SystemClock(),
@@ -198,17 +235,17 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
         clue_engine=ClueEngine(anthropic, s.anthropic_model),
         dm_source=XDMSource(x),
         validator=DMValidator(
-            chain=_AlwaysHeldHoldings(),
+            chain=chain,
             x_client=x,
             profile_lookup=x.lookup_user,
             own_handles=["FindingMemeland"],
         ),
-        payout=_TestPayout(),
-        price_feed=_TestPriceFeed(),
+        payout=payout,
+        price_feed=price_feed,
         notifier=StdoutNotifier(),
         register=s.persona_register,
         holding_floor_usd=s.holding_floor_usd,
-        holding_hours=s.holding_hours,
+        holding_hours=holding_hours,
         avatar_writer=write_temp_png,
         poll_interval_s=poll_interval_s,
         clue_due_fn=lambda now: now + timedelta(seconds=clue_interval_s),
