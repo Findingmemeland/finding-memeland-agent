@@ -62,3 +62,22 @@ def test_validator_still_rejects_wrong_code():
     dm = parse_dm("dm6", "u1", f"code WRONGONE wallet {ADDR}")
     res = v.validate(dm, _hunt())
     assert not res.won and res.outcome == "bad_code"
+
+
+def test_uniform_case_wallet_accepted_without_checksum():
+    lower = "0x" + "ab12" * 10
+    p = parse_dm("dm7", "u1", f"code AB2CD3EF wallet {lower}")
+    assert p.wallet == lower
+
+
+def test_mixed_case_wallet_with_bad_checksum_rejected():
+    try:
+        import eth_utils  # noqa: F401
+    except ImportError:
+        return  # verification needs eth_utils (present in prod via web3)
+    # Take the valid EIP-55 example and break its checksum by lowering one char.
+    good = "0x52908400098527886E0F7030069857D2E4169EE7"
+    bad = good[:-2] + good[-2:].lower()  # now mixed-case with wrong checksum
+    assert bad != bad.lower() and bad != bad.upper()
+    p = parse_dm("dm8", "u1", f"code AB2CD3EF wallet {bad}")
+    assert p.wallet is None  # typo'd address -> treated as missing -> 'malformed'

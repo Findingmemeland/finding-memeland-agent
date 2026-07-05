@@ -23,6 +23,14 @@ def _ev(ev_id, sender_id, text, minute, event_type="MessageCreate"):
     )
 
 
+_INCLUDES = {
+    "users": [
+        SimpleNamespace(id="111", username="player_one"),
+        SimpleNamespace(id=int(MAIN_ID), username="FindingMemeland"),
+    ]
+}
+
+
 class _FakeV2:
     def __init__(self, events):
         self._events = events
@@ -31,13 +39,27 @@ class _FakeV2:
         return SimpleNamespace(data=SimpleNamespace(id=int(MAIN_ID)))
 
     def get_direct_message_events(self, **_):
-        includes = {
-            "users": [
-                SimpleNamespace(id="111", username="player_one"),
-                SimpleNamespace(id=int(MAIN_ID), username="FindingMemeland"),
-            ]
-        }
-        return SimpleNamespace(data=self._events, includes=includes)
+        return SimpleNamespace(data=self._events, includes=_INCLUDES, meta={})
+
+
+class _PagedFakeV2:
+    """Two pages: newest events first, second page behind a pagination token."""
+
+    def __init__(self, pages):
+        self._pages = pages  # {None: [...], "tok1": [...]} etc.
+        self.calls = []
+
+    def get_me(self, **_):
+        return SimpleNamespace(data=SimpleNamespace(id=int(MAIN_ID)))
+
+    def get_direct_message_events(self, **kwargs):
+        token = kwargs.get("pagination_token")
+        self.calls.append(token)
+        events, next_token = self._pages[token]
+        return SimpleNamespace(
+            data=events, includes=_INCLUDES,
+            meta={"next_token": next_token} if next_token else {},
+        )
 
 
 def _client(events) -> XClient:
@@ -71,6 +93,31 @@ def test_non_message_events_skipped_and_sorted():
     ]
     out = _client(events).read_dms()
     assert [d["text"] for d in out] == ["first", "second"]
+
+
+def test_pagination_fetches_older_pages_until_marker():
+    # Viral spike: page 1 (newest) has ids 20-21, page 2 has 12-13. since_id=12
+    # => must fetch BOTH pages and return 13, 20, 21 (13 was first to arrive!).
+    pages = {
+        None: ([_ev(21, "111", "late", 5), _ev(20, "111", "later", 4)], "tok1"),
+        "tok1": ([_ev(13, "111", "early", 2), _ev(12, "111", "seen", 1)], "tok2"),
+    }
+    fake = _PagedFakeV2(pages)
+    xc = XClient(api_key="k", api_secret="s")
+    xc._client = fake
+    out = xc.read_dms(since_id="12")
+    assert [d["dm_id"] for d in out] == ["13", "20", "21"]  # ascending by time
+    assert fake.calls == [None, "tok1"]  # stopped at the marker, no 3rd page
+
+
+def test_pagination_stops_when_no_next_token():
+    pages = {None: ([_ev(20, "111", "only", 4)], None)}
+    fake = _PagedFakeV2(pages)
+    xc = XClient(api_key="k", api_secret="s")
+    xc._client = fake
+    out = xc.read_dms()
+    assert [d["dm_id"] for d in out] == ["20"]
+    assert fake.calls == [None]
 
 
 def test_empty_inbox_makes_no_get_me_call():

@@ -55,9 +55,30 @@ class ValidationResult:
     bot_reason: str | None = None
 
 
+def _normalize_wallet(raw: str) -> str | None:
+    """EIP-55 checksum validation at PARSE time (not at pay time, when it's too
+    late — the winner is already declared).
+
+    - all-lowercase / all-uppercase hex: no checksum encoded -> accept (payout's
+      to_checksum_address converts these safely).
+    - mixed-case: a checksum IS claimed -> verify it. A bad checksum means a
+      typo'd address; paying it would send the prize into the void. Reject ->
+      the DM parses as wallet-less -> the player gets the 'send your wallet
+      address' reply and can correct it without losing their claim.
+    """
+    body = raw[2:]
+    if body == body.lower() or body == body.upper():
+        return raw  # no checksum claimed; to_checksum_address converts safely
+    try:
+        from eth_utils import is_checksum_address
+    except ImportError:  # verification unavailable; pay-time conversion still guards
+        return raw
+    return raw if is_checksum_address(raw) else None
+
+
 def parse_dm(dm_id: str, sender_x_id: str, body: str, expected_code_len: int = 8) -> ParsedDM:
     wallet_match = WALLET_RE.search(body or "")
-    wallet = wallet_match.group(0) if wallet_match else None
+    wallet = _normalize_wallet(wallet_match.group(0)) if wallet_match else None
     candidates: list[str] = []
     for tok in re.findall(r"\b[A-Za-z0-9]+\b", body or ""):
         if tok.lower().startswith("0x"):

@@ -54,7 +54,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         env_token_resolver,
         write_temp_png,
     )
-    from .preflight import preflight_check
+    from .preflight import preflight_check, preflight_money
     from .social.publisher import XPublisher
     from .social.x_client import XClient
     from .telegram.approval_queue import ApprovalQueue, TelegramAdmin
@@ -78,6 +78,18 @@ def build_agent(settings: Settings | None = None) -> Agent:
     )
 
     holdings = Holdings(web3=web3, token_address=s.fmml_token_address, repo=repo)
+    price_feed = ManualPriceFeed(s.fmml_usd_price)
+    payout_engine = PayoutEngine(
+        web3=web3, token_address=s.fmml_token_address,
+        hot_wallet_key=s.hot_wallet_private_key, per_hunt_cap=int(s.payout_cap_fmml or 0),
+    )
+    hot_address = ""
+    if s.hot_wallet_private_key:
+        try:
+            hot_address = web3.eth.account.from_key(s.hot_wallet_private_key).address
+        except Exception:  # noqa: BLE001 — bad key surfaces in preflight/payout
+            pass
+
     orchestrator = Orchestrator(
         settings=s,
         clock=SystemClock(),
@@ -95,11 +107,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
             chain=holdings, x_client=x, profile_lookup=x.lookup_user,
             own_handles=["FindingMemeland"],
         ),
-        payout=PayoutEngine(
-            web3=web3, token_address=s.fmml_token_address,
-            hot_wallet_key=s.hot_wallet_private_key, per_hunt_cap=int(s.payout_cap_fmml or 0),
-        ),
-        price_feed=ManualPriceFeed(s.fmml_usd_price),
+        payout=payout_engine,
+        price_feed=price_feed,
         notifier=notifier,
         register=s.persona_register,
         holding_floor_usd=s.holding_floor_usd,
@@ -148,6 +157,14 @@ def build_agent(settings: Settings | None = None) -> Agent:
             problems = preflight_check(
                 anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
             )
+            # Money checks: RPC alive, gas in the hot wallet, tokens >= prize.
+            prize_fmml = price_feed.usd_to_fmml(prize_usd)
+            problems += preflight_money(
+                web3=web3, payout=payout_engine,
+                hot_address=hot_address, prize_fmml=prize_fmml,
+            )
+            if not hot_address:
+                problems.append("hot wallet key missing/invalid — cannot pay a winner")
         except Exception as e:  # noqa: BLE001
             problems = [f"preflight crashed: {e!r}"]
         if problems:

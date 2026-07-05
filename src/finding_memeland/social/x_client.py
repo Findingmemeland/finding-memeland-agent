@@ -25,6 +25,9 @@ from .x_text import MAX_BIO_LEN, MAX_NAME_LEN
 # How many of a user's recent tweets to scan when checking for a reshare.
 _RESHARE_SCAN = 100
 _DM_FETCH = 50
+# Pagination cap per poll: 10 pages x 50 = 500 DMs. Bounds the cost of a viral
+# spike while never silently dropping the oldest (= first-arrived) submissions.
+_DM_MAX_PAGES = 10
 
 
 def _retry_server_error(fn, *, tries: int = 3, delay: float = 4.0):
@@ -174,35 +177,53 @@ class XClient:
     def read_dms(self, *, since_id: str | None = None) -> list[dict]:
         """Inbound DM messages on the main account, ascending by time. Each item:
         {dm_id, sender_x_id, sender_handle, text, created_at}. Empty => $0.
-        Events SENT by the main account itself are filtered out."""
-        resp = self._v2().get_direct_message_events(
-            max_results=_DM_FETCH,
-            dm_event_fields=["id", "text", "created_at", "sender_id", "event_type"],
-            expansions=["sender_id"],
-            user_auth=True,
-        )
-        events = resp.data or []
-        users = {}
-        if resp.includes and resp.includes.get("users"):
-            users = {u.id: u for u in resp.includes["users"]}
-        # Only pay for the get_me lookup once, and only if there is anything to filter.
-        me = self._self_id() if events else None
+        Events SENT by the main account itself are filtered out.
+
+        PAGINATED: a viral spike can bring >50 DMs between polls; without
+        pagination the oldest — the true first-arrived submissions — would be
+        silently dropped. We keep fetching pages until we reach already-seen
+        events (since_id), run out, or hit the page cap."""
+        me: str | None = None
         out: list[dict] = []
-        for ev in events:
-            if getattr(ev, "event_type", None) != "MessageCreate":
-                continue
-            if since_id is not None and int(ev.id) <= int(since_id):
-                continue
-            if me is not None and str(getattr(ev, "sender_id", "")) == me:
-                continue  # our own outbound reply — not a submission
-            sender = users.get(getattr(ev, "sender_id", None))
-            out.append({
-                "dm_id": str(ev.id),
-                "sender_x_id": str(getattr(ev, "sender_id", "")),
-                "sender_handle": sender.username if sender else "",
-                "text": getattr(ev, "text", "") or "",
-                "created_at": ev.created_at,
-            })
+        page_token: str | None = None
+        for _ in range(_DM_MAX_PAGES):
+            kwargs = dict(
+                max_results=_DM_FETCH,
+                dm_event_fields=["id", "text", "created_at", "sender_id", "event_type"],
+                expansions=["sender_id"],
+                user_auth=True,
+            )
+            if page_token:
+                kwargs["pagination_token"] = page_token
+            resp = self._v2().get_direct_message_events(**kwargs)
+            events = resp.data or []
+            users = {}
+            if resp.includes and resp.includes.get("users"):
+                users = {u.id: u for u in resp.includes["users"]}
+            if events and me is None:
+                # Pay for the get_me lookup once, only if there's anything to filter.
+                me = self._self_id()
+            reached_seen = False
+            for ev in events:
+                if getattr(ev, "event_type", None) != "MessageCreate":
+                    continue
+                if since_id is not None and int(ev.id) <= int(since_id):
+                    reached_seen = True  # older than the marker: page limit found
+                    continue
+                if me is not None and str(getattr(ev, "sender_id", "")) == me:
+                    continue  # our own outbound reply — not a submission
+                sender = users.get(getattr(ev, "sender_id", None))
+                out.append({
+                    "dm_id": str(ev.id),
+                    "sender_x_id": str(getattr(ev, "sender_id", "")),
+                    "sender_handle": sender.username if sender else "",
+                    "text": getattr(ev, "text", "") or "",
+                    "created_at": ev.created_at,
+                })
+            meta = getattr(resp, "meta", None) or {}
+            page_token = meta.get("next_token")
+            if reached_seen or not page_token:
+                break
         out.sort(key=lambda d: d["created_at"])
         return out
 

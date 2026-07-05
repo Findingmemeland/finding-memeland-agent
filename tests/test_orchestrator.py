@@ -255,6 +255,20 @@ def test_payout_error_marks_intent_unknown():
     raise AssertionError("expected the payout error to propagate")
 
 
+def test_unclaimed_hunt_voids_at_deadline():
+    # Nobody wins: past the deadline the hunt must end publicly, not run for
+    # ~86 days posting clues. win_after_polls high enough to never trigger.
+    rig = build_simulation(win_after_polls=10_000)
+    rig.orchestrator._hunt_timeout_h = 1  # sim clock advances 4000s per round
+    hunt = rig.orchestrator.run_hunt()
+    assert hunt.state == HuntState.DONE
+    assert len(rig.payout.sent) == 0  # nobody was paid
+    blob = "\n".join(rig.publisher.posts).lower()
+    assert "unclaimed" in blob                       # public void notice
+    assert rig.dresser.retired                       # voided => undressed
+    assert any("expired unclaimed" in m for m in rig.notifier.messages)
+
+
 def test_kill_switch_pauses_and_resumes():
     rig = build_simulation()
 

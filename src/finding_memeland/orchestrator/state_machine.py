@@ -132,6 +132,7 @@ class Orchestrator:
         cleanup_window_s: int = CLEANUP_WINDOW_SECONDS,
         undress_on_retire: bool = False,
         control=None,
+        hunt_timeout_hours: float | None = 72,
     ):
         self._settings = settings
         self._clock = clock
@@ -166,6 +167,9 @@ class Orchestrator:
         # Kill switch: an object with .paused() -> bool (see runtime.HuntControl).
         # While paused the loop idles: no clues, no DM processing, no paying.
         self._control = control
+        # Unclaimed-hunt deadline: past it, the hunt is VOIDED with a public
+        # notice instead of posting clues forever. None disables.
+        self._hunt_timeout_h = hunt_timeout_hours
 
     # ------------------------------------------------------------------
     def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
@@ -173,6 +177,8 @@ class Orchestrator:
         hunt = self._prepare(prize_usd if prize_usd is not None else self._settings.prize_usd_max)
         self._go_live(hunt)
         winner = self._clue_and_dm_loop(hunt)
+        if winner is None:  # deadline passed unclaimed -> voided inside the loop
+            return hunt
         receipt = self._pay(hunt, winner)
         self._reveal(hunt, winner, receipt)
         self._retire(hunt)
@@ -316,6 +322,15 @@ class Orchestrator:
                 self._notify("▶️ hunt RESUMED by operator")
                 pause_notified = False
 
+            # ---- Phase 0b: unclaimed-hunt deadline ----
+            if (
+                self._hunt_timeout_h is not None
+                and hunt.started_at is not None
+                and self._clock.now() >= hunt.started_at + timedelta(hours=self._hunt_timeout_h)
+            ):
+                self._void_unclaimed(hunt)
+                return None
+
             # ---- Phase 1: read DMs (isolated — a failed poll is retried) ----
             try:
                 batch = sorted(self._dm_source.poll(since), key=lambda s: s.created_at)
@@ -410,6 +425,32 @@ class Orchestrator:
             self._clock.sleep(self._poll_interval_s)
 
         raise RuntimeError("hunt loop exceeded max rounds without a winner")
+
+    def _void_unclaimed(self, hunt: PreparedHunt) -> None:
+        """Nobody won before the deadline: end the hunt publicly and cleanly.
+        The persona IS undressed here (unlike a completed hunt) — leaving a live
+        claim code in the bio of a dead hunt would mislead players."""
+        hours = self._hunt_timeout_h
+        self._notify(f"hunt #{self._hunt_number} expired unclaimed after {hours}h — voiding.")
+        self._transition(hunt, HuntState.VOIDED)
+        try:
+            self._publisher.post(
+                f"Hunt #{self._hunt_number} ends unclaimed. The persona keeps its "
+                "secret and the prize returns to the treasury. Sharpen up — the "
+                "next hunt won't wait for you. 🏴"
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"void notice post failed (non-fatal): {e!r}")
+        self._transition(hunt, HuntState.RETIRING)
+        try:
+            self._dresser.retire(
+                access_token=hunt.persona.access_token,
+                access_secret=hunt.persona.access_secret,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"undress of voided persona failed: {e!r} — reset it manually.")
+        self._persona_source.mark_retired(hunt.persona.id)
+        self._transition(hunt, HuntState.DONE)
 
     def _pay(self, hunt: PreparedHunt, winner: Winner):
         """Idempotent payout. Invariant: at most ONE transfer per hunt, ever.
