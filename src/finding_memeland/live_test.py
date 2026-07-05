@@ -206,17 +206,15 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
             per_hunt_cap=int(s.payout_cap_fmml or 0),
         )
         price_feed = ManualPriceFeed(s.fmml_usd_price)
-        # Seed continuity samples for the designated winner wallet(s) so a wallet
-        # that REALLY holds the test token passes has_continuous_holding.
+        # Holding continuity is now PROVEN from Transfer logs (no seeding needed):
+        # the winner wallet must genuinely hold >= the floor for the whole window,
+        # so fund it at least FMML_TEST_HOLDING_HOURS before claiming (or set that
+        # env to something tiny, e.g. FMML_TEST_HOLDING_HOURS=1).
         min_bal = price_feed.usd_to_fmml(s.holding_floor_usd)
-        now = datetime.now(timezone.utc)
-        winners = [w.strip() for w in os.environ.get("FMML_TEST_WINNER_WALLETS", "").split(",") if w.strip()]
-        for w in winners:
-            repo.seed_holding_sample(w, min_bal * 10, now - timedelta(minutes=30))
-            repo.seed_holding_sample(w, min_bal * 10, now)
         print(
             f"[live_test] ON-CHAIN mode — RPC={s.base_rpc_url} token={s.fmml_token_address} "
-            f"min_balance={min_bal} winners_seeded={winners}"
+            f"min_balance={min_bal} holding_hours={holding_hours} "
+            "(continuity proven from Transfer logs; fund winner wallets BEFORE the window)"
         )
     else:
         chain = _AlwaysHeldHoldings()
