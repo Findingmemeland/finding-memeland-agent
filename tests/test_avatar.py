@@ -55,14 +55,13 @@ def test_generate_banner_uses_banner_suffix_and_wide_size():
     assert client.last_size == BANNER_SIZE
 
 
-def test_generate_png_raises_without_b64():
+def test_generate_png_returns_empty_bytes_without_b64():
+    # Best-effort by design (2026-06-30): if the image API returns nothing even
+    # after the neutral fallback prompt, we skip the image (b"") instead of
+    # raising — an avatar failure must never abort a hunt.
     client = _FakeClient(None)
     gen = AvatarGenerator(client)
-    try:
-        gen.generate_png("x")
-    except RuntimeError:
-        return
-    raise AssertionError("expected RuntimeError when no b64_json returned")
+    assert gen.generate_png("x") == b""
 
 
 def test_save_png_roundtrip():

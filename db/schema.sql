@@ -192,3 +192,10 @@ create table approval_queue (
   decided_at    timestamptz,
   created_at    timestamptz not null default now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-07-05 — crash resume (P3)
+-- Full identity applied to the persona, so a restarted agent can rebuild the
+-- clue context and RESUME a live hunt instead of orphaning it.
+-- Run on existing databases:
+alter table hunts add column if not exists persona_identity jsonb;

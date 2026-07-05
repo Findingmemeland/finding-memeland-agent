@@ -19,8 +19,9 @@ when the live DM listener lands (step 26).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
 
 from ..content.clue_engine import PersonaContext, next_clue_due
@@ -168,11 +169,11 @@ class Orchestrator:
         return hunt
 
     # ------------------------------------------------------------------
-    def _transition(self, hunt: PreparedHunt, dst: HuntState) -> None:
+    def _transition(self, hunt: PreparedHunt, dst: HuntState, **fields) -> None:
         if not can_transition(hunt.state, dst):
             raise RuntimeError(f"illegal transition {hunt.state} -> {dst}")
         hunt.state = dst
-        self._repo.set_hunt_state(hunt.id, dst.value)
+        self._repo.set_hunt_state(hunt.id, dst.value, **fields)
 
     def _notify(self, text: str) -> None:
         self._notifier.notify(text)
@@ -207,8 +208,11 @@ class Orchestrator:
             banner_path=banner_path,
         )
 
-        hunt_id = self._repo.create_hunt(
+        started_at = self._clock.now()
+        base_fields = dict(
             persona_id=persona.id,
+            persona_display_name=identity.display_name,
+            persona_bio=identity.bio,
             claim_code=claim_code,
             integrity_salt=salt,
             integrity_hash=integrity_hash,
@@ -216,8 +220,23 @@ class Orchestrator:
             prize_fmml=prize_fmml,
             min_balance_fmml=min_balance_fmml,
             holding_hours=self._holding_hours,
+            started_at=started_at,
             state=HuntState.PREPARING.value,
         )
+        try:
+            # persona_identity (jsonb) is what makes a full crash-resume possible:
+            # it lets a restarted agent rebuild the clue context. Column added in
+            # schema.sql — if the live DB predates it, fall back gracefully.
+            hunt_id = self._repo.create_hunt(
+                **base_fields, persona_identity=asdict(identity)
+            )
+        except Exception:  # noqa: BLE001 — e.g. column missing on an older DB
+            hunt_id = self._repo.create_hunt(**base_fields)
+            self._notify(
+                "hunts.persona_identity missing in the DB — this hunt can only be "
+                "resumed in degraded mode after a restart. Run: alter table hunts "
+                "add column if not exists persona_identity jsonb;"
+            )
         hunt = PreparedHunt(
             id=hunt_id,
             persona=persona,
@@ -231,7 +250,7 @@ class Orchestrator:
             min_balance_fmml=min_balance_fmml,
             holding_hours=self._holding_hours,
             state=HuntState.PREPARING,
-            started_at=self._clock.now(),
+            started_at=started_at,
         )
         self._notify(f"hunt #{self._hunt_number}: persona {persona.handle} dressed, preparing")
         return hunt
@@ -250,32 +269,81 @@ class Orchestrator:
         self._repo.record_clue(
             hunt_id=hunt.id, clue_index=1, clue_text=draft.text, tweet_id=tweet_id
         )
-        self._transition(hunt, HuntState.LIVE)
+        # reshare_post_id persisted so a restarted agent keeps the SAME gate.
+        self._transition(hunt, HuntState.LIVE, reshare_post_id=tweet_id)
         self._notify(f"hunt #{self._hunt_number} LIVE — clue 1 posted ({tweet_id})")
 
-    def _clue_and_dm_loop(self, hunt: PreparedHunt) -> Winner:
-        since: str | None = None
-        clue_index = 1
+    # A submission whose processing keeps erroring (X lookup down, DB hiccup) is
+    # retried this many times before being skipped, so one poisoned DM can never
+    # stall the queue forever.
+    _MAX_SUBMISSION_RETRIES = 3
+
+    def _clue_and_dm_loop(
+        self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
+    ) -> Winner:
+        """The live loop. DESIGN RULE: once a hunt is LIVE, people are playing —
+        NOTHING transient (X 429/5xx, network, RPC, DB hiccup, bad LLM output)
+        may kill this loop. Every phase is isolated: a failure is notified,
+        backed off, and retried; only the winner path exits.
+
+        `since`/`clue_index` allow a crash-resumed hunt to re-enter the loop
+        exactly where it stopped (see resume_hunts)."""
+        clue_index = clue_index if clue_index is not None else max(1, len(hunt.clues))
         next_due = self._clue_due_fn(self._clock.now())
+        poll_failures = 0
+        sub_retries: dict[str, int] = {}
 
         for _ in range(self._max_rounds):
-            for sub in sorted(self._dm_source.poll(since), key=lambda s: s.created_at):
-                since = sub.dm_id  # advance the marker even for skipped DMs
+            # ---- Phase 1: read DMs (isolated — a failed poll is retried) ----
+            try:
+                batch = sorted(self._dm_source.poll(since), key=lambda s: s.created_at)
+                poll_failures = 0
+            except Exception as e:  # noqa: BLE001
+                batch = []
+                poll_failures += 1
+                self._notify(
+                    f"DM poll failed ({poll_failures}x, retrying): {e!r}"
+                )
+                # extra backoff on top of the normal sleep, capped at 5 min
+                self._clock.sleep(min(300, self._poll_interval_s * min(poll_failures, 4)))
+
+            # ---- Phase 2: process submissions (isolated per submission) ----
+            for sub in batch:
                 # Ignore DMs from BEFORE this hunt started (old conversations are
                 # not submissions). Without this the agent would re-process every
                 # historical DM each hunt — spamming past contacts with the canned
                 # reply and burning API credits.
                 if hunt.started_at is not None and sub.created_at < hunt.started_at:
+                    since = sub.dm_id
                     continue
-                parsed = parse_dm(
-                    sub.dm_id, sub.sender_x_id, sub.body,
-                    expected_code_len=len(hunt.claim_code),
-                )
-                res = self._validator.validate(parsed, hunt)
-                self._repo.log_submission(
-                    hunt_id=hunt.id, dm_id=sub.dm_id, sender_x_id=sub.sender_x_id,
-                    wallet=parsed.wallet, outcome=res.outcome, x_created_at=sub.created_at,
-                )
+                try:
+                    parsed = parse_dm(
+                        sub.dm_id, sub.sender_x_id, sub.body,
+                        expected_code_len=len(hunt.claim_code),
+                    )
+                    res = self._validator.validate(parsed, hunt)
+                    self._repo.log_submission(
+                        hunt_id=hunt.id, dm_id=sub.dm_id, sender_x_id=sub.sender_x_id,
+                        wallet=parsed.wallet, outcome=res.outcome, x_created_at=sub.created_at,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    tries = sub_retries.get(sub.dm_id, 0) + 1
+                    sub_retries[sub.dm_id] = tries
+                    if tries < self._MAX_SUBMISSION_RETRIES:
+                        # Do NOT advance the marker: this DM is re-read and
+                        # retried on the next poll, preserving arrival order.
+                        self._notify(
+                            f"submission {sub.dm_id} failed (attempt {tries}, "
+                            f"will retry): {e!r}"
+                        )
+                        break
+                    since = sub.dm_id  # give up on this one; don't stall the queue
+                    self._notify(
+                        f"submission {sub.dm_id} SKIPPED after "
+                        f"{tries} failed attempts: {e!r} — review it manually."
+                    )
+                    continue
+                since = sub.dm_id
                 if res.won:
                     self._transition(hunt, HuntState.RESOLVING)
                     self._notify(f"winner: @{sub.sender_handle}")
@@ -290,17 +358,31 @@ class Orchestrator:
                     except Exception as e:  # noqa: BLE001
                         self._notify(f"reply to @{sub.sender_handle} failed (non-fatal): {e!r}")
 
+            # ---- Phase 3: post the next clue (isolated — a failed clue is a
+            # skipped round, never a dead hunt) ----
             if self._clock.now() >= next_due:
                 clue_index += 1
-                draft = self._clue_engine.next_clue(hunt.ctx, clue_index, hunt.clues)
-                tweet_id = self._publisher.post(
-                    clue_followup(clue_index, draft.text, draft.taunt or "")
-                )
-                hunt.clues.append(draft.text)
-                self._repo.record_clue(
-                    hunt_id=hunt.id, clue_index=clue_index,
-                    clue_text=draft.text, tweet_id=tweet_id,
-                )
+                try:
+                    draft = self._clue_engine.next_clue(hunt.ctx, clue_index, hunt.clues)
+                    tweet_id = self._publisher.post(
+                        clue_followup(clue_index, draft.text, draft.taunt or "")
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # Guardrails exhausted, X post failed, LLM down — skip this
+                    # round, alert the operator, try again next window.
+                    clue_index -= 1
+                    self._notify(f"clue generation failed (skipping this round): {e}")
+                else:
+                    # The clue IS on X now — bookkeeping failures must not make
+                    # us repeat it. Record best-effort.
+                    hunt.clues.append(draft.text)
+                    try:
+                        self._repo.record_clue(
+                            hunt_id=hunt.id, clue_index=clue_index,
+                            clue_text=draft.text, tweet_id=tweet_id,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"record_clue failed (non-fatal): {e!r}")
                 next_due = self._clue_due_fn(self._clock.now())
 
             self._clock.sleep(self._poll_interval_s)
@@ -324,7 +406,11 @@ class Orchestrator:
         return receipt
 
     def _reveal(self, hunt: PreparedHunt, winner: Winner, receipt) -> None:
-        self._transition(hunt, HuntState.PENDING_CLEANUP)
+        now = self._clock.now()
+        self._transition(
+            hunt, HuntState.PENDING_CLEANUP,
+            resolved_at=now, cleanup_due_at=now + timedelta(seconds=self._cleanup_window_s),
+        )
         elapsed = self._clock.now() - hunt.started_at if hunt.started_at else None
         data = WinnerData(
             hunt_n=self._hunt_number,
@@ -342,6 +428,11 @@ class Orchestrator:
 
     def _retire(self, hunt: PreparedHunt) -> None:
         self._transition(hunt, HuntState.RETIRING)
+        self._finish_retire(hunt)
+
+    def _finish_retire(self, hunt: PreparedHunt) -> None:
+        """The RETIRING -> DONE tail. Split out so a crash-resumed hunt that was
+        already mid-retire can finish without an illegal re-transition."""
         self._dresser.retire(
             access_token=hunt.persona.access_token,
             access_secret=hunt.persona.access_secret,
@@ -353,6 +444,166 @@ class Orchestrator:
         )
         self._transition(hunt, HuntState.DONE)
         self._notify(f"hunt #{self._hunt_number} done; persona {hunt.persona.handle} retired")
+
+    # ------------------------------------------------------------------
+    # Crash recovery — called once at boot (main.py). Finds hunts the previous
+    # process left in a non-terminal state and picks each one up where it
+    # stopped. Money-adjacent states (RESOLVING/PAYING) are NEVER auto-resumed:
+    # without payout idempotency, a blind retry could double-pay.
+    # ------------------------------------------------------------------
+    def resume_hunts(self) -> int:
+        try:
+            rows = self._repo.active_hunts()
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"resume check failed (continuing idle): {e!r}")
+            return 0
+        if not rows:
+            return 0
+        resumed = 0
+        for row in rows:
+            try:
+                self._resume_one(row)
+                resumed += 1
+            except Exception as e:  # noqa: BLE001
+                self._notify(
+                    f"🚨 could not resume hunt #{row.get('id')} "
+                    f"(state {row.get('state')}): {e!r} — intervene manually: the "
+                    "persona may still be dressed with a live claim code."
+                )
+        return resumed
+
+    def _resume_one(self, row: dict) -> None:
+        state = HuntState(row["state"])
+        hunt = self._rebuild_hunt(row, state)
+
+        if state is HuntState.PREPARING:
+            # Never went LIVE (no players yet). Cheapest safe move: void it and
+            # undress the persona; a fresh /launch starts clean.
+            self._notify(f"hunt #{hunt.id} was stuck in PREPARING — voiding it.")
+            self._transition(hunt, HuntState.VOIDED)
+            self._transition(hunt, HuntState.RETIRING)
+            try:
+                self._dresser.retire(
+                    access_token=hunt.persona.access_token,
+                    access_secret=hunt.persona.access_secret,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._notify(f"retire of voided persona failed: {e!r} — undress it manually.")
+            self._persona_source.mark_retired(hunt.persona.id)
+            self._transition(hunt, HuntState.DONE)
+            return
+
+        if state is HuntState.LIVE:
+            won_rows = [
+                s for s in self._repo.submissions_for_hunt(hunt.id)
+                if s.get("outcome") == "won"
+            ]
+            if won_rows:
+                # Winner was validated but the process died before RESOLVING.
+                # Money territory — human eyes required.
+                self._notify(
+                    f"🚨 hunt #{hunt.id} already has a WON submission "
+                    f"(dm {won_rows[0].get('dm_id')}) but died before paying. "
+                    "NOT auto-paying — verify and settle manually."
+                )
+                return
+            since = self._latest_dm_marker(hunt.id)
+            if hunt.ctx is None:
+                self._notify(
+                    f"hunt #{hunt.id} resumed WITHOUT persona identity (old DB "
+                    "schema): DMs and the winner flow work, but no further clues "
+                    "can be generated."
+                )
+            self._notify(
+                f"hunt #{hunt.id} RESUMED live after a restart — "
+                f"{len(hunt.clues)} clues out, DM marker {since or 'start'}."
+            )
+            winner = self._clue_and_dm_loop(hunt, since=since)
+            receipt = self._pay(hunt, winner)
+            self._reveal(hunt, winner, receipt)
+            self._retire(hunt)
+            return
+
+        if state in (HuntState.RESOLVING, HuntState.PAYING):
+            self._notify(
+                f"🚨 hunt #{hunt.id} died in {state.value.upper()} — a payout may "
+                "or may not have gone out. NOT auto-resuming: check the payouts "
+                "table and the chain, then settle manually."
+            )
+            return
+
+        if state is HuntState.PENDING_CLEANUP:
+            # Winner paid & announced; only the reveal window + retire remain.
+            due = _as_dt(row.get("cleanup_due_at"))
+            now = self._clock.now()
+            if due is not None and due > now:
+                self._clock.sleep((due - now).total_seconds())
+            self._notify(f"hunt #{hunt.id} resumed at cleanup — retiring the persona.")
+            self._retire(hunt)
+            return
+
+        if state is HuntState.RETIRING:
+            self._notify(f"hunt #{hunt.id} resumed mid-retire — finishing.")
+            self._finish_retire(hunt)
+            return
+
+    def _rebuild_hunt(self, row: dict, state: HuntState) -> PreparedHunt:
+        persona = self._persona_source.acquire_by_id(row["persona_id"])
+
+        identity = None
+        ctx = None
+        payload = row.get("persona_identity")
+        if payload:
+            from ..persona.generator import GeneratedPersona
+
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            identity = GeneratedPersona(**payload)
+            ctx = PersonaContext.from_generated(identity, persona.handle)
+
+        clue_rows = self._repo.clues_for_hunt(row["id"])
+        reshare = row.get("reshare_post_id") or next(
+            (c.get("tweet_id") for c in clue_rows if c.get("clue_index") == 1), None
+        )
+        return PreparedHunt(
+            id=row["id"],
+            persona=persona,
+            identity=identity,
+            ctx=ctx,
+            claim_code=row["claim_code"],
+            salt=row["integrity_salt"],
+            integrity_hash=row["integrity_hash"],
+            prize_usd=float(row.get("prize_usd") or 0),
+            prize_fmml=_as_int(row.get("prize_fmml")),
+            min_balance_fmml=_as_int(row.get("min_balance_fmml")),
+            holding_hours=int(row.get("holding_hours") or self._holding_hours),
+            reshare_post_id=reshare,
+            clues=[c["clue_text"] for c in clue_rows],
+            state=state,
+            started_at=_as_dt(row.get("started_at")),
+        )
+
+    def _latest_dm_marker(self, hunt_id: int) -> str | None:
+        """Highest processed dm_id from the submission log = where to resume the
+        DM stream. DMs read-but-not-logged before the crash are simply re-read."""
+        ids = [
+            int(s["dm_id"]) for s in self._repo.submissions_for_hunt(hunt_id)
+            if s.get("dm_id") and str(s["dm_id"]).isdigit()
+        ]
+        return str(max(ids)) if ids else None
+
+
+def _as_dt(v) -> datetime | None:
+    """Rows from Supabase carry ISO strings; fakes carry datetimes."""
+    if v is None or isinstance(v, datetime):
+        return v
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+
+
+def _as_int(v) -> int:
+    if v is None:
+        return 0
+    return int(float(v))
 
 
 def _fmt_duration(delta) -> str:

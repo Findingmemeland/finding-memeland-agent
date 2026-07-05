@@ -49,6 +49,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         ManualPriceFeed,
         StdoutNotifier,
         SystemClock,
+        TelegramNotifier,
         env_token_resolver,
         write_temp_png,
     )
@@ -56,6 +57,14 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .social.publisher import XPublisher
     from .social.x_client import XClient
     from .telegram.approval_queue import ApprovalQueue, TelegramAdmin
+
+    # Hunt events (LIVE, winner, errors) go to the admin's Telegram, not stdout —
+    # an autonomous agent that moves money must never run blind.
+    notifier = (
+        TelegramNotifier(s.telegram_bot_token, s.telegram_admin_chat_id)
+        if s.telegram_bot_token and s.telegram_admin_chat_id
+        else StdoutNotifier()
+    )
 
     anthropic = Anthropic(api_key=s.anthropic_api_key)
     openai = OpenAI(api_key=s.openai_api_key, max_retries=4, timeout=120.0)
@@ -89,7 +98,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             hot_wallet_key=s.hot_wallet_private_key, per_hunt_cap=int(s.payout_cap_fmml or 0),
         ),
         price_feed=ManualPriceFeed(s.fmml_usd_price),
-        notifier=StdoutNotifier(),
+        notifier=notifier,
         register=s.persona_register,
         holding_floor_usd=s.holding_floor_usd,
         holding_hours=s.holding_hours,
@@ -129,7 +138,23 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 + "\n".join(f"• {p}" for p in problems)
                 + "\nCheck the keys/billing (and enable auto-recharge), then try again."
             )
-        threading.Thread(target=lambda: orchestrator.run_hunt(prize_usd=prize_usd), daemon=True).start()
+        def _run_hunt():
+            # Last line of defence: the loop itself survives transient errors,
+            # but if anything DOES escape (bug, unrecoverable failure), the
+            # operator must hear about it on Telegram — never a silent death.
+            try:
+                orchestrator.run_hunt(prize_usd=prize_usd)
+            except Exception as e:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                notifier.notify(
+                    f"🚨 HUNT DIED with an unhandled error: {e!r}. "
+                    "The persona may still be dressed and players may be mid-game — "
+                    "intervene NOW (check the persona profile and pending DMs)."
+                )
+
+        threading.Thread(target=_run_hunt, daemon=True).start()
         return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 
     actions = {
@@ -150,6 +175,12 @@ def main() -> None:
     agent = build_agent(s)
     token_ready = bool(s.fmml_token_address and s.fmml_usd_price > 0)
     print(f"[finding-memeland] agent built (env={s.fmml_env}). hunt-ready: {token_ready}")
+
+    # Crash recovery: if the previous process died mid-hunt, pick it back up
+    # (LIVE hunts continue; money-adjacent states alert for manual settling).
+    import threading
+
+    threading.Thread(target=agent.orchestrator.resume_hunts, daemon=True).start()
 
     if s.telegram_bot_token and s.telegram_admin_chat_id:
         print("  starting Telegram admin loop — send /status or /launch from the admin chat.")

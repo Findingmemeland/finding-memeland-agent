@@ -18,15 +18,17 @@ class _Resp:
 
 
 class _FakeAnthropic:
-    """Returns queued responses in order; records calls."""
+    """Returns queued responses in order; records calls + last user message."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.last_user_msg = ""
         self.messages = self
 
     def create(self, **kwargs):  # noqa: D401
         self.calls += 1
+        self.last_user_msg = kwargs.get("messages", [{}])[0].get("content", "")
         return _Resp(self._responses.pop(0))
 
 
@@ -67,6 +69,19 @@ def test_next_clue_retries_when_solution_leaks():
     d = eng.next_clue(PERSONA, clue_index=3, prior_clues=[])
     assert fake.calls == 2          # retried past the leaky one
     assert "Neptune" not in d.text
+
+
+def test_retry_prompt_carries_rejection_feedback():
+    # Live-test crash of 2026-07-05: the model repeated the same forbidden word
+    # 4x because it was never told WHY the attempt was rejected. The retry
+    # prompt must now include the guardrail reasons + the rejected text.
+    leaky = '{"clue": "it is obviously Neptune", "taunt": "lol"}'
+    clean = '{"clue": "found a world without looking up", "taunt": "too slow"}'
+    fake = _FakeAnthropic([leaky, clean])
+    eng = ClueEngine(fake, "model-x")
+    eng.next_clue(PERSONA, clue_index=3, prior_clues=[])
+    assert "REJECTED" in fake.last_user_msg
+    assert "Neptune" in fake.last_user_msg  # names the flagged word to avoid
 
 
 def test_next_clue_gives_up_after_max_attempts():

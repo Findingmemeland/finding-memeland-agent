@@ -66,6 +66,7 @@ class XClient:
         self._main_token = main_access_token
         self._main_secret = main_access_secret
         self._client: tweepy.Client | None = None
+        self._self_user_id: str | None = None  # main account id, cached lazily
         if main_access_token and main_access_secret:
             self._client = tweepy.Client(
                 consumer_key=api_key,
@@ -160,9 +161,20 @@ class XClient:
     # ------------------------------------------------------------------
     # v2 — main-account operations
     # ------------------------------------------------------------------
+    def _self_id(self) -> str:
+        """The main account's own user id, fetched once and cached. Used to drop
+        our own sent DMs from read_dms — the v2 dm_events endpoint returns BOTH
+        directions, and without this filter every canned reply we send comes back
+        on the next poll as a fake 'submission' (self-DM echo loop)."""
+        if self._self_user_id is None:
+            resp = self._v2().get_me(user_auth=True)
+            self._self_user_id = str(resp.data.id)
+        return self._self_user_id
+
     def read_dms(self, *, since_id: str | None = None) -> list[dict]:
         """Inbound DM messages on the main account, ascending by time. Each item:
-        {dm_id, sender_x_id, sender_handle, text, created_at}. Empty => $0."""
+        {dm_id, sender_x_id, sender_handle, text, created_at}. Empty => $0.
+        Events SENT by the main account itself are filtered out."""
         resp = self._v2().get_direct_message_events(
             max_results=_DM_FETCH,
             dm_event_fields=["id", "text", "created_at", "sender_id", "event_type"],
@@ -173,12 +185,16 @@ class XClient:
         users = {}
         if resp.includes and resp.includes.get("users"):
             users = {u.id: u for u in resp.includes["users"]}
+        # Only pay for the get_me lookup once, and only if there is anything to filter.
+        me = self._self_id() if events else None
         out: list[dict] = []
         for ev in events:
             if getattr(ev, "event_type", None) != "MessageCreate":
                 continue
             if since_id is not None and int(ev.id) <= int(since_id):
                 continue
+            if me is not None and str(getattr(ev, "sender_id", "")) == me:
+                continue  # our own outbound reply — not a submission
             sender = users.get(getattr(ev, "sender_id", None))
             out.append({
                 "dm_id": str(ev.id),

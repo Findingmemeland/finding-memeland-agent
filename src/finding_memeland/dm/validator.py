@@ -37,6 +37,11 @@ class ParsedDM:
     sender_x_id: str
     wallet: str | None
     claim_code: str | None
+    # ALL tokens of the expected length found in the body (uppercased, deduped,
+    # in order). The validator accepts if ANY of them matches the hunt's code —
+    # otherwise an innocent 8-letter word ("personal", "treasure") before the
+    # real code would shadow it and unfairly reject a legitimate winner.
+    claim_candidates: tuple[str, ...] = ()
 
 
 @dataclass
@@ -53,14 +58,19 @@ class ValidationResult:
 def parse_dm(dm_id: str, sender_x_id: str, body: str, expected_code_len: int = 8) -> ParsedDM:
     wallet_match = WALLET_RE.search(body or "")
     wallet = wallet_match.group(0) if wallet_match else None
-    code = None
+    candidates: list[str] = []
     for tok in re.findall(r"\b[A-Za-z0-9]+\b", body or ""):
         if tok.lower().startswith("0x"):
             continue
         if len(tok) == expected_code_len:
-            code = tok.upper()
-            break
-    return ParsedDM(dm_id=dm_id, sender_x_id=sender_x_id, wallet=wallet, claim_code=code)
+            up = tok.upper()
+            if up not in candidates:
+                candidates.append(up)
+    code = candidates[0] if candidates else None
+    return ParsedDM(
+        dm_id=dm_id, sender_x_id=sender_x_id, wallet=wallet,
+        claim_code=code, claim_candidates=tuple(candidates),
+    )
 
 
 def screen_bot(
@@ -109,8 +119,12 @@ class DMValidator:
         if not dm.wallet:
             return ValidationResult(False, "malformed")
 
-        # 1. Claim code (free).
-        if not dm.claim_code or dm.claim_code != hunt.claim_code:
+        # 1. Claim code (free). Accept if ANY extracted candidate matches, so an
+        # unrelated 8-char word earlier in the message can't shadow the real code.
+        candidates = dm.claim_candidates or (
+            (dm.claim_code,) if dm.claim_code else ()
+        )
+        if hunt.claim_code not in candidates:
             return ValidationResult(False, "bad_code")
 
         # 2. Holding floor + continuity (free, our RPC).

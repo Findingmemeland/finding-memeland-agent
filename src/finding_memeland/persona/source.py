@@ -82,6 +82,21 @@ class DBPersonaSource:
             access_secret=secret,
         )
 
+    def acquire_by_id(self, persona_id: str) -> ReadyPersona:
+        """Reload a SPECIFIC persona (crash resume): it is already in_play, so no
+        readiness gate and no state change — just row + tokens."""
+        row = self._repo.get_persona(persona_id)
+        if not row:
+            raise RuntimeError(f"persona {persona_id!r} not found — cannot resume")
+        token, secret = self._resolve(row["oauth_ref"])
+        return ReadyPersona(
+            id=row["id"],
+            handle=row["handle"],
+            x_user_id=row["x_user_id"],
+            access_token=token,
+            access_secret=secret,
+        )
+
     def mark_retired(self, persona_id: str) -> None:
         delete_after = (self._now() + timedelta(days=DELETE_AFTER_DAYS)).isoformat()
         self._repo.set_persona_state(persona_id, "retired", delete_after=delete_after)

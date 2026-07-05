@@ -238,17 +238,27 @@ class ClueEngine:
         self._model = model
 
     def generate(
-        self, persona: PersonaContext, clue_index: int, prior_clues: list[str]
+        self,
+        persona: PersonaContext,
+        clue_index: int,
+        prior_clues: list[str],
+        *,
+        feedback: str | None = None,
     ) -> ClueDraft:
-        """One LLM call -> a clue (and a taunt for clues 2+). Not yet validated."""
+        """One LLM call -> a clue (and a taunt for clues 2+). Not yet validated.
+        `feedback` carries the previous attempt's guardrail rejection so the
+        model knows exactly what to avoid on regeneration."""
         system = SYSTEM_PROMPT.format(
             index=clue_index, obliqueness=obliqueness_for(clue_index)
         )
+        user = _build_user_message(persona, clue_index, prior_clues)
+        if feedback:
+            user += "\n\n" + feedback
         resp = self._client.messages.create(
             model=self._model,
             max_tokens=512,
             system=system,
-            messages=[{"role": "user", "content": _build_user_message(persona, clue_index, prior_clues)}],
+            messages=[{"role": "user", "content": user}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         return _parse_clue(text)
@@ -267,8 +277,9 @@ class ClueEngine:
         the orchestrator should pause and alert rather than post a bad clue.
         """
         last_reasons: list[str] = []
+        feedback: str | None = None
         for _ in range(max_attempts):
-            draft = self.generate(persona, clue_index, prior_clues)
+            draft = self.generate(persona, clue_index, prior_clues, feedback=feedback)
             result = check_clue(
                 draft.text,
                 clue_index=clue_index,
@@ -280,6 +291,14 @@ class ClueEngine:
             if result.ok:
                 return draft
             last_reasons = result.reasons
+            feedback = (
+                "Your previous attempt was REJECTED by the guardrails: "
+                + "; ".join(result.reasons)
+                + f". It was: {draft.text!r}. Write a COMPLETELY NEW clue that "
+                "never contains the flagged word(s) themselves — point at them "
+                "purely by inference (imagery, etymology, association, wordplay). "
+                "The player must deduce the word; you must never write it."
+            )
         raise RuntimeError(
             f"clue #{clue_index} failed guardrails after {max_attempts} attempts: {last_reasons}"
         )

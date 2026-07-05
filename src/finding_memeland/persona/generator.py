@@ -199,6 +199,12 @@ def _to_persona(data: dict) -> GeneratedPersona:
     )
 
 
+# LLM output sometimes fails validation (e.g. findable_post leaking a solution
+# term). Regenerate up to this many times before giving up — same pattern as the
+# Clue Engine's guardrail retries.
+_MAX_GENERATE_ATTEMPTS = 3
+
+
 class PersonaGenerator:
     def __init__(self, anthropic_client, model: str):
         self._client = anthropic_client
@@ -229,14 +235,31 @@ class PersonaGenerator:
         if avoid_recent:
             user_msg += "\n\nAvoid repeating these recent themes: " + "; ".join(avoid_recent)
 
-        resp = self._client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
+        msg = user_msg
+        last_err: ValueError | None = None
+        for _ in range(_MAX_GENERATE_ATTEMPTS):
+            resp = self._client.messages.create(
+                model=self._model,
+                max_tokens=1024,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": msg}],
+            )
+            text = "".join(
+                block.text for block in resp.content if getattr(block, "type", "") == "text"
+            )
+            try:
+                return _to_persona(_extract_json(text))
+            except ValueError as e:
+                last_err = e
+                msg = user_msg + (
+                    f"\n\nYour previous attempt was REJECTED: {e}. Generate a fresh "
+                    "persona that fixes this. Remember: the findable_post must not "
+                    "contain any solution_terms (it locates the account, it must "
+                    "never reveal the answer)."
+                )
+        raise ValueError(
+            f"persona generation failed after {_MAX_GENERATE_ATTEMPTS} attempts: {last_err}"
         )
-        text = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
-        return _to_persona(_extract_json(text))
 
     # Avatar generation lives in persona/avatar.py (AvatarGenerator, OpenAI
     # gpt-image). It consumes GeneratedPersona.avatar_prompt.

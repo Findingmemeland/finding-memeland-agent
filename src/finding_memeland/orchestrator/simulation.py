@@ -73,12 +73,22 @@ class FakeRepo:
     def create_hunt(self, **fields) -> int:
         hid = self._next_id
         self._next_id += 1
-        self.hunts[hid] = dict(fields)
+        row = dict(fields)
+        row["id"] = hid
+        self.hunts[hid] = row
         return hid
 
     def set_hunt_state(self, hunt_id, state, **fields) -> None:
         self.hunts[hunt_id]["state"] = state
         self.hunts[hunt_id].update(fields)
+
+    def active_hunts(self) -> list[dict]:
+        active = {"preparing", "live", "resolving", "paying", "pending_cleanup", "retiring"}
+        return [dict(r) for r in self.hunts.values() if r.get("state") in active]
+
+    def clues_for_hunt(self, hunt_id) -> list[dict]:
+        rows = [c for c in self.clues if c.get("hunt_id") == hunt_id]
+        return sorted(rows, key=lambda c: c.get("clue_index", 0))
 
     def record_clue(self, **fields) -> None:
         self.clues.append(dict(fields))
@@ -106,6 +116,12 @@ class FakePersonaSource:
     def acquire_ready(self) -> ReadyPersona:
         return ReadyPersona(
             id="persona-1", handle="@sample_persona", x_user_id="100200300",
+            access_token="tok", access_secret="sec",
+        )
+
+    def acquire_by_id(self, persona_id: str) -> ReadyPersona:
+        return ReadyPersona(
+            id=persona_id, handle="@sample_persona", x_user_id="100200300",
             access_token="tok", access_secret="sec",
         )
 
@@ -184,7 +200,10 @@ class FakeValidator:
     def validate(self, parsed, hunt) -> ValidationResult:
         if not parsed.wallet:
             return ValidationResult(False, "malformed")
-        if not parsed.claim_code or parsed.claim_code != hunt.claim_code:
+        candidates = getattr(parsed, "claim_candidates", ()) or (
+            (parsed.claim_code,) if parsed.claim_code else ()
+        )
+        if hunt.claim_code not in candidates:
             return ValidationResult(False, "bad_code", check_code=False)
         return ValidationResult(
             True, "won", check_code=True, check_holding=True,
@@ -267,14 +286,17 @@ def build_simulation(
     *,
     persona_generator=None,
     clue_engine=None,
+    repo=None,
     win_after_polls: int = 3,
     poll_interval_s: int = 4000,
     register: str = "medium",
     hunt_number: int = 1,
     verbose: bool = False,
 ) -> SimRig:
+    """`repo` may be passed in to share state across two rigs — that's how the
+    crash-resume tests simulate a process restart."""
     clock = FakeClock()
-    repo = FakeRepo()
+    repo = repo or FakeRepo()
     publisher = FakePublisher(verbose=verbose)
     dresser = FakeDresser()
     persona_source = FakePersonaSource()

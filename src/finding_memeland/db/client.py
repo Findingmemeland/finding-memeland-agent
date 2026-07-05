@@ -41,9 +41,26 @@ class Repo:
             "id", hunt_id
         ).execute()
 
+    def active_hunts(self) -> list[dict[str, Any]]:
+        """Hunts a dead process left in a non-terminal state (crash resume)."""
+        resp = (
+            self._db.table("hunts").select("*")
+            .in_("state", ["preparing", "live", "resolving", "paying",
+                           "pending_cleanup", "retiring"])
+            .execute()
+        )
+        return resp.data or []
+
     # --- clues ---
     def record_clue(self, **fields: Any) -> None:
         self._db.table("clues_history").insert(_clean(fields)).execute()
+
+    def clues_for_hunt(self, hunt_id: int) -> list[dict[str, Any]]:
+        resp = (
+            self._db.table("clues_history").select("*").eq("hunt_id", hunt_id)
+            .order("clue_index").execute()
+        )
+        return resp.data or []
 
     # --- submissions (public audit log) ---
     def log_submission(self, **fields: Any) -> None:
@@ -83,6 +100,11 @@ class Repo:
             self._db.table("personas").select("*").eq("state", "ready")
             .order("ready_at").limit(1).execute()
         )
+        rows = resp.data or []
+        return rows[0] if rows else None
+
+    def get_persona(self, persona_id: str) -> dict[str, Any] | None:
+        resp = self._db.table("personas").select("*").eq("id", persona_id).execute()
         rows = resp.data or []
         return rows[0] if rows else None
 

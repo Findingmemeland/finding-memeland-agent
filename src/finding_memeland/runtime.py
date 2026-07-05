@@ -70,6 +70,32 @@ class StdoutNotifier:
         print(f"[notify] {text}")
 
 
+class TelegramNotifier:
+    """Production Notifier: pushes hunt events (LIVE, winner, errors) to the
+    admin's Telegram chat via the Bot API. Best-effort BY DESIGN — a notify
+    failure must never break the hunt, so it falls back to stdout and never
+    raises. Uses plain HTTP (httpx) rather than the python-telegram-bot app,
+    which is busy running the command loop in another thread."""
+
+    def __init__(self, bot_token: str, chat_id: str, *, timeout_s: float = 10.0):
+        self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self._chat_id = chat_id
+        self._timeout = timeout_s
+
+    def notify(self, text: str) -> None:
+        print(f"[notify] {text}")  # always keep the local trail
+        try:
+            import httpx
+
+            httpx.post(
+                self._url,
+                json={"chat_id": self._chat_id, "text": f"🏴 {text}"[:4096]},
+                timeout=self._timeout,
+            )
+        except Exception as e:  # noqa: BLE001 — never let a notify kill anything
+            print(f"[notify] telegram delivery failed (non-fatal): {e!r}")
+
+
 def env_token_resolver(oauth_ref: str) -> tuple[str, str]:
     """Resolve a persona's OAuth tokens from env (Doppler injects them) by ref,
     e.g. ref '01' -> X_PERSONA_01_ACCESS_TOKEN / X_PERSONA_01_ACCESS_SECRET."""
