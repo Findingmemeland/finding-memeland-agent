@@ -52,6 +52,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         env_token_resolver,
         write_temp_png,
     )
+    from .preflight import preflight_check
     from .social.publisher import XPublisher
     from .social.x_client import XClient
     from .telegram.approval_queue import ApprovalQueue, TelegramAdmin
@@ -119,6 +120,15 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return f"'{arg}' isn't a number. usage: /launch <prize in $>"
         if prize_usd < s.min_prize_usd:
             return f"minimum prize is ${s.min_prize_usd:.0f} — nobody plays for less."
+        problems = preflight_check(
+            anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
+        )
+        if problems:
+            return (
+                "⚠️ Pre-flight FAILED — hunt NOT launched:\n"
+                + "\n".join(f"• {p}" for p in problems)
+                + "\nCheck the keys/billing (and enable auto-recharge), then try again."
+            )
         threading.Thread(target=lambda: orchestrator.run_hunt(prize_usd=prize_usd), daemon=True).start()
         return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 

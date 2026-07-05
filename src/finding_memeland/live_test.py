@@ -162,6 +162,7 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
     from .persona.avatar import AvatarGenerator
     from .persona.dresser import PersonaDresser
     from .persona.generator import PersonaGenerator
+    from .preflight import preflight_check
     from .runtime import StdoutNotifier, SystemClock, write_temp_png
     from .social.publisher import XPublisher
     from .social.x_client import XClient
@@ -257,6 +258,12 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
             prize_usd = float(arg) if arg else 200.0
         except ValueError:
             return f"'{arg}' isn't a number. usage: /launch <prize $> (cosmetic in test)"
+
+        problems = preflight_check(
+            anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
+        )
+        if problems:
+            return "⚠️ Pre-flight FAILED — NOT launching:\n" + "\n".join(f"• {p}" for p in problems)
 
         def _run():
             try:

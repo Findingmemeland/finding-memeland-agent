@@ -217,6 +217,12 @@ class XClient:
                     return True
         return False
 
+    def verify(self) -> str:
+        """Cheap auth check for the main account (used by pre-flight). Returns the
+        handle; raises if the key is invalid / account unreachable."""
+        resp = self._v2().get_me(user_auth=True)
+        return getattr(resp.data, "username", "") or ""
+
     def lookup_user(self, user_id: str) -> dict:
         """Profile fields for the bot screen. NOTE: X's 'Automated' label is not
         reliably exposed in v2, so `automated` defaults to False and ambiguous
