@@ -55,7 +55,12 @@ class Settings(BaseSettings):
     integrity_salt: str = Field(default="")
     fmml_usd_price: float = Field(default=0.0)      # set after token launch (price source)
     total_supply: float = Field(default=100_000_000_000.0)  # 100B — for FDV/suggestion
-    holding_floor_usd: float = Field(default=50.0)  # min holding in USD
+    holding_floor_usd: float = Field(default=20.0)  # min holding in USD (fallback)
+    # PREFERRED floor: a FIXED token amount, announced publicly >= 24h before the
+    # hunt fires. The holding window looks 24h BACK, so players must know the
+    # exact number before they buy — a trigger-time USD conversion would move
+    # the goalposts on people who already hold. Set per season/batch of hunts.
+    holding_floor_fmml: int = Field(default=0)      # 0 = fall back to USD conversion
     holding_hours: int = Field(default=24)          # continuous-hold eligibility window
     persona_register: str = Field(default="medium")
     min_warmup_days: int = Field(default=7)          # persona must be phone-verified + this old

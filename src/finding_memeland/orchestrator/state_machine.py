@@ -123,7 +123,8 @@ class Orchestrator:
         notifier,
         hunt_number: int = 1,
         register: str = "medium",
-        holding_floor_usd: float = 50.0,
+        holding_floor_usd: float = 20.0,
+        holding_floor_fmml: int = 0,
         holding_hours: int = 24,
         poll_interval_s: int = 75,  # DM-read rate-limit safe (~15 req/15min); winner = DM arrival order, so slower polling never changes who wins
         max_rounds: int = 100_000,
@@ -151,6 +152,7 @@ class Orchestrator:
         self._hunt_number = hunt_number
         self._register = register
         self._holding_floor_usd = holding_floor_usd
+        self._holding_floor_fmml = holding_floor_fmml
         self._holding_hours = holding_hours
         self._poll_interval_s = poll_interval_s
         self._max_rounds = max_rounds
@@ -203,7 +205,13 @@ class Orchestrator:
         integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
 
         prize_fmml = self._price_feed.usd_to_fmml(prize_usd)
-        min_balance_fmml = self._price_feed.usd_to_fmml(self._holding_floor_usd)
+        # Eligibility floor: prefer the PRE-ANNOUNCED fixed token amount — the
+        # 24h holding window looks BACK in time, so players must have known the
+        # exact number before they bought. Trigger-time USD conversion is only
+        # the fallback (and can unfairly raise the bar if price fell overnight).
+        min_balance_fmml = self._holding_floor_fmml or self._price_feed.usd_to_fmml(
+            self._holding_floor_usd
+        )
 
         avatar_path = None
         png = self._avatar_generator.generate_png(identity.avatar_prompt)

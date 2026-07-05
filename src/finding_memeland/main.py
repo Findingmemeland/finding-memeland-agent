@@ -112,6 +112,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         notifier=notifier,
         register=s.persona_register,
         holding_floor_usd=s.holding_floor_usd,
+        holding_floor_fmml=int(getattr(s, "holding_floor_fmml", 0) or 0),
         holding_hours=s.holding_hours,
         avatar_writer=write_temp_png,
         control=control,

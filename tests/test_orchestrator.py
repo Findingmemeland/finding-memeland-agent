@@ -269,6 +269,22 @@ def test_unclaimed_hunt_voids_at_deadline():
     assert any("expired unclaimed" in m for m in rig.notifier.messages)
 
 
+def test_holding_floor_prefers_preannounced_token_amount():
+    # The floor must be knowable >=24h in advance: when a fixed token amount is
+    # configured, it wins over the trigger-time USD conversion.
+    rig = build_simulation()
+    rig.orchestrator._holding_floor_fmml = 100_000_000
+    hunt = rig.orchestrator._prepare(200)
+    assert hunt.min_balance_fmml == 100_000_000
+
+
+def test_holding_floor_falls_back_to_usd_conversion():
+    rig = build_simulation()  # default: no fixed amount configured
+    hunt = rig.orchestrator._prepare(200)
+    # FakePriceFeed: usd * 1000; default floor $20 -> 20_000
+    assert hunt.min_balance_fmml == 20_000
+
+
 def test_kill_switch_pauses_and_resumes():
     rig = build_simulation()
 

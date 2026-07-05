@@ -37,6 +37,8 @@ Prod: Doppler ↔ Railway integration injects these automatically (checklist ste
 | `TELEGRAM_ADMIN_CHAT_ID` | config | hardcoded allowlist of one |
 | `INTEGRITY_SALT` | secret | revealed per hunt in Winner Announcement |
 | `PRIZE_USD_MIN` / `PRIZE_USD_MAX` | config | dollar-denominated prize band |
+| `HOLDING_FLOOR_FMML` | config | STANDING public eligibility floor in tokens (launch: 50M); only ever reduce, announce reductions (0 = USD fallback) |
+| `HOLDING_FLOOR_USD` | config | eligibility floor fallback in USD (converted at trigger) |
 
 ## Rules
 
