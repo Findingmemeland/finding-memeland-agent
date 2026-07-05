@@ -194,6 +194,67 @@ def test_flaky_retire_does_not_kill_a_finished_hunt():
     assert any("could not undress" in m for m in rig.notifier.messages)
 
 
+def _winner(rig):
+    from finding_memeland.orchestrator.ports import Submission, Winner
+
+    return Winner(
+        submission=Submission(dm_id="5", sender_x_id="9001", sender_handle="w",
+                              body="", created_at=rig.clock.now()),
+        wallet="0x" + "a" * 40,
+    )
+
+
+def test_payout_reuses_existing_onchain_tx():
+    # Crash happened AFTER the transfer mined but before the announcement: the
+    # payout row says 'sent'. _pay must reuse the tx, never send again.
+    rig = build_simulation()
+    hunt = rig.orchestrator._prepare(200)
+    rig.orchestrator._go_live(hunt)
+    hunt.state = HuntState.RESOLVING
+    rig.repo.payouts.append(
+        {"id": 99, "hunt_id": hunt.id, "status": "sent", "tx_hash": "0xdeadbeef"}
+    )
+    receipt = rig.orchestrator._pay(hunt, _winner(rig))
+    assert receipt.tx_hash == "0xdeadbeef"
+    assert len(rig.payout.sent) == 0  # NO second transfer
+
+
+def test_unresolved_payout_intent_blocks_resend():
+    # A 'sending' intent means a transfer MAY be in flight: abort loudly.
+    rig = build_simulation()
+    hunt = rig.orchestrator._prepare(200)
+    rig.orchestrator._go_live(hunt)
+    hunt.state = HuntState.RESOLVING
+    rig.repo.payouts.append({"id": 99, "hunt_id": hunt.id, "status": "sending"})
+    try:
+        rig.orchestrator._pay(hunt, _winner(rig))
+    except RuntimeError:
+        assert len(rig.payout.sent) == 0
+        return
+    raise AssertionError("expected RuntimeError on unresolved payout intent")
+
+
+def test_payout_error_marks_intent_unknown():
+    rig = build_simulation()
+    hunt = rig.orchestrator._prepare(200)
+    rig.orchestrator._go_live(hunt)
+    hunt.state = HuntState.RESOLVING
+
+    class _BoomPayout:
+        def send_prize(self, **_):
+            raise TimeoutError("receipt timeout — tx may still mine")
+
+    rig.orchestrator._payout = _BoomPayout()
+    try:
+        rig.orchestrator._pay(hunt, _winner(rig))
+    except TimeoutError:
+        rows = rig.repo.payouts_for_hunt(hunt.id)
+        assert rows and rows[0]["status"] == "unknown"
+        assert any("MID-SEND" in m for m in rig.notifier.messages)
+        return
+    raise AssertionError("expected the payout error to propagate")
+
+
 def test_kill_switch_pauses_and_resumes():
     rig = build_simulation()
 

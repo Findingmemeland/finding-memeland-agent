@@ -38,7 +38,7 @@ from ..content.templates import (
     winner_announcement,
 )
 from ..dm.validator import parse_dm
-from .ports import ReadyPersona, Winner
+from .ports import PayoutReceipt, ReadyPersona, Winner
 
 
 class HuntState(str, Enum):
@@ -412,17 +412,59 @@ class Orchestrator:
         raise RuntimeError("hunt loop exceeded max rounds without a winner")
 
     def _pay(self, hunt: PreparedHunt, winner: Winner):
+        """Idempotent payout. Invariant: at most ONE transfer per hunt, ever.
+
+        Order of operations is the whole point:
+          1. any existing payout row for this hunt?
+             - sent/confirmed with a tx_hash -> money is on-chain; REUSE it.
+             - anything else (sending/unknown) -> a transfer may be in flight;
+               ABORT loudly, human settles. Never guess with money.
+          2. write the INTENT row (status='sending') BEFORE broadcasting
+          3. transfer
+          4. mark the row 'sent' (crash between 3 and 4 leaves 'sending',
+             which step 1 then refuses to retry blindly)
+        """
         self._transition(hunt, HuntState.PAYING)
-        receipt = self._payout.send_prize(
-            hunt_id=hunt.id, to_wallet=winner.wallet, amount_fmml=hunt.prize_fmml
+
+        for row in self._repo.payouts_for_hunt(hunt.id):
+            if row.get("status") in ("sent", "confirmed") and row.get("tx_hash"):
+                self._notify(
+                    f"payout for hunt #{hunt.id} already on-chain "
+                    f"({row['tx_hash']}) — reusing it, NOT re-sending."
+                )
+                return PayoutReceipt(
+                    tx_hash=row["tx_hash"],
+                    amount_fmml=_as_int(row.get("amount_fmml") or hunt.prize_fmml),
+                )
+            raise RuntimeError(
+                f"unresolved payout intent for hunt #{hunt.id} "
+                f"(status {row.get('status')!r}) — a transfer may be in flight. "
+                "Check the chain (hot wallet nonce/txs) and settle manually."
+            )
+
+        intent_id = self._repo.create_payout_intent(
+            hunt_id=hunt.id, wallet=winner.wallet, amount_fmml=hunt.prize_fmml
         )
+        try:
+            receipt = self._payout.send_prize(
+                hunt_id=hunt.id, to_wallet=winner.wallet, amount_fmml=hunt.prize_fmml
+            )
+        except Exception as e:
+            # The tx MAY have been broadcast (e.g. receipt timeout). Mark it so
+            # nothing ever auto-retries this hunt's payout.
+            try:
+                self._repo.set_payout_status(intent_id, "unknown", error=repr(e))
+            except Exception as e2:  # noqa: BLE001
+                self._notify(f"could not mark payout intent as unknown: {e2!r}")
+            self._notify(
+                f"🚨 payout for hunt #{hunt.id} errored MID-SEND: {e!r}. The tx "
+                "may still mine — check the chain before ANY manual retry."
+            )
+            raise
+        self._repo.set_payout_status(intent_id, "sent", tx_hash=receipt.tx_hash)
         self._repo.record_winner(
             hunt_id=hunt.id, winner_x_id=winner.submission.sender_x_id,
             wallet=winner.wallet, prize_fmml=hunt.prize_fmml,
-        )
-        self._repo.record_payout(
-            hunt_id=hunt.id, wallet=winner.wallet,
-            amount_fmml=hunt.prize_fmml, tx_hash=receipt.tx_hash, status="sent",
         )
         self._notify(f"paid {hunt.prize_fmml:,} $FIND to {winner.wallet} ({receipt.tx_hash})")
         return receipt

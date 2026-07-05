@@ -80,6 +80,25 @@ class Repo:
     def record_payout(self, **fields: Any) -> None:
         self._db.table("payouts").insert(_clean(fields)).execute()
 
+    def create_payout_intent(self, *, hunt_id: int, wallet: str, amount_fmml: int) -> int:
+        """Write the payout INTENT (status='sending') BEFORE broadcasting the tx.
+        This is the idempotency anchor: if the process dies mid-send, the intent
+        row proves a transfer may be in flight and blocks any blind retry."""
+        resp = self._db.table("payouts").insert(_clean({
+            "hunt_id": hunt_id, "wallet": wallet,
+            "amount_fmml": amount_fmml, "status": "sending",
+        })).execute()
+        return resp.data[0]["id"]
+
+    def set_payout_status(self, payout_id: int, status: str, **fields: Any) -> None:
+        self._db.table("payouts").update(_clean({"status": status, **fields})).eq(
+            "id", payout_id
+        ).execute()
+
+    def payouts_for_hunt(self, hunt_id: int) -> list[dict[str, Any]]:
+        resp = self._db.table("payouts").select("*").eq("hunt_id", hunt_id).execute()
+        return resp.data or []
+
     # --- holdings ---
     def add_holding_sample(self, wallet: str, balance: int) -> None:
         self._db.table("holding_samples").insert(

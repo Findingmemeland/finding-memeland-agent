@@ -105,6 +105,21 @@ class FakeRepo:
     def record_payout(self, **fields) -> None:
         self.payouts.append(dict(fields))
 
+    def create_payout_intent(self, *, hunt_id, wallet, amount_fmml) -> int:
+        row = {"id": len(self.payouts) + 1, "hunt_id": hunt_id, "wallet": wallet,
+               "amount_fmml": amount_fmml, "status": "sending"}
+        self.payouts.append(row)
+        return row["id"]
+
+    def set_payout_status(self, payout_id, status, **fields) -> None:
+        for row in self.payouts:
+            if row.get("id") == payout_id:
+                row["status"] = status
+                row.update(fields)
+
+    def payouts_for_hunt(self, hunt_id) -> list[dict]:
+        return [p for p in self.payouts if p.get("hunt_id") == hunt_id]
+
     def latest_claim_code(self) -> str:
         return self.hunts[self._next_id - 1]["claim_code"]
 
