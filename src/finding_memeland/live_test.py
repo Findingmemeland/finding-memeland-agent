@@ -163,7 +163,7 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
     from .persona.dresser import PersonaDresser
     from .persona.generator import PersonaGenerator
     from .preflight import preflight_check
-    from .runtime import StdoutNotifier, SystemClock, write_temp_png
+    from .runtime import HuntControl, StdoutNotifier, SystemClock, write_temp_png
     from .social.publisher import XPublisher
     from .social.x_client import XClient
     from .telegram.approval_queue import ApprovalQueue, TelegramAdmin
@@ -184,6 +184,7 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
         )
     )
     repo = FakeRepo()  # in-memory: no Supabase writes, no FK constraints during the test
+    control = HuntControl()  # /silence // /resume kill switch (same as production)
 
     # Chain adapters: stubbed by default; REAL (Base Sepolia + test ERC-20) when
     # FMML_TEST_ONCHAIN=1, to validate the holding check + ERC-20 payout live.
@@ -251,6 +252,10 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
         poll_interval_s=poll_interval_s,
         clue_due_fn=lambda now: now + timedelta(seconds=clue_interval_s),
         cleanup_window_s=cleanup_s,
+        # Test-only: DO undress (it's the operator's own account). Real hunts
+        # never undress — the persona stays as the hunt's public artifact.
+        undress_on_retire=True,
+        control=control,
     )
 
     def _launch(arg: str) -> str:
@@ -296,12 +301,23 @@ def build_test_agent(settings: Settings | None = None) -> Agent:
             return f"post failed: {e!r}"
         return f"posted ✅ — https://x.com/FindingMemeland/status/{tid}"
 
+    def _silence(arg: str = "") -> str:
+        control.pause()
+        return "⏸ paused (test). No clues, no DM processing. /resume to continue."
+
+    def _resume(arg: str = "") -> str:
+        control.resume()
+        return "▶️ resumed."
+
     actions = {
         "launch": _launch,
         "post": _post,
-        "status": lambda arg="": "live-test mode (no token / no payout)",
-        "silence": lambda arg="": "pause requested",
-        "resume": lambda arg="": "resume requested",
+        "status": lambda arg="": (
+            "live-test mode (no token / no payout)"
+            + (" | ⏸ PAUSED" if control.paused() else "")
+        ),
+        "silence": _silence,
+        "resume": _resume,
     }
     telegram = TelegramAdmin(
         bot_token=s.telegram_bot_token,

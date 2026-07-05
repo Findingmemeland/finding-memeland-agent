@@ -130,6 +130,8 @@ class Orchestrator:
         avatar_writer=None,
         clue_due_fn=None,
         cleanup_window_s: int = CLEANUP_WINDOW_SECONDS,
+        undress_on_retire: bool = False,
+        control=None,
     ):
         self._settings = settings
         self._clock = clock
@@ -156,6 +158,14 @@ class Orchestrator:
         # The live-test harness injects short intervals so a rehearsal runs in minutes.
         self._clue_due_fn = clue_due_fn or next_clue_due
         self._cleanup_window_s = cleanup_window_s
+        # DESIGN (Pedro, 2026-07-05): personas are single-use, so in REAL hunts
+        # the profile is never undressed — it stays up as the hunt's historical
+        # artifact (the claim code is public after the reveal anyway). Only the
+        # live test (operator's own account) and voided-before-live hunts undress.
+        self._undress_on_retire = undress_on_retire
+        # Kill switch: an object with .paused() -> bool (see runtime.HuntControl).
+        # While paused the loop idles: no clues, no DM processing, no paying.
+        self._control = control
 
     # ------------------------------------------------------------------
     def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
@@ -292,8 +302,20 @@ class Orchestrator:
         next_due = self._clue_due_fn(self._clock.now())
         poll_failures = 0
         sub_retries: dict[str, int] = {}
+        pause_notified = False
 
         for _ in range(self._max_rounds):
+            # ---- Phase 0: kill switch (operator's /silence) ----
+            if self._control is not None and self._control.paused():
+                if not pause_notified:
+                    self._notify("⏸ hunt PAUSED by operator — idling (/resume to continue)")
+                    pause_notified = True
+                self._clock.sleep(self._poll_interval_s)
+                continue
+            if pause_notified:
+                self._notify("▶️ hunt RESUMED by operator")
+                pause_notified = False
+
             # ---- Phase 1: read DMs (isolated — a failed poll is retried) ----
             try:
                 batch = sorted(self._dm_source.poll(since), key=lambda s: s.created_at)
@@ -432,11 +454,24 @@ class Orchestrator:
 
     def _finish_retire(self, hunt: PreparedHunt) -> None:
         """The RETIRING -> DONE tail. Split out so a crash-resumed hunt that was
-        already mid-retire can finish without an illegal re-transition."""
-        self._dresser.retire(
-            access_token=hunt.persona.access_token,
-            access_secret=hunt.persona.access_secret,
-        )
+        already mid-retire can finish without an illegal re-transition.
+
+        In REAL hunts the profile is NOT undressed (single-use personas; the
+        dressed profile stays as the hunt's public artifact). When undressing IS
+        enabled (live test), it's best-effort: at this point the winner is paid
+        and announced — a flaky X profile endpoint (the known 500/131) must not
+        crash the hunt."""
+        if self._undress_on_retire:
+            try:
+                self._dresser.retire(
+                    access_token=hunt.persona.access_token,
+                    access_secret=hunt.persona.access_secret,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._notify(
+                    f"⚠️ could not undress persona {hunt.persona.handle}: {e!r} — "
+                    "reset the profile manually; the hunt itself is complete."
+                )
         self._persona_source.mark_retired(hunt.persona.id)
         log = self._repo.submissions_for_hunt(hunt.id)
         self._publisher.post(

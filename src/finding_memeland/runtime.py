@@ -96,6 +96,29 @@ class TelegramNotifier:
             print(f"[notify] telegram delivery failed (non-fatal): {e!r}")
 
 
+class HuntControl:
+    """Kill switch shared between the Telegram admin commands and the hunt loop.
+
+    /silence -> pause(): the loop idles (no clues, no DM processing, no paying)
+    /resume  -> resume(): the loop picks up exactly where it left off.
+    Thread-safe (threading.Event); pausing never loses DMs — X buffers them and
+    the winner is decided by DM ARRIVAL time, so fairness is unaffected."""
+
+    def __init__(self):
+        import threading
+
+        self._paused = threading.Event()
+
+    def pause(self) -> None:
+        self._paused.set()
+
+    def resume(self) -> None:
+        self._paused.clear()
+
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+
 def env_token_resolver(oauth_ref: str) -> tuple[str, str]:
     """Resolve a persona's OAuth tokens from env (Doppler injects them) by ref,
     e.g. ref '01' -> X_PERSONA_01_ACCESS_TOKEN / X_PERSONA_01_ACCESS_SECRET."""

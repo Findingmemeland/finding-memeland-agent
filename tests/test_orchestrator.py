@@ -22,10 +22,12 @@ def test_winner_paid_once():
     assert rig.repo.payouts[0]["tx_hash"].startswith("0xtx")
 
 
-def test_persona_dressed_and_retired():
+def test_persona_dressed_and_marked_retired_but_not_undressed():
     rig, hunt = _run()
     assert rig.dresser.dressed
-    assert rig.dresser.retired
+    # DESIGN (2026-07-05): real hunts never undress the persona — single-use
+    # accounts; the dressed profile stays as the hunt's public artifact.
+    assert not rig.dresser.retired
     assert hunt.persona.id in rig.persona_source.retired
 
 
@@ -147,7 +149,7 @@ def test_resume_pending_cleanup_just_retires():
     rig2 = build_simulation(repo=rig1.repo)
     rig2.orchestrator.resume_hunts()
     assert rig1.repo.hunts[hid]["state"] == "done"
-    assert rig2.dresser.retired
+    assert "persona-1" in rig2.persona_source.retired
     assert len(rig2.payout.sent) == 0  # already paid before the crash
 
 
@@ -164,6 +166,53 @@ def test_resume_voids_stuck_preparing():
     assert rig2.dresser.retired  # persona undressed
     assert len(rig2.payout.sent) == 0
     assert any("voiding" in m.lower() for m in rig2.notifier.messages)
+
+
+def test_flaky_retire_does_not_kill_a_finished_hunt():
+    # Live-test crash of 2026-07-05 (2nd run): X's update_profile 500/131 at
+    # retire time, AFTER the winner was paid and announced. Must be non-fatal.
+    rig = build_simulation()
+
+    class _FlakyDresser:
+        def __init__(self, inner):
+            self._inner = inner
+            self.dressed = None
+            self.retired = False
+
+        def dress(self, **kw):
+            self.dressed = kw
+            return self._inner.dress(**kw)
+
+        def retire(self, **kw):
+            raise ConnectionError("simulated X 500/131 on update_profile")
+
+    rig.orchestrator._dresser = _FlakyDresser(rig.dresser)
+    rig.orchestrator._undress_on_retire = True  # live-test mode (prod never undresses)
+    hunt = rig.orchestrator.run_hunt()
+    assert hunt.state == HuntState.DONE          # hunt completed anyway
+    assert len(rig.payout.sent) == 1
+    assert any("could not undress" in m for m in rig.notifier.messages)
+
+
+def test_kill_switch_pauses_and_resumes():
+    rig = build_simulation()
+
+    class _Control:
+        """Paused for the first 3 loop rounds, then released."""
+
+        def __init__(self):
+            self.checks = 0
+
+        def paused(self):
+            self.checks += 1
+            return self.checks <= 3
+
+    rig.orchestrator._control = _Control()
+    hunt = rig.orchestrator.run_hunt()
+    assert hunt.state == HuntState.DONE
+    assert any("PAUSED" in m for m in rig.notifier.messages)
+    assert any("RESUMED" in m for m in rig.notifier.messages)
+    assert len(rig.payout.sent) == 1  # winner still processed after the pause
 
 
 def test_poisoned_submission_is_retried_then_skipped():

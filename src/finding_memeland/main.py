@@ -46,6 +46,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .persona.generator import PersonaGenerator
     from .persona.source import DBPersonaSource
     from .runtime import (
+        HuntControl,
         ManualPriceFeed,
         StdoutNotifier,
         SystemClock,
@@ -65,6 +66,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         if s.telegram_bot_token and s.telegram_admin_chat_id
         else StdoutNotifier()
     )
+    control = HuntControl()  # /silence // /resume kill switch
 
     anthropic = Anthropic(api_key=s.anthropic_api_key)
     openai = OpenAI(api_key=s.openai_api_key, max_retries=4, timeout=120.0)
@@ -103,6 +105,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         holding_floor_usd=s.holding_floor_usd,
         holding_hours=s.holding_hours,
         avatar_writer=write_temp_png,
+        control=control,
+        # Real hunts NEVER undress the persona: single-use accounts, and the
+        # dressed profile stays up as the hunt's public artifact.
+        undress_on_retire=False,
     )
 
     # Admin/approval surface. /launch <prize_usd> fires a hunt in the BACKGROUND
@@ -120,6 +126,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
             fdv = 0
         return f" (suggested at current FDV: ${suggested_prize(fdv):.0f})" if fdv else ""
 
+    # One hunt at a time: a double-tapped /launch must never start two hunts
+    # (two personas, two prize payouts, one shared DM stream).
+    hunt_flag = {"active": False}
+    hunt_lock = threading.Lock()
+
     def _launch(arg: str) -> str:
         if not arg:
             return f"usage: /launch <prize in $>, e.g. /launch 250{_suggestion()}"
@@ -129,10 +140,18 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return f"'{arg}' isn't a number. usage: /launch <prize in $>"
         if prize_usd < s.min_prize_usd:
             return f"minimum prize is ${s.min_prize_usd:.0f} — nobody plays for less."
-        problems = preflight_check(
-            anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
-        )
+        with hunt_lock:
+            if hunt_flag["active"]:
+                return "⛔ a hunt is already LIVE — one at a time. /status for details."
+            hunt_flag["active"] = True
+        try:
+            problems = preflight_check(
+                anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
+            )
+        except Exception as e:  # noqa: BLE001
+            problems = [f"preflight crashed: {e!r}"]
         if problems:
+            hunt_flag["active"] = False
             return (
                 "⚠️ Pre-flight FAILED — hunt NOT launched:\n"
                 + "\n".join(f"• {p}" for p in problems)
@@ -153,15 +172,32 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     "The persona may still be dressed and players may be mid-game — "
                     "intervene NOW (check the persona profile and pending DMs)."
                 )
+            finally:
+                hunt_flag["active"] = False
 
         threading.Thread(target=_run_hunt, daemon=True).start()
         return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 
+    def _status(arg: str = "") -> str:
+        state = "hunt: LIVE" if hunt_flag["active"] else "hunt: none (idle)"
+        return state + (" | ⏸ PAUSED (/resume to continue)" if control.paused() else "")
+
+    def _silence(arg: str = "") -> str:
+        control.pause()
+        return (
+            "⏸ paused. Hunt loop idling: no clues, no DM processing, no payouts. "
+            "DMs keep accumulating on X (arrival order preserved). /resume to continue."
+        )
+
+    def _resume(arg: str = "") -> str:
+        control.resume()
+        return "▶️ resumed."
+
     actions = {
         "launch": _launch,
-        "status": lambda arg="": "idle",
-        "silence": lambda arg="": "pause requested (supervisor wiring pending)",
-        "resume": lambda arg="": "resume requested",
+        "status": _status,
+        "silence": _silence,
+        "resume": _resume,
     }
     telegram = TelegramAdmin(
         bot_token=s.telegram_bot_token, admin_chat_id=s.telegram_admin_chat_id,
