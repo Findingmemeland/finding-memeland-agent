@@ -107,7 +107,11 @@ class TelegramAdmin:
             reply = route_command(text, is_admin=self._is_admin(chat_id), actions=self._actions)
             await update.message.reply_text(reply)
 
-        app.add_handler(CommandHandler(["launch", "silence", "resume", "status", "post"], _handle))
+        app.add_handler(CommandHandler(
+            ["launch", "silence", "resume", "status", "post",
+             "tease", "approve", "reject"],
+            _handle,
+        ))
         return app
 
     def run(self) -> None:

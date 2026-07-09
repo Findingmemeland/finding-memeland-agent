@@ -37,6 +37,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .chain.holdings import Holdings
     from .chain.payout import PayoutEngine
     from .content.clue_engine import ClueEngine
+    from .content.filler import FillerEngine
     from .db.client import Repo, make_client
     from .dm.listener import XDMSource
     from .dm.validator import DMValidator
@@ -200,6 +201,52 @@ def build_agent(settings: Settings | None = None) -> Agent:
         state = "hunt: LIVE" if hunt_flag["active"] else "hunt: none (idle)"
         return state + (" | ⏸ PAUSED (/resume to continue)" if control.paused() else "")
 
+    # ------------------------------------------------------------------
+    # Daily oracle post (non-game 'filler'): drafts are generated on demand
+    # (/tease) or on a daily schedule, queued for approval, and ONLY publish
+    # via /approve. Game posts never pass through here.
+    # ------------------------------------------------------------------
+    filler = FillerEngine(anthropic, s.anthropic_model)
+    approval_queue = ApprovalQueue(repo=repo, publisher=XPublisher(x))
+
+    def _draft_and_queue(topic: str | None) -> str:
+        options = filler.generate_options(topic=topic)
+        lines = ["🐸 oracle drafts" + (f" — topic: {topic}" if topic else " (daily)") + ":"]
+        for opt in options:
+            approval_id = approval_queue.submit_for_approval(kind="filler", draft_text=opt)
+            lines.append(f"\n#{approval_id}:\n{opt}")
+        lines.append(
+            "\n✅ /approve <id> — publica · ✏️ /approve <id> <texto> — publica editado "
+            "· ❌ /reject <id>"
+        )
+        return "\n".join(lines)
+
+    def _tease(arg: str = "") -> str:
+        try:
+            return _draft_and_queue(arg.strip() or None)
+        except Exception as e:  # noqa: BLE001
+            return f"draft generation failed: {e!r}"
+
+    def _approve(arg: str = "") -> str:
+        parts = arg.split(maxsplit=1)
+        if not parts or not parts[0].isdigit():
+            return "usage: /approve <id> [edited text]"
+        try:
+            return approval_queue.decide(
+                int(parts[0]), "approve",
+                edited_text=parts[1].strip() if len(parts) > 1 else None,
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"approve failed: {e!r}"
+
+    def _reject(arg: str = "") -> str:
+        if not arg.strip().isdigit():
+            return "usage: /reject <id>"
+        try:
+            return approval_queue.decide(int(arg.strip()), "reject")
+        except Exception as e:  # noqa: BLE001
+            return f"reject failed: {e!r}"
+
     def _silence(arg: str = "") -> str:
         control.pause()
         return (
@@ -211,15 +258,38 @@ def build_agent(settings: Settings | None = None) -> Agent:
         control.resume()
         return "▶️ resumed."
 
+    # Daily scheduler: at filler_hour_utc, generate drafts and push them to the
+    # admin's Telegram. Best-effort — a failed day never breaks anything.
+    def _daily_filler_loop():
+        from datetime import datetime, timedelta, timezone
+        import time as _time
+
+        while True:
+            now = datetime.now(timezone.utc)
+            target = now.replace(hour=s.filler_hour_utc, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            _time.sleep((target - now).total_seconds())
+            try:
+                notifier.notify(_draft_and_queue(None))
+            except Exception as e:  # noqa: BLE001
+                notifier.notify(f"daily oracle drafts failed (will retry tomorrow): {e!r}")
+
+    if s.filler_daily_enabled and s.telegram_bot_token and s.telegram_admin_chat_id:
+        threading.Thread(target=_daily_filler_loop, daemon=True).start()
+
     actions = {
         "launch": _launch,
         "status": _status,
         "silence": _silence,
         "resume": _resume,
+        "tease": _tease,
+        "approve": _approve,
+        "reject": _reject,
     }
     telegram = TelegramAdmin(
         bot_token=s.telegram_bot_token, admin_chat_id=s.telegram_admin_chat_id,
-        approval=ApprovalQueue(repo=repo, publisher=XPublisher(x)), actions=actions,
+        approval=approval_queue, actions=actions,
     )
     return Agent(orchestrator=orchestrator, telegram=telegram, repo=repo)
 

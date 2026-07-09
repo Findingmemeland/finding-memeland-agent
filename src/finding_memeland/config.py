@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     holding_floor_fmml: int = Field(default=0)      # 0 = fall back to USD conversion
     holding_hours: int = Field(default=24)          # continuous-hold eligibility window
     persona_register: str = Field(default="medium")
+    # Daily oracle post: generates draft options once a day and sends them to
+    # Telegram for approval (nothing publishes without it). Hour is UTC.
+    filler_daily_enabled: bool = Field(default=True)
+    filler_hour_utc: int = Field(default=15)  # start of the crypto-X peak window
     min_warmup_days: int = Field(default=7)          # persona must be phone-verified + this old
     min_prize_usd: float = Field(default=200.0)      # floor — minimum prize worth playing for
 
