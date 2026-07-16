@@ -14,7 +14,9 @@ fails fast via settings.assert_ready_for_hunt() if token/wallet/price aren't set
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
+from datetime import timedelta
 
 from .config import Settings, get_settings
 
@@ -116,6 +118,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
         holding_floor_fmml=int(getattr(s, "holding_floor_fmml", 0) or 0),
         holding_hours=s.holding_hours,
         avatar_writer=write_temp_png,
+        # Clue cadence from config (defaults = the published 1-3h). Lets a hunt
+        # be tightened (e.g. the Genesis hunt: ~35-45min gaps -> a ~4h hunt)
+        # without touching code. See Settings.clue_min_gap_s for the constraint
+        # tying this to holding_hours.
+        clue_due_fn=lambda now: now
+        + timedelta(seconds=random.randint(s.clue_min_gap_s, s.clue_max_gap_s)),
         control=control,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.

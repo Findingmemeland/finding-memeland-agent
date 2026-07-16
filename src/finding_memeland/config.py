@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # the goalposts on people who already hold. Set per season/batch of hunts.
     holding_floor_fmml: int = Field(default=0)      # 0 = fall back to USD conversion
     holding_hours: int = Field(default=24)          # continuous-hold eligibility window
+    # Clue cadence. The gap is drawn uniformly from [min, max] per clue. Defaults
+    # match the published Pirate Code (1-3h). MUST stay consistent with
+    # holding_hours: the eligibility window looks BACK from the claim, so if a
+    # hunt can outlast holding_hours, a mid-hunt buyer could still qualify —
+    # which would contradict "hold before clue 1". Rule of thumb:
+    # holding_hours > (expected clues x max gap).
+    clue_min_gap_s: int = Field(default=60 * 60)       # 1h
+    clue_max_gap_s: int = Field(default=3 * 60 * 60)   # 3h
     persona_register: str = Field(default="medium")
     # Daily oracle post: generates draft options once a day and sends them to
     # Telegram for approval (nothing publishes without it). Hour is UTC.
