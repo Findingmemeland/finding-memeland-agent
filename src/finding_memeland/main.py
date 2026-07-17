@@ -14,9 +14,7 @@ fails fast via settings.assert_ready_for_hunt() if token/wallet/price aren't set
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
-from datetime import timedelta
 
 from .config import Settings, get_settings
 
@@ -38,7 +36,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     from .chain.holdings import Holdings
     from .chain.payout import PayoutEngine
-    from .content.clue_engine import ClueEngine
+    from .content.clue_engine import ClueEngine, next_clue_due_factory
     from .content.filler import FillerEngine
     from .db.client import Repo, make_client
     from .dm.listener import XDMSource
@@ -119,11 +117,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
         holding_hours=s.holding_hours,
         avatar_writer=write_temp_png,
         # Clue cadence from config (defaults = the published 1-3h). Lets a hunt
-        # be tightened (e.g. the Genesis hunt: ~35-45min gaps -> a ~4h hunt)
-        # without touching code. See Settings.clue_min_gap_s for the constraint
-        # tying this to holding_hours.
-        clue_due_fn=lambda now: now
-        + timedelta(seconds=random.randint(s.clue_min_gap_s, s.clue_max_gap_s)),
+        # be tightened (e.g. the Genesis hunt: 10-30min gaps -> a ~4h hunt)
+        # without touching code. Built via the shared factory so the pre-flight
+        # script verifies THIS code path, not a copy of it. See
+        # Settings.clue_min_gap_s for the constraint tying this to holding_hours.
+        clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
         control=control,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.

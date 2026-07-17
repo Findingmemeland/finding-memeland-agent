@@ -13,11 +13,16 @@ Uso:
 
 from __future__ import annotations
 
-import random
 import statistics
 import sys
+from datetime import datetime, timezone
 
 from finding_memeland.config import get_settings
+
+# The REAL cadence function the Orchestrator uses mid-hunt — not a copy of the
+# maths. If this import or the factory's validation fails here, it would have
+# failed during the hunt instead, with the treasure already buried.
+from finding_memeland.content.clue_engine import next_clue_due_factory
 
 EXPECTED_GENESIS = {
     "min_prize_usd": 100.0,
@@ -49,17 +54,26 @@ def main() -> int:
         if not ok:
             problems.append(f"{key} está {actual!r}, devia ser {expected!r}")
 
-    # ---- 2. cadência das pistas ------------------------------------------
+    # ---- 2. cadência das pistas (via a função REAL) ----------------------
     lo, hi = s.clue_min_gap_s, s.clue_max_gap_s
     print(f"\n[2] Cadência das pistas: sorteio uniforme em [{lo//60}min, {hi//60}min] por pista")
-    if lo >= hi:
-        problems.append(f"CLUE_MIN_GAP_S ({lo}) >= CLUE_MAX_GAP_S ({hi}) — random.randint rebenta")
-    else:
-        gaps = [random.randint(lo, hi) for _ in range(MAX_CLUES_ASSUMED)]
+    try:
+        due_fn = next_clue_due_factory(lo, hi)  # mesma função que corre no hunt
+    except ValueError as e:
+        problems.append(f"a cadência REBENTA ao ser construída: {e}")
+        due_fn = None
+
+    def sample_gap_s() -> float:
+        """Um gap real, medido como o Orchestrator o mede: due - now."""
+        now = datetime.now(timezone.utc)
+        return (due_fn(now) - now).total_seconds()
+
+    if due_fn is not None:
         t = 0.0
-        for i, g in enumerate(gaps, start=2):
+        for i in range(2, MAX_CLUES_ASSUMED + 2):
+            g = sample_gap_s()
             t += g
-            print(f"      clue {i}: +{g // 60:>2}min   (hora {t / 3600:.1f}h)")
+            print(f"      clue {i}: +{g // 60:>2.0f}min   (hora {t / 3600:.1f}h)")
         spread = (hi - lo) / 60
         if spread < 20:
             warnings.append(
@@ -70,8 +84,9 @@ def main() -> int:
     # ---- 3. holding_hours cobre o pior caso? -----------------------------
     worst_case_h = MAX_CLUES_ASSUMED * hi / 3600
     print(f"\n[3] Duração do hunt vs janela de holding ({MAX_CLUES_ASSUMED} pistas):")
-    trials = [sum(random.randint(lo, hi) for _ in range(5)) for _ in range(10_000)]
-    print(f"      mediana a 5 pistas : {statistics.median(trials) / 3600:.1f}h")
+    if due_fn is not None:
+        trials = [sum(sample_gap_s() for _ in range(5)) for _ in range(2_000)]
+        print(f"      mediana a 5 pistas : {statistics.median(trials) / 3600:.1f}h")
     print(f"      PIOR caso a {MAX_CLUES_ASSUMED} pistas: {worst_case_h:.1f}h")
     print(f"      HOLDING_HOURS      : {s.holding_hours}h")
     if s.holding_hours < worst_case_h:

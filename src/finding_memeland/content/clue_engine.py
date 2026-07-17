@@ -154,6 +154,31 @@ def next_clue_due(now: datetime | None = None) -> datetime:
     return now + timedelta(seconds=random.randint(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
 
 
+def next_clue_due_factory(min_gap_s: int, max_gap_s: int):
+    """Build the clue-cadence function the Orchestrator calls between clues.
+
+    THE single source of truth for cadence: production (main.py) and the
+    pre-flight script both go through here, so what gets verified before a
+    launch is literally what runs during the hunt — not a re-implementation.
+
+    The gap is drawn fresh per clue: a fixed interval would let players set an
+    alarm, which kills the surprise the game runs on.
+    """
+    if min_gap_s <= 0 or max_gap_s <= 0:
+        raise ValueError(f"clue gaps must be positive (got {min_gap_s}, {max_gap_s})")
+    if min_gap_s > max_gap_s:
+        raise ValueError(
+            f"CLUE_MIN_GAP_S ({min_gap_s}) > CLUE_MAX_GAP_S ({max_gap_s}) — "
+            "random.randint would raise mid-hunt, after the treasure is already hidden"
+        )
+
+    def _due(now: datetime | None = None) -> datetime:
+        now = now or datetime.now(timezone.utc)
+        return now + timedelta(seconds=random.randint(min_gap_s, max_gap_s))
+
+    return _due
+
+
 SYSTEM_PROMPT = """You are the game master of "Finding Memeland", writing CLUES \
 for the current treasure hunt, posted on the main @FindingMemeland account. There \
 is a HIDDEN persona ACCOUNT on X. Players WIN by FINDING that account, reading the \
