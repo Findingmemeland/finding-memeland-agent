@@ -154,6 +154,30 @@ def next_clue_due(now: datetime | None = None) -> datetime:
     return now + timedelta(seconds=random.randint(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
 
 
+# A hunt has no clue limit, so "how long can it run?" has no hard answer. This
+# is the planning assumption: by clue 8 the easing (0.7^7 ≈ 8% obliqueness) has
+# made it near-explicit, so hunts realistically end at or before it.
+ASSUMED_MAX_CLUES = 8
+
+
+def worst_case_hunt_hours(max_gap_s: int, assumed_clues: int = ASSUMED_MAX_CLUES) -> float:
+    """Longest a hunt can plausibly run, in hours."""
+    return assumed_clues * max_gap_s / 3600
+
+
+def holding_window_covers_hunt(
+    holding_hours: int, max_gap_s: int, assumed_clues: int = ASSUMED_MAX_CLUES
+) -> bool:
+    """THE invariant behind the public rule "hold before the first clue".
+
+    The eligibility window looks BACK from the CLAIM, not from clue 1. So if a
+    hunt can outlast holding_hours, someone can buy mid-hunt, wait out the
+    window, claim — and win, contradicting the rule we announced. Since it's all
+    on-chain, anyone can check and catch us. Guard it everywhere.
+    """
+    return holding_hours > worst_case_hunt_hours(max_gap_s, assumed_clues)
+
+
 def next_clue_due_factory(min_gap_s: int, max_gap_s: int):
     """Build the clue-cadence function the Orchestrator calls between clues.
 

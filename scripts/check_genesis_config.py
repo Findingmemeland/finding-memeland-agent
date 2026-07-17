@@ -22,7 +22,12 @@ from finding_memeland.config import get_settings
 # The REAL cadence function the Orchestrator uses mid-hunt — not a copy of the
 # maths. If this import or the factory's validation fails here, it would have
 # failed during the hunt instead, with the treasure already buried.
-from finding_memeland.content.clue_engine import next_clue_due_factory
+from finding_memeland.content.clue_engine import (
+    ASSUMED_MAX_CLUES,
+    holding_window_covers_hunt,
+    next_clue_due_factory,
+    worst_case_hunt_hours,
+)
 
 EXPECTED_GENESIS = {
     "min_prize_usd": 100.0,
@@ -81,15 +86,15 @@ def main() -> int:
                 "conseguem antecipar a próxima pista"
             )
 
-    # ---- 3. holding_hours cobre o pior caso? -----------------------------
-    worst_case_h = MAX_CLUES_ASSUMED * hi / 3600
-    print(f"\n[3] Duração do hunt vs janela de holding ({MAX_CLUES_ASSUMED} pistas):")
+    # ---- 3. holding_hours cobre o pior caso? (regra de ouro partilhada) ---
+    worst_case_h = worst_case_hunt_hours(hi)
+    print(f"\n[3] Duração do hunt vs janela de holding ({ASSUMED_MAX_CLUES} pistas):")
     if due_fn is not None:
         trials = [sum(sample_gap_s() for _ in range(5)) for _ in range(2_000)]
         print(f"      mediana a 5 pistas : {statistics.median(trials) / 3600:.1f}h")
-    print(f"      PIOR caso a {MAX_CLUES_ASSUMED} pistas: {worst_case_h:.1f}h")
+    print(f"      PIOR caso a {ASSUMED_MAX_CLUES} pistas: {worst_case_h:.1f}h")
     print(f"      HOLDING_HOURS      : {s.holding_hours}h")
-    if s.holding_hours < worst_case_h:
+    if not holding_window_covers_hunt(s.holding_hours, hi):
         problems.append(
             f"HOLDING_HOURS ({s.holding_hours}h) NÃO cobre o pior caso ({worst_case_h:.1f}h): "
             'se o hunt se arrastar, a regra pública "hold antes da Clue 1" fica FALSA '
@@ -97,6 +102,14 @@ def main() -> int:
         )
     else:
         print(f"      -> OK: a janela cobre o pior caso (folga {s.holding_hours - worst_case_h:.1f}h)")
+
+    # ---- 3b. o floor é mesmo um floor? -----------------------------------
+    if not EXPECTED_GENESIS["holding_floor_fmml"] or not s.holding_floor_fmml:
+        if not s.holding_floor_usd:
+            problems.append(
+                "HOLDING_FLOOR_FMML e HOLDING_FLOOR_USD ambos a 0 → o floor fica ZERO "
+                "e QUALQUER pessoa (com 0 tokens) pode reclamar o prémio"
+            )
 
     # ---- 4. prémio: 1B tokens continua a caber no MIN_PRIZE_USD? ---------
     print("\n[4] Prémio (prometemos 1B $FIND, mas /launch leva DÓLARES):")

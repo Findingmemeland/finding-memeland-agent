@@ -36,7 +36,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     from .chain.holdings import Holdings
     from .chain.payout import PayoutEngine
-    from .content.clue_engine import ClueEngine, next_clue_due_factory
+    from .content.clue_engine import (
+        ClueEngine,
+        holding_window_covers_hunt,
+        next_clue_due_factory,
+        worst_case_hunt_hours,
+    )
     from .content.filler import FillerEngine
     from .db.client import Repo, make_client
     from .dm.listener import XDMSource
@@ -204,8 +209,53 @@ def build_agent(settings: Settings | None = None) -> Agent:
         return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 
     def _status(arg: str = "") -> str:
+        """State + the config the agent ACTUALLY loaded.
+
+        Not what's typed in the secrets dashboard — what reached this process.
+        That's a step further down the chain, so it also catches secrets that
+        never synced, a deploy that didn't restart, or a stale cache. Read it
+        before every /launch.
+        """
         state = "hunt: LIVE" if hunt_flag["active"] else "hunt: none (idle)"
-        return state + (" | ⏸ PAUSED (/resume to continue)" if control.paused() else "")
+        if control.paused():
+            state += " | ⏸ PAUSED (/resume to continue)"
+
+        lines = [state, ""]
+
+        floor = int(getattr(s, "holding_floor_fmml", 0) or 0)
+        if floor:
+            lines.append(f"floor: {floor:,} $FIND | hold: {s.holding_hours}h")
+        else:
+            # No fixed floor -> falls back to a USD conversion at trigger time.
+            # If holding_floor_usd is also 0, the floor becomes ZERO and anyone
+            # can claim — silently. Shout about it.
+            lines.append(
+                f"floor: ⚠️ USD fallback (${s.holding_floor_usd:g}) | hold: {s.holding_hours}h"
+                + ("  🚨 FLOOR IS ZERO — anyone can claim!" if not s.holding_floor_usd else "")
+            )
+
+        worst = worst_case_hunt_hours(s.clue_max_gap_s)
+        ok = holding_window_covers_hunt(s.holding_hours, s.clue_max_gap_s)
+        lines.append(
+            f"clues: {s.clue_min_gap_s // 60}-{s.clue_max_gap_s // 60}min "
+            f"→ worst case {worst:.1f}h "
+            + (
+                f"✅ (< {s.holding_hours}h)"
+                if ok
+                else f"❌ EXCEEDS the {s.holding_hours}h window — a mid-hunt buyer could win"
+            )
+        )
+        lines.append(f"prize min: ${s.min_prize_usd:.0f}")
+
+        if s.fmml_usd_price:
+            one_b = 1_000_000_000 * s.fmml_usd_price
+            lines.append(f"price: {s.fmml_usd_price:g} → 1B = ${one_b:.0f} (/launch {one_b:.0f})")
+            if one_b < s.min_prize_usd:
+                lines.append(f"  ⚠️ 1B is BELOW the ${s.min_prize_usd:.0f} minimum — /launch would refuse")
+        else:
+            lines.append("price: ⚠️ NOT SET — /launch cannot convert $ → $FIND")
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Daily oracle post (non-game 'filler'): drafts are generated on demand

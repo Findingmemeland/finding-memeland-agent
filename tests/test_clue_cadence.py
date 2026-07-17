@@ -13,9 +13,12 @@ from datetime import datetime, timezone
 import pytest
 
 from finding_memeland.content.clue_engine import (
+    ASSUMED_MAX_CLUES,
     MAX_GAP_SECONDS,
     MIN_GAP_SECONDS,
+    holding_window_covers_hunt,
     next_clue_due_factory,
+    worst_case_hunt_hours,
 )
 
 
@@ -70,11 +73,43 @@ def test_defaults_still_match_the_published_pirate_code():
     assert MAX_GAP_SECONDS == 3 * 3600
 
 
-def test_genesis_worst_case_fits_under_its_holding_window():
-    """A regra de ouro: HOLDING_HOURS > (nº pistas x max gap). Se o hunt puder
-    durar mais que a janela de holding, alguém compra a meio e ganna à mesma —
-    e a regra pública 'hold antes da primeira pista' torna-se FALSA."""
-    genesis_max_gap_s, genesis_holding_h, assumed_clues = 1800, 8, 8
-    worst_case_h = assumed_clues * genesis_max_gap_s / 3600
-    assert worst_case_h == 4.0
-    assert genesis_holding_h > worst_case_h
+def test_worst_case_maths():
+    assert worst_case_hunt_hours(1800) == 4.0  # Genesis: 8 x 30min
+    assert worst_case_hunt_hours(10800) == 24.0  # default: 8 x 3h
+    assert worst_case_hunt_hours(1800, assumed_clues=4) == 2.0
+
+
+def test_genesis_config_satisfies_the_golden_rule():
+    """Genesis: janela de 8h vs pior caso de 4h."""
+    assert holding_window_covers_hunt(holding_hours=8, max_gap_s=1800)
+
+
+def test_the_config_we_almost_shipped_would_have_broken_the_rule():
+    """Histórico real: 10-60min de gaps com janela de 6h dava 8h de pior caso.
+    Alguém podia comprar a meio do hunt, esperar 6h, reclamar e GANHAR — contra
+    a regra anunciada. É este o cenário que a regra de ouro tem de apanhar."""
+    assert not holding_window_covers_hunt(holding_hours=6, max_gap_s=3600)
+
+
+def test_KNOWN_GAP_defaults_do_not_satisfy_the_golden_rule():
+    """⚠️ DÍVIDA CONHECIDA (Hunt #2+), não regressão.
+
+    Os defaults publicados no site — pistas de 1-3h, hold de 24h — dão 8 x 3h =
+    24h de pior caso contra uma janela de 24h. Empate não chega: quem comprasse
+    logo a seguir à Clue 1 de um hunt longo teria 24h de holding no claim e
+    passava, contra o "buying mid-hunt counts for nothing" que o site promete.
+
+    Fica travado num teste para não se perder. Resolver antes do Hunt #2:
+    subir HOLDING_HOURS (obriga a mudar o site) ou baixar CLUE_MAX_GAP_S.
+    """
+    assert not holding_window_covers_hunt(holding_hours=24, max_gap_s=MAX_GAP_SECONDS)
+
+
+def test_equal_is_not_enough():
+    """Janela == pior caso deixa o empate a favor do sniper. Tem de ser >."""
+    assert not holding_window_covers_hunt(holding_hours=4, max_gap_s=1800)
+    assert holding_window_covers_hunt(holding_hours=5, max_gap_s=1800)
+
+
+def test_assumed_max_clues_is_the_documented_planning_number():
+    assert ASSUMED_MAX_CLUES == 8
