@@ -80,7 +80,11 @@ def winner_announcement(d: WinnerData) -> str:
         f"Hunt #{d.hunt_n} is halted. We have a winner!\n\n"
         f"Congratulations @{winner} — solved in {d.time_to_win}.\n"
         f"{d.prize_amount} $FIND transferred to your wallet ({d.tx_link}).\n"
-        f"The hidden persona was @{persona} (dormant in 1 hour).\n\n"
+        # Truth in the reveal (post-mortem P3.1): production never undresses the
+        # persona (undress_on_retire=False) — saying "dormant in 1 hour" was
+        # false, three lines above the block asking people to VERIFY our honesty.
+        f"The hidden persona was @{persona} — the profile stays up as a trophy. "
+        f"It played once, and never again.\n\n"
         f"Integrity check — recompute SHA-256 of:\n"
         f"  user_id: {d.persona_user_id}\n"
         f"  claim_code: {d.claim_code}\n"

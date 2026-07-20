@@ -54,3 +54,15 @@ def test_explainer_pending_detects_placeholder(monkeypatch):
     assert explainer_pending() is True  # ships as a placeholder on purpose
     monkeypatch.setattr(templates, "CLUE_ONE_EXPLAINER", "real text")
     assert explainer_pending() is False
+
+
+# --- Backlog exception (post-mortem P3.1): the reveal must not lie ---------
+
+def test_winner_announcement_does_not_claim_dormancy():
+    # Production keeps the persona dressed forever (undress_on_retire=False);
+    # "dormant in 1 hour" was false — in the same post that asks readers to
+    # verify the integrity hash.
+    out = winner_announcement(_data("@hidden_one", "@winner_one"))
+    assert "dormant" not in out.lower()
+    assert "stays up as a trophy" in out
+    assert "played once, and never again" in out
