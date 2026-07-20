@@ -17,6 +17,17 @@ def preflight_check(*, anthropic=None, anthropic_model: str = "", openai=None, x
     """Return a list of problems (empty = all good). None clients are skipped."""
     problems: list[str] = []
 
+    # Content gate: clue_one's cold-traffic explainer must be real text, never
+    # the placeholder — this is what stops a '<<EXPLAINER-PENDING>>' post from
+    # ever reaching X (the text is the operator's to write, in templates.py).
+    from .content import templates
+
+    if templates.explainer_pending():
+        problems.append(
+            "clue_one explainer is still the placeholder — write the real text "
+            "in content/templates.py (CLUE_ONE_EXPLAINER) before launching"
+        )
+
     if anthropic is not None:
         try:
             anthropic.messages.create(

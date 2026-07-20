@@ -1,4 +1,10 @@
-from finding_memeland.content.templates import WinnerData, winner_announcement
+from finding_memeland.content import templates
+from finding_memeland.content.templates import (
+    WinnerData,
+    clue_one,
+    explainer_pending,
+    winner_announcement,
+)
 
 
 def _data(persona_handle, winner_handle):
@@ -26,3 +32,25 @@ def test_handles_prefixed_when_missing_at():
 def test_reveals_integrity_ingredients():
     out = winner_announcement(_data("@h", "@w"))
     assert "100" in out and "ABCDEFGH" in out and "salt" in out.lower()
+
+
+# --- Pack 2, item 3 (post-mortem P1b): cold-traffic explainer -------------
+
+def test_clue_one_opens_with_the_explainer(monkeypatch):
+    monkeypatch.setattr(templates, "CLUE_ONE_EXPLAINER",
+                        "an AI hid an account on X. find it, DM the code, win.")
+    out = clue_one(hunt_n=2, clue_text="riddle here", prize="1,000,000",
+                   integrity_hash="be481c8b")
+    assert out.startswith("an AI hid an account on X.")
+    # Everything the old post had is still there, after the explainer.
+    assert "Hunt #2 is live" in out
+    assert "riddle here" in out
+    assert "Reshare this post to enter" in out
+    assert "integrity: be481c8b" in out
+    assert "Check pinned for rules" in out
+
+
+def test_explainer_pending_detects_placeholder(monkeypatch):
+    assert explainer_pending() is True  # ships as a placeholder on purpose
+    monkeypatch.setattr(templates, "CLUE_ONE_EXPLAINER", "real text")
+    assert explainer_pending() is False

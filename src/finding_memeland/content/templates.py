@@ -27,12 +27,36 @@ class WinnerData:
     salt: str
 
 
+# --------------------------------------------------------------------------
+# Cold-traffic explainer (post-mortem P1b): the opening post assumed the reader
+# already knew the game — 80 views, 0 organic reshares, a ~5-step funnel just
+# to understand what was being asked. These are the first two lines a stranger
+# reads; they must explain the game before anything else.
+#
+# ⚠️ TEXT IS PEDRO'S TO WRITE. While the placeholder marker below is present,
+# preflight_check REFUSES to launch — so this can never be posted by accident.
+# Replace the value of CLUE_ONE_EXPLAINER with the real two lines, e.g.:
+#   "our AI invented a secret account hiding somewhere on X.\n"
+#   "crack the clues, find it, DM it the code — first one wins the prize."
+# --------------------------------------------------------------------------
+_EXPLAINER_PLACEHOLDER_MARK = "<<EXPLAINER-PENDING>>"
+CLUE_ONE_EXPLAINER = _EXPLAINER_PLACEHOLDER_MARK
+
+
+def explainer_pending() -> bool:
+    """True while the cold-traffic explainer is still the placeholder.
+    Checked by preflight_check so a hunt can't launch with placeholder text."""
+    return _EXPLAINER_PLACEHOLDER_MARK in CLUE_ONE_EXPLAINER
+
+
 def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> str:
-    """Opening post: announcement + clue 1 + reshare gate + integrity hash.
+    """Opening post: cold-traffic explainer + announcement + clue 1 + reshare
+    gate + integrity hash.
 
     The footer 'Check pinned for rules' appears ONLY on Clue 1.
     """
     return (
+        f"{CLUE_ONE_EXPLAINER}\n\n"
         f"Hunt #{hunt_n} is live:\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"

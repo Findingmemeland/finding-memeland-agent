@@ -99,6 +99,28 @@ class PreparedHunt:
     clues: list[str] = field(default_factory=list)
     state: HuntState = HuntState.IDLE
     started_at: datetime | None = None
+    # Public "Hunt #N" — DB-derived at prepare time, stored on the row, reread
+    # on resume. ONE source of truth (P3.2: posts said #1 forever while resume
+    # printed the DB id).
+    number: int = 1
+
+
+def _theme_line(row: dict) -> str:
+    """One compact 'do not repeat' line per past hunt for avoid_recent: the
+    display name + archetype + the literal answer terms — so the generator
+    steers away from the THEME, not just the exact name."""
+    name = str(row.get("persona_display_name") or "").strip()
+    payload = row.get("persona_identity")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    payload = payload or {}
+    archetype = str(payload.get("archetype") or "").strip()
+    terms = ", ".join(str(t) for t in (payload.get("solution_terms") or []) if str(t).strip())
+    bits = [b for b in (name, archetype, terms) if b]
+    return " / ".join(bits)
 
 
 class Orchestrator:
@@ -121,7 +143,7 @@ class Orchestrator:
         payout,
         price_feed,
         notifier,
-        hunt_number: int = 1,
+        hunt_number: int = 1,  # FALLBACK only — the real number is DB-derived in _prepare
         register: str = "medium",
         holding_floor_usd: float = 20.0,
         holding_floor_fmml: int = 0,
@@ -205,7 +227,34 @@ class Orchestrator:
     # ------------------------------------------------------------------
     def _prepare(self, prize_usd: float) -> PreparedHunt:
         persona = self._persona_source.acquire_ready()
-        identity = self._persona_generator.generate(register=self._register)
+
+        # Public hunt number from the DB (max+1). On failure, fall back to the
+        # constructor default and say so — a numbering hiccup must not block a
+        # launch, but it must never be silent either.
+        try:
+            number = self._repo.next_hunt_number()
+        except Exception as e:  # noqa: BLE001
+            number = self._hunt_number
+            self._notify(f"hunt numbering query failed ({e!r}) — falling back to #{number}")
+
+        # Anti-repetition (post-mortem P1a): both halves existed — the
+        # generator's avoid_recent parameter and the stored persona_identity —
+        # but nothing connected them, so every hunt got an identical prompt and
+        # the model converged on the densest archetype (the Penelope repeat).
+        avoid: list[str] = []
+        try:
+            for row in self._repo.recent_persona_identities():
+                line = _theme_line(row)
+                if line:
+                    avoid.append(line)
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"could not load recent personas for avoid_recent ({e!r}) — "
+                "generating without the anti-repeat list; watch for a repeated theme."
+            )
+        identity = self._persona_generator.generate(
+            register=self._register, avoid_recent=avoid
+        )
         claim_code = generate_claim_code()
         salt = generate_salt()
         integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
@@ -254,18 +303,19 @@ class Orchestrator:
             state=HuntState.PREPARING.value,
         )
         try:
-            # persona_identity (jsonb) is what makes a full crash-resume possible:
-            # it lets a restarted agent rebuild the clue context. Column added in
-            # schema.sql — if the live DB predates it, fall back gracefully.
+            # persona_identity (jsonb) enables full crash-resume; hunt_number is
+            # the public numbering. Both are post-baseline columns — if the live
+            # DB predates them, fall back gracefully.
             hunt_id = self._repo.create_hunt(
-                **base_fields, persona_identity=asdict(identity)
+                **base_fields, persona_identity=asdict(identity), hunt_number=number
             )
         except Exception:  # noqa: BLE001 — e.g. column missing on an older DB
             hunt_id = self._repo.create_hunt(**base_fields)
             self._notify(
-                "hunts.persona_identity missing in the DB — this hunt can only be "
-                "resumed in degraded mode after a restart. Run: alter table hunts "
-                "add column if not exists persona_identity jsonb;"
+                "hunts.persona_identity/hunt_number missing in the DB — resume "
+                "will be degraded and numbering may fall back to the DB id. Run: "
+                "alter table hunts add column if not exists persona_identity jsonb; "
+                "alter table hunts add column if not exists hunt_number integer;"
             )
         hunt = PreparedHunt(
             id=hunt_id,
@@ -281,14 +331,15 @@ class Orchestrator:
             holding_hours=self._holding_hours,
             state=HuntState.PREPARING,
             started_at=started_at,
+            number=number,
         )
-        self._notify(f"hunt #{self._hunt_number}: persona {persona.handle} dressed, preparing")
+        self._notify(f"hunt #{hunt.number}: persona {persona.handle} dressed, preparing")
         return hunt
 
     def _go_live(self, hunt: PreparedHunt) -> None:
         draft = self._clue_engine.next_clue(hunt.ctx, 1, [])
         post = clue_one(
-            hunt_n=self._hunt_number,
+            hunt_n=hunt.number,
             clue_text=draft.text,
             prize=f"{hunt.prize_fmml:,}",
             integrity_hash=hunt.integrity_hash,
@@ -301,7 +352,7 @@ class Orchestrator:
         )
         # reshare_post_id persisted so a restarted agent keeps the SAME gate.
         self._transition(hunt, HuntState.LIVE, reshare_post_id=tweet_id)
-        self._notify(f"hunt #{self._hunt_number} LIVE — clue 1 posted ({tweet_id})")
+        self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})")
 
     # A submission whose processing keeps erroring (X lookup down, DB hiccup) is
     # retried this many times before being skipped, so one poisoned DM can never
@@ -475,11 +526,11 @@ class Orchestrator:
         The persona IS undressed here (unlike a completed hunt) — leaving a live
         claim code in the bio of a dead hunt would mislead players."""
         hours = self._hunt_timeout_h
-        self._notify(f"hunt #{self._hunt_number} expired unclaimed after {hours}h — voiding.")
+        self._notify(f"hunt #{hunt.number} expired unclaimed after {hours}h — voiding.")
         self._transition(hunt, HuntState.VOIDED)
         try:
             self._publisher.post(
-                f"Hunt #{self._hunt_number} ends unclaimed. The persona keeps its "
+                f"Hunt #{hunt.number} ends unclaimed. The persona keeps its "
                 "secret and the prize returns to the treasury. Sharpen up — the "
                 "next hunt won't wait for you. 🏴"
             )
@@ -514,15 +565,15 @@ class Orchestrator:
         for row in self._repo.payouts_for_hunt(hunt.id):
             if row.get("status") in ("sent", "confirmed") and row.get("tx_hash"):
                 self._notify(
-                    f"payout for hunt #{hunt.id} already on-chain "
-                    f"({row['tx_hash']}) — reusing it, NOT re-sending."
+                    f"payout for hunt #{hunt.number} (db #{hunt.id}) already "
+                    f"on-chain ({row['tx_hash']}) — reusing it, NOT re-sending."
                 )
                 return PayoutReceipt(
                     tx_hash=row["tx_hash"],
                     amount_fmml=_as_int(row.get("amount_fmml") or hunt.prize_fmml),
                 )
             raise RuntimeError(
-                f"unresolved payout intent for hunt #{hunt.id} "
+                f"unresolved payout intent for hunt #{hunt.number} (db #{hunt.id}) "
                 f"(status {row.get('status')!r}) — a transfer may be in flight. "
                 "Check the chain (hot wallet nonce/txs) and settle manually."
             )
@@ -542,7 +593,7 @@ class Orchestrator:
             except Exception as e2:  # noqa: BLE001
                 self._notify(f"could not mark payout intent as unknown: {e2!r}")
             self._notify(
-                f"🚨 payout for hunt #{hunt.id} errored MID-SEND: {e!r}. The tx "
+                f"🚨 payout for hunt #{hunt.number} (db #{hunt.id}) errored MID-SEND: {e!r}. The tx "
                 "may still mine — check the chain before ANY manual retry."
             )
             raise
@@ -562,7 +613,7 @@ class Orchestrator:
         )
         elapsed = self._clock.now() - hunt.started_at if hunt.started_at else None
         data = WinnerData(
-            hunt_n=self._hunt_number,
+            hunt_n=hunt.number,
             winner_handle=winner.submission.sender_handle,
             time_to_win=_fmt_duration(elapsed),
             prize_amount=f"{hunt.prize_fmml:,}",
@@ -602,10 +653,10 @@ class Orchestrator:
         self._persona_source.mark_retired(hunt.persona.id)
         log = self._repo.submissions_for_hunt(hunt.id)
         self._publisher.post(
-            f"Hunt #{self._hunt_number} closed. {len(log)} submissions logged for public audit."
+            f"Hunt #{hunt.number} closed. {len(log)} submissions logged for public audit."
         )
         self._transition(hunt, HuntState.DONE)
-        self._notify(f"hunt #{self._hunt_number} done; persona {hunt.persona.handle} retired")
+        self._notify(f"hunt #{hunt.number} done; persona {hunt.persona.handle} retired")
 
     # ------------------------------------------------------------------
     # Crash recovery — called once at boot (main.py). Finds hunts the previous
@@ -641,7 +692,7 @@ class Orchestrator:
         if state is HuntState.PREPARING:
             # Never went LIVE (no players yet). Cheapest safe move: void it and
             # undress the persona; a fresh /launch starts clean.
-            self._notify(f"hunt #{hunt.id} was stuck in PREPARING — voiding it.")
+            self._notify(f"hunt #{hunt.number} (db #{hunt.id}) was stuck in PREPARING — voiding it.")
             self._transition(hunt, HuntState.VOIDED)
             self._transition(hunt, HuntState.RETIRING)
             try:
@@ -664,7 +715,7 @@ class Orchestrator:
                 # Winner was validated but the process died before RESOLVING.
                 # Money territory — human eyes required.
                 self._notify(
-                    f"🚨 hunt #{hunt.id} already has a WON submission "
+                    f"🚨 hunt #{hunt.number} (db #{hunt.id}) already has a WON submission "
                     f"(dm {won_rows[0].get('dm_id')}) but died before paying. "
                     "NOT auto-paying — verify and settle manually."
                 )
@@ -672,12 +723,12 @@ class Orchestrator:
             since = self._latest_dm_marker(hunt.id)
             if hunt.ctx is None:
                 self._notify(
-                    f"hunt #{hunt.id} resumed WITHOUT persona identity (old DB "
+                    f"hunt #{hunt.number} resumed WITHOUT persona identity (old DB "
                     "schema): DMs and the winner flow work, but no further clues "
                     "can be generated."
                 )
             self._notify(
-                f"hunt #{hunt.id} RESUMED live after a restart — "
+                f"hunt #{hunt.number} RESUMED live after a restart — "
                 f"{len(hunt.clues)} clues out, DM marker {since or 'start'}."
             )
             winner = self._clue_and_dm_loop(hunt, since=since)
@@ -688,7 +739,7 @@ class Orchestrator:
 
         if state in (HuntState.RESOLVING, HuntState.PAYING):
             self._notify(
-                f"🚨 hunt #{hunt.id} died in {state.value.upper()} — a payout may "
+                f"🚨 hunt #{hunt.number} (db #{hunt.id}) died in {state.value.upper()} — a payout may "
                 "or may not have gone out. NOT auto-resuming: check the payouts "
                 "table and the chain, then settle manually."
             )
@@ -700,12 +751,12 @@ class Orchestrator:
             now = self._clock.now()
             if due is not None and due > now:
                 self._clock.sleep((due - now).total_seconds())
-            self._notify(f"hunt #{hunt.id} resumed at cleanup — retiring the persona.")
+            self._notify(f"hunt #{hunt.number} resumed at cleanup — retiring the persona.")
             self._retire(hunt)
             return
 
         if state is HuntState.RETIRING:
-            self._notify(f"hunt #{hunt.id} resumed mid-retire — finishing.")
+            self._notify(f"hunt #{hunt.number} resumed mid-retire — finishing.")
             self._finish_retire(hunt)
             return
 
@@ -743,6 +794,9 @@ class Orchestrator:
             clues=[c["clue_text"] for c in clue_rows],
             state=state,
             started_at=_as_dt(row.get("started_at")),
+            # Pre-migration rows have no hunt_number; the DB id is a better
+            # fallback than a hardcoded 1 (at least it's unique and traceable).
+            number=_as_int(row.get("hunt_number")) or int(row["id"]),
         )
 
     def _latest_dm_marker(self, hunt_id: int) -> str | None:

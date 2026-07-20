@@ -57,6 +57,33 @@ class Repo:
         )
         return resp.data or []
 
+    def recent_persona_identities(self, n: int = 10) -> list[dict[str, Any]]:
+        """Newest-first (display_name, persona_identity) of the last hunts.
+        Feeds the generator's avoid_recent (post-mortem P1a): the anti-repeat
+        parameter existed and the identities were stored, but nothing ever
+        read them back — so every hunt got an identical prompt and the model
+        converged on the same archetype (the Penelope repeat)."""
+        resp = (
+            self._db.table("hunts")
+            .select("persona_display_name,persona_identity")
+            .order("id", desc=True).limit(n).execute()
+        )
+        return resp.data or []
+
+    def next_hunt_number(self) -> int:
+        """Public hunt numbering, DB-derived: max(hunt_number)+1 (post-mortem
+        P3.2 — it was frozen at 1 in code while resume printed the DB id; one
+        source of truth now, stored on the row at create time). Voided hunts
+        keep their number: the public already saw it."""
+        resp = (
+            self._db.table("hunts").select("hunt_number")
+            .not_.is_("hunt_number", "null")
+            .order("hunt_number", desc=True).limit(1).execute()
+        )
+        rows = resp.data or []
+        top = rows[0].get("hunt_number") if rows else 0
+        return int(top or 0) + 1
+
     # --- clues ---
     def record_clue(self, **fields: Any) -> None:
         self._db.table("clues_history").insert(_clean(fields)).execute()

@@ -85,6 +85,18 @@ class FakeRepo:
     def set_hunt_paused(self, hunt_id, paused: bool) -> None:
         self.hunts[hunt_id]["paused"] = paused
 
+    def next_hunt_number(self) -> int:
+        nums = [int(r.get("hunt_number") or 0) for r in self.hunts.values()]
+        return max(nums, default=0) + 1
+
+    def recent_persona_identities(self, n: int = 10) -> list[dict]:
+        rows = sorted(self.hunts.values(), key=lambda r: r["id"], reverse=True)
+        return [
+            {"persona_display_name": r.get("persona_display_name"),
+             "persona_identity": r.get("persona_identity")}
+            for r in rows[:n]
+        ]
+
     def active_hunts(self) -> list[dict]:
         active = {"preparing", "live", "resolving", "paying", "pending_cleanup", "retiring"}
         return [dict(r) for r in self.hunts.values() if r.get("state") in active]

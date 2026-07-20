@@ -232,6 +232,11 @@ out — that is the puzzle.
 later clues clearer — but never just write the name.
 - Each clue must add a NEW angle, roughly 30% clearer than the previous one. Do \
 not repeat earlier clues.
+- NEVER build a clue on counting: do not state how many syllables, letters, \
+characters, vowels or consonants anything has — you miscount them, and a wrong \
+count makes players eliminate the RIGHT answer. The only number you may state \
+about the name is its word count, and only if you are certain it is exact. \
+Prefer qualitative hints (meaning, imagery, etymology, rhythm) over any counting.
 - FACET TARGETING: each clue focuses on ONE real attribute (given below) and must \
 CRYPTICALLY signal which one — so players know whether to look at the name, the \
 profile picture, the banner, the bio, or the pinned post. Signal it indirectly \

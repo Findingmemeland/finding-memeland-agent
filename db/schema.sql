@@ -87,6 +87,9 @@ create table hunts (
   -- Operator kill switch (/silence). Lives on the hunt row so it survives
   -- restarts/deploy overlaps and is never inherited by the next hunt.
   paused         boolean not null default false,
+  -- Public hunt number (Hunt #N in posts). DB-derived (max+1) and stored at
+  -- create time — the ONE source of truth for posts, notifications and resume.
+  hunt_number    integer,
   -- Outcome.
   winner_submission_id bigint,
   started_at     timestamptz,
@@ -208,3 +211,11 @@ alter table hunts add column if not exists persona_identity jsonb;
 -- /silence lived in a threading.Event: a Railway restart lost it and the
 -- resumed hunt un-paused itself. Run on existing databases:
 alter table hunts add column if not exists paused boolean not null default false;
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-07-20 (pack 2) — public hunt numbering (post-mortem P3.2)
+-- hunt_number was frozen at 1 in code while resume printed the DB id. Run on
+-- existing databases, INCLUDING the backfill (the Genesis hunt, db id 2, was
+-- publicly Hunt #1 — without the backfill the next hunt would also be #1):
+alter table hunts add column if not exists hunt_number integer;
+update hunts set hunt_number = 1 where id = 2 and hunt_number is null;
