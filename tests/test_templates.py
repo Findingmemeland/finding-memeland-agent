@@ -41,9 +41,10 @@ def test_clue_one_opens_with_the_explainer(monkeypatch):
                         "an AI hid an account on X. find it, DM the code, win.")
     out = clue_one(hunt_n=2, clue_text="riddle here", prize="1,000,000",
                    integrity_hash="be481c8b")
-    assert out.startswith("an AI hid an account on X.")
-    # Everything the old post had is still there, after the explainer.
-    assert "Hunt #2 is live" in out
+    # Order: announcement first, explainer right after, then the clue.
+    assert out.startswith("Hunt #2 is live.")
+    assert out.index("Hunt #2 is live") < out.index("an AI hid an account on X.")
+    assert out.index("an AI hid an account on X.") < out.index("1st clue:")
     assert "riddle here" in out
     assert "Reshare this post to enter" in out
     assert "integrity: be481c8b" in out
@@ -66,7 +67,9 @@ def test_shipped_explainer_is_real_and_leads_the_post():
     assert explainer_pending() is False
     out = clue_one(hunt_n=2, clue_text="riddle", prize="1,000,000,000",
                    integrity_hash="abc")
-    assert out.startswith("every hunt i invent someone who doesn't exist")
+    assert out.startswith("Hunt #2 is live.")
+    assert "every hunt i invent someone who doesn't exist" in out
+    assert out.index("is live.") < out.index("every hunt i invent")
     assert "DM me the code" in out
     low = out.lower()
     assert "wallet" not in low  # the wallet ask lives in the pinned rules, never in clue 1

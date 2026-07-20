@@ -59,9 +59,12 @@ def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> st
 
     The footer 'Check pinned for rules' appears ONLY on Clue 1.
     """
+    # Order (Pedro, 2026-07-20): the announcement leads, the explainer follows
+    # — regulars get the signal first, strangers get the context immediately
+    # after, and "1st clue:" stays glued to the clue itself.
     return (
+        f"Hunt #{hunt_n} is live.\n\n"
         f"{CLUE_ONE_EXPLAINER}\n\n"
-        f"Hunt #{hunt_n} is live:\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
         f"The first to find me wins {prize} $FIND.\n"
