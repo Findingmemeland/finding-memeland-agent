@@ -33,14 +33,18 @@ class WinnerData:
 # to understand what was being asked. These are the first two lines a stranger
 # reads; they must explain the game before anything else.
 #
-# ⚠️ TEXT IS PEDRO'S TO WRITE. While the placeholder marker below is present,
-# preflight_check REFUSES to launch — so this can never be posted by accident.
-# Replace the value of CLUE_ONE_EXPLAINER with the real two lines, e.g.:
-#   "our AI invented a secret account hiding somewhere on X.\n"
-#   "crack the clues, find it, DM it the code — first one wins the prize."
+# Text set by Pedro (2026-07-20). Wording rules that shaped it: declared
+# fiction, never "fake person/account" (platform-manipulation vocabulary);
+# ask for the CODE in DM, never the wallet (that lives in the pinned rules);
+# no engagement-bait phrases. preflight_check still refuses to launch if this
+# ever reverts to the placeholder marker.
 # --------------------------------------------------------------------------
 _EXPLAINER_PLACEHOLDER_MARK = "<<EXPLAINER-PENDING>>"
-CLUE_ONE_EXPLAINER = _EXPLAINER_PLACEHOLDER_MARK
+CLUE_ONE_EXPLAINER = (
+    "every hunt i invent someone who doesn't exist, "
+    "and hide their account somewhere on X. \U0001F438\n"
+    "decode the clues, find it, DM me the code in its bio — first one wins the prize."
+)
 
 
 def explainer_pending() -> bool:

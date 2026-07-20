@@ -51,9 +51,28 @@ def test_clue_one_opens_with_the_explainer(monkeypatch):
 
 
 def test_explainer_pending_detects_placeholder(monkeypatch):
-    assert explainer_pending() is True  # ships as a placeholder on purpose
+    monkeypatch.setattr(
+        templates, "CLUE_ONE_EXPLAINER", templates._EXPLAINER_PLACEHOLDER_MARK
+    )
+    assert explainer_pending() is True
     monkeypatch.setattr(templates, "CLUE_ONE_EXPLAINER", "real text")
     assert explainer_pending() is False
+
+
+def test_shipped_explainer_is_real_and_leads_the_post():
+    """The launch gate is open: the SHIPPED explainer is real text, it opens
+    clue_one, and it carries none of the phrases we ban (scam-pattern wallet
+    ask, engagement bait, platform-manipulation vocabulary)."""
+    assert explainer_pending() is False
+    out = clue_one(hunt_n=2, clue_text="riddle", prize="1,000,000,000",
+                   integrity_hash="abc")
+    assert out.startswith("every hunt i invent someone who doesn't exist")
+    assert "DM me the code" in out
+    low = out.lower()
+    assert "wallet" not in low  # the wallet ask lives in the pinned rules, never in clue 1
+    assert "fake" not in low
+    for phrase in _BAIT_PHRASES:
+        assert phrase not in low
 
 
 # --- Backlog exception (post-mortem P3.1): the reveal must not lie ---------
