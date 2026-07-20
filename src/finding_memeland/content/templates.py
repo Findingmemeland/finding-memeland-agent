@@ -90,7 +90,11 @@ def winner_announcement(d: WinnerData) -> str:
         f"  claim_code: {d.claim_code}\n"
         f"  salt: {d.salt}\n"
         f"It matches the hash in Clue 1.\n\n"
-        f"To the rest of you, keep trying. Turn notifications on. "
+        # "Turn notifications on" was one of the exact engagement-bait phrases
+        # that got the operator account flagged by X (2026-07-15). It sat in the
+        # ONE post that matters most — the winner reveal, carrying the tx link
+        # and the integrity proof — where a deboost costs the most.
+        f"To the rest of you: keep your eyes open. "
         f"The next hunt can begin at any time."
     )
 

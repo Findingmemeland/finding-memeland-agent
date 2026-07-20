@@ -66,3 +66,33 @@ def test_winner_announcement_does_not_claim_dormancy():
     assert "dormant" not in out.lower()
     assert "stays up as a trophy" in out
     assert "played once, and never again" in out
+
+
+# --- X engagement-bait triggers must never reach a published post ----------
+
+# The operator account was flagged by X on 2026-07-15 for a post combining
+# "don't miss out" + "follow @X and turn notifications on" + "will you be the
+# one". Those phrases were then stripped from every hand-written post — but one
+# survived inside a TEMPLATE, in the winner reveal: the single post carrying the
+# tx link and the integrity proof, i.e. where a deboost costs the most.
+_BAIT_PHRASES = (
+    "turn notifications on",
+    "don't miss out",
+    "dont miss out",
+    "will you be the one",
+)
+
+
+def test_winner_announcement_has_no_engagement_bait():
+    out = winner_announcement(_data("@hidden_one", "@winner_one")).lower()
+    for phrase in _BAIT_PHRASES:
+        assert phrase not in out, f"engagement-bait phrase in the reveal: {phrase!r}"
+
+
+def test_clue_one_has_no_engagement_bait(monkeypatch):
+    monkeypatch.setattr(templates, "CLUE_ONE_EXPLAINER", "an AI hid an account. find it.")
+    out = clue_one(
+        hunt_n=2, clue_text="riddle", prize="1,000,000", integrity_hash="abc"
+    ).lower()
+    for phrase in _BAIT_PHRASES:
+        assert phrase not in out, f"engagement-bait phrase in clue 1: {phrase!r}"
