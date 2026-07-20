@@ -41,6 +41,12 @@ class Repo:
             "id", hunt_id
         ).execute()
 
+    def set_hunt_paused(self, hunt_id: int, paused: bool) -> None:
+        """Persisted kill switch (/silence): the pause lives ON the hunt row, so
+        it survives restarts, is shared across overlapping deploy instances,
+        and is never inherited by the next hunt (post-mortem P3.7)."""
+        self._db.table("hunts").update({"paused": paused}).eq("id", hunt_id).execute()
+
     def active_hunts(self) -> list[dict[str, Any]]:
         """Hunts a dead process left in a non-terminal state (crash resume)."""
         resp = (

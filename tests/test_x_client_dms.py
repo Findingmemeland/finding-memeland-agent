@@ -135,3 +135,24 @@ def test_empty_inbox_makes_no_get_me_call():
     xc._client = fake
     assert xc.read_dms() == []
     assert fake.me_calls == 0  # empty inbox stays $0
+
+
+def test_per_poll_instrumentation_line_is_printed(capsys):
+    """P0 pack: every poll prints its flight-recorder line — an inbox the API
+    hides and a genuinely empty inbox must no longer look identical in logs."""
+    events = [
+        _ev(10, "111", "found it! code AB2CD3EF", 0),
+        _ev(11, MAIN_ID, "that code is not correct", 1),  # self reply
+        _ev(12, "111", "", 2, event_type="ParticipantsJoin"),
+    ]
+    _client(events).read_dms()
+    out = capsys.readouterr().out
+    assert "[dm-poll]" in out
+    assert "raw=3" in out and "self=1" in out and "non_message=1" in out
+    assert "returned=1" in out and "since=start" in out
+
+
+def test_empty_inbox_still_prints_the_poll_line(capsys):
+    _client([]).read_dms(since_id="10")
+    out = capsys.readouterr().out
+    assert "[dm-poll]" in out and "raw=0" in out and "since=10" in out

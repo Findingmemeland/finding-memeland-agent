@@ -52,12 +52,15 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .persona.generator import PersonaGenerator
     from .persona.source import DBPersonaSource
     from .runtime import (
-        HuntControl,
+        DBHuntPause,
         ManualPriceFeed,
+        PollHeartbeat,
         StdoutNotifier,
         SystemClock,
         TelegramNotifier,
+        active_hunt_guard,
         env_token_resolver,
+        hunt_status_line,
         write_temp_png,
     )
     from .preflight import preflight_check, preflight_money
@@ -72,11 +75,16 @@ def build_agent(settings: Settings | None = None) -> Agent:
         if s.telegram_bot_token and s.telegram_admin_chat_id
         else StdoutNotifier()
     )
-    control = HuntControl()  # /silence // /resume kill switch
-
     anthropic = Anthropic(api_key=s.anthropic_api_key)
     openai = OpenAI(api_key=s.openai_api_key, max_retries=4, timeout=120.0)
     repo = Repo(make_client(s.supabase_url, s.supabase_service_role_key))
+    # /silence // /resume kill switch — persisted on the hunt row (hunts.paused)
+    # so it survives restarts and deploy overlaps. Post-mortem P3.7: the old
+    # in-memory Event meant a paused hunt auto-resumed after a Railway restart.
+    control = DBHuntPause(repo)
+    # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
+    # below screams on Telegram if beats stop while a hunt is live (P0 pack).
+    heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
     web3 = Web3(Web3.HTTPProvider(s.base_rpc_url))
     x = XClient(
         api_key=s.x_api_key, api_secret=s.x_api_secret, bearer_token=s.x_bearer_token,
@@ -128,6 +136,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         # Settings.clue_min_gap_s for the constraint tying this to holding_hours.
         clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
         control=control,
+        heartbeat=heartbeat,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.
         undress_on_retire=False,
@@ -166,6 +175,14 @@ def build_agent(settings: Settings | None = None) -> Agent:
             if hunt_flag["active"]:
                 return "⛔ a hunt is already LIVE — one at a time. /status for details."
             hunt_flag["active"] = True
+        # The flag only guards a double-tap in THIS process. The DB is the real
+        # source of truth across restarts and deploy overlaps (Railway starts
+        # the new container before the old one dies): a resumed hunt or one
+        # launched by the other instance only shows up in the hunts table.
+        refusal = active_hunt_guard(repo)
+        if refusal:
+            hunt_flag["active"] = False
+            return refusal
         try:
             problems = preflight_check(
                 anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
@@ -216,9 +233,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         never synced, a deploy that didn't restart, or a stale cache. Read it
         before every /launch.
         """
-        state = "hunt: LIVE" if hunt_flag["active"] else "hunt: none (idle)"
-        if control.paused():
-            state += " | ⏸ PAUSED (/resume to continue)"
+        # Headline from the DB, not this process's memory: after a restart the
+        # resumed hunt is invisible to hunt_flag (post-mortem bonus finding A).
+        # Pause state comes from the hunt row itself (hunts.paused).
+        state = hunt_status_line(repo, local_active=hunt_flag["active"])
 
         lines = [state, ""]
 
@@ -304,15 +322,24 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return f"reject failed: {e!r}"
 
     def _silence(arg: str = "") -> str:
-        control.pause()
+        try:
+            n = control.pause()
+        except Exception as e:  # noqa: BLE001 — kill switch MUST be honest
+            return f"⚠️ pause NOT applied (DB write failed: {e!r}) — try again."
+        if not n:
+            return "no active hunt in the DB — nothing to pause."
         return (
-            "⏸ paused. Hunt loop idling: no clues, no DM processing, no payouts. "
+            "⏸ paused (persisted on the hunt row — survives restarts). "
+            "Hunt loop idling: no clues, no DM processing, no payouts. "
             "DMs keep accumulating on X (arrival order preserved). /resume to continue."
         )
 
     def _resume(arg: str = "") -> str:
-        control.resume()
-        return "▶️ resumed."
+        try:
+            n = control.resume()
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ resume NOT applied (DB write failed: {e!r}) — try again."
+        return "▶️ resumed." if n else "no active hunt in the DB — nothing to resume."
 
     # Daily scheduler: at filler_hour_utc, generate drafts and push them to the
     # admin's Telegram. Best-effort — a failed day never breaks anything.
@@ -333,6 +360,23 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     if s.filler_daily_enabled and s.telegram_bot_token and s.telegram_admin_chat_id:
         threading.Thread(target=_daily_filler_loop, daemon=True).start()
+
+    # Watchdog: the Telegram "scream" (post-mortem P0 pack). Checks the
+    # heartbeat every minute; only alerts while a hunt is live and the loop
+    # stopped completing cycles. Best-effort — must never die.
+    def _watchdog_loop():
+        import time as _time
+
+        while True:
+            _time.sleep(60)
+            try:
+                alert = heartbeat.check()
+                if alert:
+                    notifier.notify(alert)
+            except Exception as e:  # noqa: BLE001
+                print(f"[watchdog] check failed (non-fatal): {e!r}")
+
+    threading.Thread(target=_watchdog_loop, daemon=True).start()
 
     actions = {
         "launch": _launch,

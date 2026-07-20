@@ -15,12 +15,28 @@ confirmed so far (see scripts/spike_dm_read.py).
 
 from __future__ import annotations
 
+import functools
 import time
 from dataclasses import dataclass
 
 import tweepy
 
 from .x_text import MAX_BIO_LEN, MAX_NAME_LEN
+
+# Every HTTP call gets a hard deadline. tweepy.Client exposes no timeout and
+# `requests` defaults to NONE — a single hung socket froze the Genesis hunt
+# loop silently (post-mortem P0, candidate #2): no exception, no log, /status
+# still 'LIVE'. With a timeout the call raises, the loop's error handling
+# notifies ("DM poll failed ...Timeout..."), backs off and retries.
+_HTTP_TIMEOUT_S = 30
+
+
+def _with_timeout(client: tweepy.Client) -> tweepy.Client:
+    """Bind the timeout at the session level so EVERY v2 call inherits it."""
+    client.session.request = functools.partial(
+        client.session.request, timeout=_HTTP_TIMEOUT_S
+    )
+    return client
 
 # How many of a user's recent tweets to scan when checking for a reshare.
 _RESHARE_SCAN = 100
@@ -71,12 +87,12 @@ class XClient:
         self._client: tweepy.Client | None = None
         self._self_user_id: str | None = None  # main account id, cached lazily
         if main_access_token and main_access_secret:
-            self._client = tweepy.Client(
+            self._client = _with_timeout(tweepy.Client(
                 consumer_key=api_key,
                 consumer_secret=api_secret,
                 access_token=main_access_token,
                 access_token_secret=main_access_secret,
-            )
+            ))
 
     def _v2(self) -> tweepy.Client:
         if self._client is None:
@@ -90,7 +106,7 @@ class XClient:
         auth = tweepy.OAuth1UserHandler(
             self._api_key, self._api_secret, access_token, access_secret
         )
-        return tweepy.API(auth)
+        return tweepy.API(auth, timeout=_HTTP_TIMEOUT_S)
 
     def get_profile(self, access_token: str, access_secret: str) -> Profile:
         me = self._api_for(access_token, access_secret).verify_credentials(
@@ -131,23 +147,26 @@ class XClient:
             lambda: self._api_for(access_token, access_secret).update_profile_banner(image_path)
         )
 
+    def _persona_v2(self, access_token: str, access_secret: str) -> tweepy.Client:
+        """A v2 client in a PERSONA's OAuth context — with the same hard HTTP
+        timeout as the main client."""
+        return _with_timeout(tweepy.Client(
+            consumer_key=self._api_key, consumer_secret=self._api_secret,
+            access_token=access_token, access_token_secret=access_secret,
+        ))
+
     def post_as_persona(self, access_token: str, access_secret: str, text: str) -> str:
         """Post from a PERSONA account (its own OAuth context). Used to publish the
         findable locator post so it becomes searchable."""
-        client = tweepy.Client(
-            consumer_key=self._api_key, consumer_secret=self._api_secret,
-            access_token=access_token, access_token_secret=access_secret,
-        )
+        client = self._persona_v2(access_token, access_secret)
         resp = _retry_server_error(lambda: client.create_tweet(text=text, user_auth=True))
         return str(resp.data["id"])
 
     def delete_as_persona(self, access_token: str, access_secret: str, tweet_id: str) -> None:
         """Delete a post from a PERSONA account (used by the live-test cleanup)."""
-        client = tweepy.Client(
-            consumer_key=self._api_key, consumer_secret=self._api_secret,
-            access_token=access_token, access_token_secret=access_secret,
+        self._persona_v2(access_token, access_secret).delete_tweet(
+            id=tweet_id, user_auth=True
         )
-        client.delete_tweet(id=tweet_id, user_auth=True)
 
     def search_recent(self, query: str, *, max_results: int = 10) -> list[dict]:
         """Search recent tweets (v2) — used for the pre-hunt findability check:
@@ -186,6 +205,10 @@ class XClient:
         me: str | None = None
         out: list[dict] = []
         page_token: str | None = None
+        # Per-poll flight recorder (post-mortem P0): a healthy-but-empty inbox
+        # and an API that stopped returning the inbox used to produce IDENTICAL
+        # logs — none. One line per poll makes the difference visible.
+        pages = raw = non_msg = self_skipped = since_skipped = 0
         for _ in range(_DM_MAX_PAGES):
             kwargs = dict(
                 max_results=_DM_FETCH,
@@ -197,6 +220,8 @@ class XClient:
                 kwargs["pagination_token"] = page_token
             resp = self._v2().get_direct_message_events(**kwargs)
             events = resp.data or []
+            pages += 1
+            raw += len(events)
             users = {}
             if resp.includes and resp.includes.get("users"):
                 users = {u.id: u for u in resp.includes["users"]}
@@ -206,11 +231,14 @@ class XClient:
             reached_seen = False
             for ev in events:
                 if getattr(ev, "event_type", None) != "MessageCreate":
+                    non_msg += 1
                     continue
                 if since_id is not None and int(ev.id) <= int(since_id):
                     reached_seen = True  # older than the marker: page limit found
+                    since_skipped += 1
                     continue
                 if me is not None and str(getattr(ev, "sender_id", "")) == me:
+                    self_skipped += 1
                     continue  # our own outbound reply — not a submission
                 sender = users.get(getattr(ev, "sender_id", None))
                 out.append({
@@ -225,6 +253,11 @@ class XClient:
             if reached_seen or not page_token:
                 break
         out.sort(key=lambda d: d["created_at"])
+        print(
+            f"[dm-poll] pages={pages} raw={raw} non_message={non_msg} "
+            f"self={self_skipped} since_skipped={since_skipped} "
+            f"returned={len(out)} since={since_id or 'start'}"
+        )
         return out
 
     def post(self, text: str, *, long_post: bool = False) -> str:

@@ -82,6 +82,9 @@ class FakeRepo:
         self.hunts[hunt_id]["state"] = state
         self.hunts[hunt_id].update(fields)
 
+    def set_hunt_paused(self, hunt_id, paused: bool) -> None:
+        self.hunts[hunt_id]["paused"] = paused
+
     def active_hunts(self) -> list[dict]:
         active = {"preparing", "live", "resolving", "paying", "pending_cleanup", "retiring"}
         return [dict(r) for r in self.hunts.values() if r.get("state") in active]

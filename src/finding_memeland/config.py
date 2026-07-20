@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     filler_hour_utc: int = Field(default=15)  # start of the crypto-X peak window
     min_warmup_days: int = Field(default=7)          # persona must be phone-verified + this old
     min_prize_usd: float = Field(default=200.0)      # floor — minimum prize worth playing for
+    # Watchdog: alert on Telegram if a LIVE hunt's loop completes no cycle for
+    # this long (hung HTTP call, dead thread). Must exceed the loop's longest
+    # legitimate cycle: poll_interval (75s) + max failure backoff (300s).
+    watchdog_stall_s: int = Field(default=600)
 
     @property
     def is_production(self) -> bool:

@@ -134,6 +134,7 @@ class Orchestrator:
         undress_on_retire: bool = False,
         control=None,
         hunt_timeout_hours: float | None = 72,
+        heartbeat=None,
     ):
         self._settings = settings
         self._clock = clock
@@ -172,6 +173,11 @@ class Orchestrator:
         # Unclaimed-hunt deadline: past it, the hunt is VOIDED with a public
         # notice instead of posting clues forever. None disables.
         self._hunt_timeout_h = hunt_timeout_hours
+        # Liveness sensor (runtime.PollHeartbeat): the live loop beat()s every
+        # cycle; a supervisor thread screams on Telegram if beats stop while a
+        # hunt is live. Post-mortem P0: a silently hung/dead loop looked
+        # exactly like a healthy idle one.
+        self._heartbeat = heartbeat
 
     # ------------------------------------------------------------------
     def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
@@ -305,6 +311,20 @@ class Orchestrator:
     def _clue_and_dm_loop(
         self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
     ) -> Winner:
+        """Heartbeat bracket around the live loop: mark_live(True) while inside,
+        ALWAYS mark_live(False) on the way out (winner, void, or crash) so the
+        watchdog never keeps screaming over a loop that already exited."""
+        if self._heartbeat is None:
+            return self._dm_loop_body(hunt, since=since, clue_index=clue_index)
+        self._heartbeat.mark_live(True)
+        try:
+            return self._dm_loop_body(hunt, since=since, clue_index=clue_index)
+        finally:
+            self._heartbeat.mark_live(False)
+
+    def _dm_loop_body(
+        self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
+    ) -> Winner:
         """The live loop. DESIGN RULE: once a hunt is LIVE, people are playing —
         NOTHING transient (X 429/5xx, network, RPC, DB hiccup, bad LLM output)
         may kill this loop. Every phase is isolated: a failure is notified,
@@ -319,6 +339,11 @@ class Orchestrator:
         pause_notified = False
 
         for _ in range(self._max_rounds):
+            # Liveness: one beat per cycle, whatever the cycle does (idle,
+            # pause, failure backoff). No beats => hung or dead => watchdog.
+            if self._heartbeat is not None:
+                self._heartbeat.beat()
+
             # ---- Phase 0: kill switch (operator's /silence) ----
             if self._control is not None and self._control.paused():
                 if not pause_notified:
@@ -353,12 +378,23 @@ class Orchestrator:
                 self._clock.sleep(min(300, self._poll_interval_s * min(poll_failures, 4)))
 
             # ---- Phase 2: process submissions (isolated per submission) ----
+            if batch:
+                print(
+                    f"[hunt#{hunt.id}] processing {len(batch)} dm(s), "
+                    f"marker={since or 'start'}"
+                )
             for sub in batch:
                 # Ignore DMs from BEFORE this hunt started (old conversations are
                 # not submissions). Without this the agent would re-process every
                 # historical DM each hunt — spamming past contacts with the canned
                 # reply and burning API credits.
                 if hunt.started_at is not None and sub.created_at < hunt.started_at:
+                    # Post-mortem P0: this skip was the one SILENT drop path in
+                    # the loop — log it so a misfiltered DM is visible in logs.
+                    print(
+                        f"[hunt#{hunt.id}] dm {sub.dm_id} skipped: pre-hunt "
+                        f"({sub.created_at} < {hunt.started_at}); marker advanced"
+                    )
                     since = sub.dm_id
                     continue
                 try:

@@ -84,6 +84,9 @@ create table hunts (
   min_balance_fmml   numeric(38,0),
   holding_hours      integer not null,         -- 48 / 96 / 168...
   reshare_post_id    text,                     -- Clue 1 tweet id = reshare gate
+  -- Operator kill switch (/silence). Lives on the hunt row so it survives
+  -- restarts/deploy overlaps and is never inherited by the next hunt.
+  paused         boolean not null default false,
   -- Outcome.
   winner_submission_id bigint,
   started_at     timestamptz,
@@ -199,3 +202,9 @@ create table approval_queue (
 -- clue context and RESUME a live hunt instead of orphaning it.
 -- Run on existing databases:
 alter table hunts add column if not exists persona_identity jsonb;
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-07-20 — pause persisted on the hunt row (post-mortem P3.7)
+-- /silence lived in a threading.Event: a Railway restart lost it and the
+-- resumed hunt un-paused itself. Run on existing databases:
+alter table hunts add column if not exists paused boolean not null default false;
