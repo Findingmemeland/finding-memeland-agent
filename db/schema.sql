@@ -19,6 +19,7 @@ create type persona_state as enum (
 create type hunt_state as enum (
   'idle',
   'preparing',
+  'prepped',           -- dressed + prep posts running; Clue 1 NOT out yet (P2)
   'live',
   'resolving',
   'paying',
@@ -32,6 +33,8 @@ create type hunt_state as enum (
 create type submission_outcome as enum (
   'pending',
   'won',
+  'early',             -- arrived in the prep window, before Clue 1 (P2 gate)
+  'partial',           -- message logged; pair (code+wallet) not complete yet
   'bad_code',
   'no_holding',
   'no_reshare',
@@ -87,6 +90,12 @@ create table hunts (
   -- Operator kill switch (/silence). Lives on the hunt row so it survives
   -- restarts/deploy overlaps and is never inherited by the next hunt.
   paused         boolean not null default false,
+  -- P2 prepare/go-live split. golive_due_at = scheduled T0; live_at = when
+  -- Clue 1 actually posted (the prep-window gate boundary). abort_prep is the
+  -- operator's /abort_prep flag — persisted, like every operator control.
+  golive_due_at  timestamptz,
+  live_at        timestamptz,
+  abort_prep     boolean not null default false,
   -- Public hunt number (Hunt #N in posts). DB-derived (max+1) and stored at
   -- create time — the ONE source of truth for posts, notifications and resume.
   hunt_number    integer,
@@ -219,3 +228,27 @@ alter table hunts add column if not exists paused boolean not null default false
 -- publicly Hunt #1 — without the backfill the next hunt would also be #1):
 alter table hunts add column if not exists hunt_number integer;
 update hunts set hunt_number = 1 where id = 2 and hunt_number is null;
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-07-24 — Hunt #2 post-mortem pack (P0/P1/P2)
+-- Run on existing databases BEFORE deploying the code (the new code writes
+-- 'early'/'partial'/'prepped'). ALTER TYPE ... ADD VALUE must run OUTSIDE a
+-- transaction — execute these statements ONE AT A TIME in the SQL editor:
+alter type submission_outcome add value if not exists 'early';
+alter type submission_outcome add value if not exists 'partial';
+alter type hunt_state add value if not exists 'prepped';
+alter table hunts add column if not exists golive_due_at timestamptz;
+alter table hunts add column if not exists live_at timestamptz;
+alter table hunts add column if not exists abort_prep boolean not null default false;
+-- P1: schema drift fix — schema.sql always intended this nullable ("audit
+-- lives in submissions"); production had NOT NULL, which killed Hunt #2's
+-- thread AFTER the money left (error 23502):
+alter table winners alter column submission_id drop not null;
+create table if not exists persona_posts (
+  id            bigint generated always as identity primary key,
+  hunt_id       bigint not null references hunts (id),
+  text          text not null,
+  scheduled_at  timestamptz,
+  posted_at     timestamptz,
+  tweet_id      text
+);

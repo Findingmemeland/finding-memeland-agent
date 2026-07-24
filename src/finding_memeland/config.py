@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # this long (hung HTTP call, dead thread). Must exceed the loop's longest
     # legitimate cycle: poll_interval (75s) + max failure backoff (300s).
     watchdog_stall_s: int = Field(default=600)
+    # P2 findability architecture: /launch dresses the persona and opens a prep
+    # window (persona posts its own anchor posts; X indexes the profile); Clue 1
+    # only fires at the end. 0 disables the window (legacy direct go-live).
+    prep_window_h: float = Field(default=24.0)
+    prep_posts_n: int = Field(default=3)     # 2-4 anchor posts in the window
 
     @property
     def is_production(self) -> bool:

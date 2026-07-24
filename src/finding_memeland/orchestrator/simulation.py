@@ -98,7 +98,8 @@ class FakeRepo:
         ]
 
     def active_hunts(self) -> list[dict]:
-        active = {"preparing", "live", "resolving", "paying", "pending_cleanup", "retiring"}
+        active = {"preparing", "prepped", "live", "resolving", "paying",
+                  "pending_cleanup", "retiring"}
         return [dict(r) for r in self.hunts.values() if r.get("state") in active]
 
     def clues_for_hunt(self, hunt_id) -> list[dict]:
@@ -108,8 +109,11 @@ class FakeRepo:
     def record_clue(self, **fields) -> None:
         self.clues.append(dict(fields))
 
-    def log_submission(self, **fields) -> None:
-        self.submissions.append(dict(fields))
+    def log_submission(self, **fields) -> int:
+        row = dict(fields)
+        row["id"] = len(self.submissions) + 1
+        self.submissions.append(row)
+        return row["id"]
 
     def submissions_for_hunt(self, hunt_id) -> list:
         return [s for s in self.submissions if s.get("hunt_id") == hunt_id]
@@ -134,6 +138,31 @@ class FakeRepo:
 
     def payouts_for_hunt(self, hunt_id) -> list[dict]:
         return [p for p in self.payouts if p.get("hunt_id") == hunt_id]
+
+    def get_hunt(self, hunt_id) -> dict | None:
+        row = self.hunts.get(hunt_id)
+        return dict(row) if row else None
+
+    def update_hunt(self, hunt_id, **fields) -> None:
+        self.hunts[hunt_id].update(fields)
+
+    # --- persona prep posts (P2) ---
+    def create_persona_post(self, **fields) -> int:
+        row = dict(fields)
+        row["id"] = len(getattr(self, "persona_posts", [])) + 1
+        if not hasattr(self, "persona_posts"):
+            self.persona_posts = []
+        self.persona_posts.append(row)
+        return row["id"]
+
+    def set_persona_post(self, post_id, **fields) -> None:
+        for r in self.persona_posts:
+            if r["id"] == post_id:
+                r.update(fields)
+
+    def persona_posts_for_hunt(self, hunt_id) -> list[dict]:
+        rows = [r for r in getattr(self, "persona_posts", []) if r["hunt_id"] == hunt_id]
+        return sorted(rows, key=lambda r: r.get("scheduled_at") or 0)
 
     def latest_claim_code(self) -> str:
         return self.hunts[self._next_id - 1]["claim_code"]
@@ -182,6 +211,11 @@ class FakeAvatarGenerator:
         return b""  # empty -> orchestrator skips banner upload
 
 
+class FakePersonaPostEngine:
+    def generate(self, identity, n: int = 3) -> list[str]:
+        return [f"anchor post {i + 1} — a strangely specific phrase" for i in range(n)]
+
+
 class FakeClueEngine:
     def next_clue(self, ctx, clue_index: int, prior_clues) -> ClueDraft:
         return ClueDraft(
@@ -194,10 +228,15 @@ class FakeDresser:
     def __init__(self):
         self.dressed = False
         self.retired = False
+        self.persona_posts: list[str] = []
 
     def dress(self, **kwargs):
         self.dressed = True
         return None
+
+    def publish_post(self, *, access_token, access_secret, text) -> str:
+        self.persona_posts.append(text)
+        return f"persona-tweet-{len(self.persona_posts)}"
 
     def retire(self, **kwargs):
         self.retired = True

@@ -47,11 +47,21 @@ class Repo:
         and is never inherited by the next hunt (post-mortem P3.7)."""
         self._db.table("hunts").update({"paused": paused}).eq("id", hunt_id).execute()
 
+    def get_hunt(self, hunt_id: int) -> dict[str, Any] | None:
+        resp = self._db.table("hunts").select("*").eq("id", hunt_id).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+
+    def update_hunt(self, hunt_id: int, **fields: Any) -> None:
+        """Update hunt fields WITHOUT touching state (operator controls like
+        abort_prep / golive_due_at — persisted, per the post-mortem doctrine)."""
+        self._db.table("hunts").update(_clean(fields)).eq("id", hunt_id).execute()
+
     def active_hunts(self) -> list[dict[str, Any]]:
         """Hunts a dead process left in a non-terminal state (crash resume)."""
         resp = (
             self._db.table("hunts").select("*")
-            .in_("state", ["preparing", "live", "resolving", "paying",
+            .in_("state", ["preparing", "prepped", "live", "resolving", "paying",
                            "pending_cleanup", "retiring"])
             .execute()
         )
@@ -96,8 +106,12 @@ class Repo:
         return resp.data or []
 
     # --- submissions (public audit log) ---
-    def log_submission(self, **fields: Any) -> None:
-        self._db.table("submissions").insert(_clean(fields)).execute()
+    def log_submission(self, **fields: Any) -> int | None:
+        """Insert one submission row and return its id — record_winner links
+        the winner to this row (P1). None only if the DB returns no row."""
+        resp = self._db.table("submissions").insert(_clean(fields)).execute()
+        rows = resp.data or []
+        return rows[0].get("id") if rows else None
 
     def submissions_for_hunt(self, hunt_id: int) -> list[dict[str, Any]]:
         resp = (
@@ -143,6 +157,21 @@ class Repo:
         resp = (
             self._db.table("holding_samples").select("*").eq("wallet", wallet)
             .gte("sampled_at", since_s).execute()
+        )
+        return resp.data or []
+
+    # --- persona prep posts (P2: anchor posts published in the prep window) ---
+    def create_persona_post(self, **fields: Any) -> int:
+        resp = self._db.table("persona_posts").insert(_clean(fields)).execute()
+        return resp.data[0]["id"]
+
+    def set_persona_post(self, post_id: int, **fields: Any) -> None:
+        self._db.table("persona_posts").update(_clean(fields)).eq("id", post_id).execute()
+
+    def persona_posts_for_hunt(self, hunt_id: int) -> list[dict[str, Any]]:
+        resp = (
+            self._db.table("persona_posts").select("*").eq("hunt_id", hunt_id)
+            .order("scheduled_at").execute()
         )
         return resp.data or []
 

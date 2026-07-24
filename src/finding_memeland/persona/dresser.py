@@ -68,6 +68,10 @@ class PersonaDresser:
             self._x.post_as_persona(access_token, access_secret, locator)
         return profile
 
+    def publish_post(self, *, access_token: str, access_secret: str, text: str) -> str:
+        """Publish one post AS the persona (P2 prep-window anchor posts)."""
+        return self._x.post_as_persona(access_token, access_secret, text)
+
     def retire(self, *, access_token: str, access_secret: str) -> Profile:
         """Reset the account to a neutral dormant state after the reveal window.
         The DB marks state 'retired' and sets delete_after (+30d) separately."""

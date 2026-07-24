@@ -108,6 +108,12 @@ def winner_announcement(d: WinnerData) -> str:
 
 # Canned DM auto-replies (cheap, deterministic — no LLM call).
 DM_REPLY_NO_ADDRESS = "send your wallet address with the claim code to win."
+# Assembler replies (Hunt #2 rule: code and wallet may arrive in separate
+# messages — tell the player exactly what's still missing).
+DM_REPLY_NEED_WALLET = "got your code. now send the wallet address (0x…) and you're in."
+DM_REPLY_NEED_CODE = "got the wallet. now send the claim code from the persona's bio."
+# Prep-window gate (P2): submissions before Clue 1 are rejected, never ignored.
+DM_REPLY_EARLY = "easy there — the hunt hasn't started. no clue 1, no game yet. keep the code warm."
 DM_REPLY_BAD_CODE = "that code isn't this hunt's. find the persona, read the real one."
 DM_REPLY_NO_HOLDING = "you found me, but your wallet doesn't meet the holding rule."
 DM_REPLY_NO_RESHARE = "reshare this hunt's opening post, then try again if it's still open."

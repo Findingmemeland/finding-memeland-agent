@@ -47,6 +47,9 @@ class PersonaContext:
     banner_description: str = ""
     findable_post: str = ""
     clue_facet_plan: list[str] = field(default_factory=list)  # shuffled once per hunt
+    # P2: the persona's prep-window posts — REAL searchable anchors the clues
+    # point players at (the vector that provably works; Hunt #2).
+    anchor_posts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_generated(cls, generated, handle: str) -> "PersonaContext":
@@ -94,6 +97,9 @@ VECTOR_GUIDANCE = {
     "signature_post": "the pinned LOCATOR POST — point players (cryptically, more "
     "directly as clues ease) toward the distinctive phrase in the pinned post, so a "
     "search lands them on the exact account.",
+    "anchor_post": "one of the account's OWN POSTS — point players (cryptically, "
+    "more directly as clues ease) toward a distinctive phrase from the post quoted "
+    "in your context, so searching that phrase lands them on the exact account.",
 }
 
 
@@ -143,9 +149,16 @@ def shuffled_facet_plan(display_name: str) -> list[str]:
 
 def clue_vector_for(clue_index: int, persona: "PersonaContext") -> str:
     """Facet this clue targets. Uses the persona's per-hunt shuffled plan if set,
-    else the ordered template. Beyond the plan it stays on 'signature_post' — the
-    longer a hunt runs, the more the clues point at the searchable post."""
+    else the ordered template. Beyond the plan it stays on the searchable-post
+    facets — the longer a hunt runs, the more the clues point at REAL posts
+    (the findability vector that provably works; name search is suppressed for
+    fresh accounts — Hunt #2 post-mortem)."""
     plan = persona.clue_facet_plan or clue_plan(persona)
+    if persona.anchor_posts:
+        # Weave anchor-post facets in from clue 3 on: every second clue targets
+        # a real post, alternating with the original plan.
+        if clue_index >= 3 and clue_index % 2 == 1:
+            return "anchor_post"
     return plan[min(clue_index - 1, len(plan) - 1)]
 
 
@@ -260,7 +273,13 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"- bio: {persona.bio}\n"
         f"- avatar (profile picture): {persona.avatar_description}\n"
         f"- banner (header image): {persona.banner_description}\n"
-        f"- pinned locator post: {persona.findable_post}\n\n"
+        f"- pinned locator post: {persona.findable_post}\n"
+        + (
+            "- the account's own posts (anchors for clues):\n"
+            + "".join(f"    * {p}\n" for p in persona.anchor_posts)
+            if persona.anchor_posts else ""
+        )
+        + "\n"
         f"Theme (FLAVOUR ONLY — do NOT make players guess this, do not write it): "
         f"{persona.backstory}\n"
         f"Terms to NEVER write: {persona.solution_terms}\n\n"

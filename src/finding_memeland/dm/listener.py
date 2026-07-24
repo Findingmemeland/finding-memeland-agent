@@ -12,19 +12,32 @@ from __future__ import annotations
 from ..orchestrator.ports import Submission
 
 
+def _to_submissions(events) -> list[Submission]:
+    return [
+        Submission(
+            dm_id=e["dm_id"],
+            sender_x_id=e["sender_x_id"],
+            sender_handle=e.get("sender_handle", ""),
+            body=e.get("text", ""),
+            created_at=e["created_at"],
+        )
+        for e in events
+    ]
+
+
 class XDMSource:
     def __init__(self, x_client):
         self._x = x_client
 
     def poll(self, since_id: str | None) -> list[Submission]:
-        events = self._x.read_dms(since_id=since_id)
-        return [
-            Submission(
-                dm_id=e["dm_id"],
-                sender_x_id=e["sender_x_id"],
-                sender_handle=e.get("sender_handle", ""),
-                body=e.get("text", ""),
-                created_at=e["created_at"],
-            )
-            for e in events
-        ]
+        """Account-level read — DISCOVERY only (the endpoint suppresses
+        follow-ups of replied conversations; Hunt #2 post-mortem)."""
+        return _to_submissions(self._x.read_dms(since_id=since_id))
+
+    def poll_conversation(
+        self, participant_id: str, since_id: str | None
+    ) -> list[Submission]:
+        """Per-conversation read — the reliable path for follow-ups."""
+        return _to_submissions(
+            self._x.read_conversation_dms(participant_id, since_id=since_id)
+        )

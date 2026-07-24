@@ -43,6 +43,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         worst_case_hunt_hours,
     )
     from .content.filler import FillerEngine
+    from .content.persona_posts import PersonaPostEngine
     from .db.client import Repo, make_client
     from .dm.listener import XDMSource
     from .dm.validator import DMValidator
@@ -137,6 +138,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
         control=control,
         heartbeat=heartbeat,
+        # P2: prepare/go-live split — /launch = T-prep_window_h; Clue 1 at T0.
+        persona_post_engine=PersonaPostEngine(anthropic, s.anthropic_model),
+        prep_window_h=s.prep_window_h or None,
+        prep_posts_n=s.prep_posts_n,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.
         undress_on_retire=False,
@@ -223,6 +228,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 hunt_flag["active"] = False
 
         threading.Thread(target=_run_hunt, daemon=True).start()
+        if s.prep_window_h:
+            return (
+                f"hunt launching with a ${prize_usd:.0f} prize 🏴 — persona "
+                f"dresses NOW; Clue 1 fires in ~{s.prep_window_h:g}h "
+                "(/abort_prep to abort, /delay_golive <h> to push it)."
+            )
         return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
 
     def _status(arg: str = "") -> str:
@@ -321,6 +332,51 @@ def build_agent(settings: Settings | None = None) -> Agent:
         except Exception as e:  # noqa: BLE001
             return f"reject failed: {e!r}"
 
+    def _prepped_hunt():
+        """The hunt currently in its prep window, from the DB (source of truth)."""
+        rows = repo.active_hunts()
+        for r in rows:
+            if r.get("state") == "prepped":
+                return r
+        return None
+
+    def _abort_prep(arg: str = "") -> str:
+        try:
+            row = _prepped_hunt()
+            if row is None:
+                return "no hunt in a prep window — nothing to abort."
+            repo.update_hunt(row["id"], abort_prep=True)
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ abort NOT applied (DB write failed: {e!r}) — try again."
+        return (
+            "🛑 prep ABORT requested (persisted). The prep loop will undress and "
+            "void the persona within ~1 min. Clue 1 will NOT fire."
+        )
+
+    def _delay_golive(arg: str = "") -> str:
+        try:
+            hours = float(arg) if arg.strip() else 24.0
+        except ValueError:
+            return f"'{arg}' isn't a number of hours. usage: /delay_golive <h>"
+        if hours <= 0:
+            return "delay must be positive. usage: /delay_golive <h>"
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            row = _prepped_hunt()
+            if row is None:
+                return "no hunt in a prep window — nothing to delay."
+            base = str(row.get("golive_due_at") or "")
+            due = (
+                datetime.fromisoformat(base.replace("Z", "+00:00"))
+                if base else datetime.now(timezone.utc)
+            )
+            new_due = due + timedelta(hours=hours)
+            repo.update_hunt(row["id"], golive_due_at=new_due)
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ delay NOT applied (DB write failed: {e!r}) — try again."
+        return f"⏳ go-live pushed +{hours:g}h → {new_due:%Y-%m-%d %H:%M} UTC (persisted)."
+
     def _silence(arg: str = "") -> str:
         try:
             n = control.pause()
@@ -383,6 +439,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
         "status": _status,
         "silence": _silence,
         "resume": _resume,
+        "abort_prep": _abort_prep,
+        "delay_golive": _delay_golive,
         "tease": _tease,
         "approve": _approve,
         "reject": _reject,

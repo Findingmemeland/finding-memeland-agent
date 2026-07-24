@@ -28,7 +28,10 @@ from ..content.clue_engine import PersonaContext, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
 from ..content.templates import (
     DM_REPLY_BAD_CODE,
+    DM_REPLY_EARLY,
     DM_REPLY_LATE,
+    DM_REPLY_NEED_CODE,
+    DM_REPLY_NEED_WALLET,
     DM_REPLY_NO_ADDRESS,
     DM_REPLY_NO_HOLDING,
     DM_REPLY_NO_RESHARE,
@@ -37,6 +40,7 @@ from ..content.templates import (
     clue_one,
     winner_announcement,
 )
+from ..dm.assembler import SubmissionAssembler
 from ..dm.validator import parse_dm
 from .ports import PayoutReceipt, ReadyPersona, Winner
 
@@ -44,6 +48,7 @@ from .ports import PayoutReceipt, ReadyPersona, Winner
 class HuntState(str, Enum):
     IDLE = "idle"
     PREPARING = "preparing"
+    PREPPED = "prepped"      # dressed + prep posts running; Clue 1 not out (P2)
     LIVE = "live"
     RESOLVING = "resolving"
     PAYING = "paying"
@@ -56,7 +61,8 @@ class HuntState(str, Enum):
 # Allowed transitions. Any move not listed here is a bug and the supervisor halts.
 TRANSITIONS: dict[HuntState, set[HuntState]] = {
     HuntState.IDLE: {HuntState.PREPARING},
-    HuntState.PREPARING: {HuntState.LIVE, HuntState.VOIDED},
+    HuntState.PREPARING: {HuntState.PREPPED, HuntState.LIVE, HuntState.VOIDED},
+    HuntState.PREPPED: {HuntState.LIVE, HuntState.VOIDED},
     HuntState.LIVE: {HuntState.RESOLVING, HuntState.VOIDED},
     HuntState.RESOLVING: {HuntState.PAYING, HuntState.VOIDED},
     HuntState.PAYING: {HuntState.PENDING_CLEANUP, HuntState.VOIDED},
@@ -99,6 +105,10 @@ class PreparedHunt:
     clues: list[str] = field(default_factory=list)
     state: HuntState = HuntState.IDLE
     started_at: datetime | None = None
+    # P2 prepare/go-live split: live_at = when Clue 1 actually posted. The DM
+    # gate uses it: [0, started_at) = old noise; [started_at, live_at) = the
+    # prep window ('early', rejected + logged); [live_at, ...) = the game.
+    live_at: datetime | None = None
     # Public "Hunt #N" — DB-derived at prepare time, stored on the row, reread
     # on resume. ONE source of truth (P3.2: posts said #1 forever while resume
     # printed the DB id).
@@ -157,6 +167,9 @@ class Orchestrator:
         control=None,
         hunt_timeout_hours: float | None = 72,
         heartbeat=None,
+        persona_post_engine=None,
+        prep_window_h: float | None = None,
+        prep_posts_n: int = 3,
     ):
         self._settings = settings
         self._clock = clock
@@ -200,11 +213,19 @@ class Orchestrator:
         # hunt is live. Post-mortem P0: a silently hung/dead loop looked
         # exactly like a healthy idle one.
         self._heartbeat = heartbeat
+        # P2 prepare/go-live split. prep_window_h=None keeps the legacy direct
+        # go-live (simulation/live-test default); production passes 24.
+        self._persona_post_engine = persona_post_engine
+        self._prep_window_h = prep_window_h
+        self._prep_posts_n = prep_posts_n
 
     # ------------------------------------------------------------------
     def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
         self._settings.assert_ready_for_hunt()
         hunt = self._prepare(prize_usd if prize_usd is not None else self._settings.prize_usd_max)
+        if self._prep_window_h:
+            if not self._prep_window(hunt):
+                return hunt  # aborted by the operator during prep
         self._go_live(hunt)
         winner = self._clue_and_dm_loop(hunt)
         if winner is None:  # deadline passed unclaimed -> voided inside the loop
@@ -317,11 +338,42 @@ class Orchestrator:
                 "alter table hunts add column if not exists persona_identity jsonb; "
                 "alter table hunts add column if not exists hunt_number integer;"
             )
+        # P2: generate the persona's prep posts NOW (they anchor the clues) and
+        # schedule them at random times inside the window. Publishing happens in
+        # _prep_window; without a window this block is skipped entirely.
+        prep_posts: list[str] = []
+        if self._prep_window_h and self._persona_post_engine is not None:
+            prep_posts = self._persona_post_engine.generate(
+                identity, n=self._prep_posts_n
+            )
+            window_s = self._prep_window_h * 3600
+            for i, text in enumerate(prep_posts):
+                # Spread across the middle 80% of the window, ordered.
+                frac = (i + 1) / (len(prep_posts) + 1)
+                sched = started_at + timedelta(seconds=window_s * (0.1 + 0.8 * frac))
+                try:
+                    self._repo.create_persona_post(
+                        hunt_id=hunt_id, text=text, scheduled_at=sched
+                    )
+                except Exception as e:  # noqa: BLE001 — table may predate migration
+                    self._notify(
+                        f"persona_posts table missing? ({e!r}) — prep posts will "
+                        "not be published. Run the 2026-07-24 migration."
+                    )
+                    prep_posts = []
+                    break
+
+        ctx = PersonaContext.from_generated(identity, persona.handle)
+        # Anchor posts: the clue engine points players at REAL searchable
+        # phrases — the vector that provably works (Hunt #2).
+        if prep_posts and hasattr(ctx, "anchor_posts"):
+            ctx.anchor_posts = list(prep_posts)
+
         hunt = PreparedHunt(
             id=hunt_id,
             persona=persona,
             identity=identity,
-            ctx=PersonaContext.from_generated(identity, persona.handle),
+            ctx=ctx,
             claim_code=claim_code,
             salt=salt,
             integrity_hash=integrity_hash,
@@ -335,6 +387,103 @@ class Orchestrator:
         )
         self._notify(f"hunt #{hunt.number}: persona {persona.handle} dressed, preparing")
         return hunt
+
+    # Poll cadence inside the prep window (checks abort/delay flags + due posts).
+    _PREP_TICK_S = 60
+
+    def _prep_window(self, hunt: PreparedHunt) -> bool:
+        """T-24h → T0: persona is dressed and posting; Clue 1 is NOT out.
+
+        The DB is the source of truth for the whole window (post-mortem
+        doctrine): golive_due_at (which /delay_golive moves) and abort_prep
+        (which /abort_prep sets) are re-read every tick, so operator commands
+        and restarts always win. Returns True to proceed to go-live, False if
+        the operator aborted (persona undressed + retired)."""
+        if hunt.state is HuntState.PREPPED:
+            # Crash-resume: window already scheduled; the DB row has the truth.
+            row0 = {}
+            try:
+                row0 = self._repo.get_hunt(hunt.id) or {}
+            except Exception:  # noqa: BLE001
+                pass
+            due = _as_dt(row0.get("golive_due_at")) or self._clock.now()
+        else:
+            due = self._clock.now() + timedelta(hours=self._prep_window_h)
+            self._transition(hunt, HuntState.PREPPED, golive_due_at=due)
+            self._notify(
+                f"hunt #{hunt.number} PREPPED — persona dressed; prep window until "
+                f"{due:%Y-%m-%d %H:%M} UTC. /abort_prep aborts, /delay_golive <h> delays."
+            )
+        while True:
+            row = {}
+            try:
+                row = self._repo.get_hunt(hunt.id) or {}
+            except Exception as e:  # noqa: BLE001 — DB hiccup: keep last known
+                self._notify(f"prep window: DB read failed (retrying): {e!r}")
+
+            if row.get("abort_prep"):
+                self._abort_prep(hunt)
+                return False
+
+            if self._control is not None and self._control.paused():
+                self._clock.sleep(self._PREP_TICK_S)
+                continue
+
+            self._publish_due_prep_posts(hunt)
+
+            due = _as_dt(row.get("golive_due_at")) or due
+            if self._clock.now() >= due:
+                return True
+            self._clock.sleep(self._PREP_TICK_S)
+
+    def _publish_due_prep_posts(self, hunt: PreparedHunt) -> None:
+        """Publish any scheduled persona post whose time has come. Best-effort:
+        a failed post is retried next tick; a failed bookkeeping write must not
+        re-post (mark first? no — the post matters more than the row; we mark
+        after posting and notify if the mark fails)."""
+        try:
+            rows = self._repo.persona_posts_for_hunt(hunt.id)
+        except Exception:  # noqa: BLE001
+            return
+        now = self._clock.now()
+        for r in rows:
+            if r.get("posted_at"):
+                continue
+            sched = _as_dt(r.get("scheduled_at"))
+            if sched is None or sched > now:
+                continue
+            try:
+                tweet_id = self._dresser.publish_post(
+                    access_token=hunt.persona.access_token,
+                    access_secret=hunt.persona.access_secret,
+                    text=r["text"],
+                )
+            except Exception as e:  # noqa: BLE001
+                self._notify(f"prep post failed (will retry next tick): {e!r}")
+                continue
+            try:
+                self._repo.set_persona_post(r["id"], posted_at=now, tweet_id=tweet_id)
+            except Exception as e:  # noqa: BLE001
+                self._notify(
+                    f"prep post {tweet_id} published but NOT marked in the DB "
+                    f"({e!r}) — it may be re-posted after a restart; check."
+                )
+
+    def _abort_prep(self, hunt: PreparedHunt) -> None:
+        """Operator's /abort_prep: something broke during the window (persona
+        suspended, post flagged). Undress, retire, void — Clue 1 never fires."""
+        self._notify(f"hunt #{hunt.number} prep ABORTED by operator — voiding.")
+        self._transition(hunt, HuntState.VOIDED)
+        self._transition(hunt, HuntState.RETIRING)
+        try:
+            self._dresser.retire(
+                access_token=hunt.persona.access_token,
+                access_secret=hunt.persona.access_secret,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"undress of aborted persona failed: {e!r} — reset it manually.")
+        self._persona_source.mark_retired(hunt.persona.id)
+        self._transition(hunt, HuntState.DONE)
 
     def _go_live(self, hunt: PreparedHunt) -> None:
         draft = self._clue_engine.next_clue(hunt.ctx, 1, [])
@@ -350,14 +499,33 @@ class Orchestrator:
         self._repo.record_clue(
             hunt_id=hunt.id, clue_index=1, clue_text=draft.text, tweet_id=tweet_id
         )
-        # reshare_post_id persisted so a restarted agent keeps the SAME gate.
-        self._transition(hunt, HuntState.LIVE, reshare_post_id=tweet_id)
+        # reshare_post_id persisted so a restarted agent keeps the SAME gate;
+        # live_at is the prep-window boundary for the DM gate (P2).
+        hunt.live_at = self._clock.now()
+        self._transition(
+            hunt, HuntState.LIVE, reshare_post_id=tweet_id, live_at=hunt.live_at
+        )
         self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})")
 
     # A submission whose processing keeps erroring (X lookup down, DB hiccup) is
     # retried this many times before being skipped, so one poisoned DM can never
     # stall the queue forever.
     _MAX_SUBMISSION_RETRIES = 3
+    # Round-robin cap on per-conversation reads (rate budget: ONE read per
+    # cycle in the conversation endpoint's own 15/15min bucket).
+    _MAX_ACTIVE_CONVS = 15
+
+    def _touch_conv(self, active: list, markers: dict, sub) -> None:
+        """Record activity: sender moves to the front of the rotation (recent
+        talkers are re-read soonest) and its per-conversation marker advances."""
+        sender = sub.sender_x_id
+        if sender in active:
+            active.remove(sender)
+        active.insert(0, sender)
+        del active[self._MAX_ACTIVE_CONVS:]
+        prev = markers.get(sender)
+        if str(sub.dm_id).isdigit() and (prev is None or int(sub.dm_id) > int(prev)):
+            markers[sender] = sub.dm_id
 
     def _clue_and_dm_loop(
         self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
@@ -389,6 +557,64 @@ class Orchestrator:
         sub_retries: dict[str, int] = {}
         pause_notified = False
 
+        # ---- DM ingestion state (Hunt #2 P0 fix) ----
+        # processed: dedupe between the discovery stream and per-conversation
+        # reads (prepopulated from the log so a resume never double-processes).
+        # conv_marker/active_convs: per-conversation cursors + rotation.
+        # assembler: joins code+wallet across a sender's messages; replaying the
+        # log rebuilds partial state after a restart AND seeds the validation
+        # fingerprints so old complete pairs aren't re-validated.
+        assembler = SubmissionAssembler()
+        processed: set[str] = set()
+        conv_marker: dict[str, str] = {}
+        active_convs: list[str] = []
+        try:
+            from ..dm.validator import ParsedDM as _P
+
+            for row in sorted(
+                self._repo.submissions_for_hunt(hunt.id),
+                key=lambda r: str(r.get("x_created_at") or ""),
+            ):
+                dmid = str(row.get("dm_id") or "")
+                sender = str(row.get("sender_x_id") or "")
+                if dmid:
+                    processed.add(dmid)
+                if not sender:
+                    continue
+                if sender not in active_convs:
+                    active_convs.append(sender)
+                if dmid.isdigit():
+                    prev = conv_marker.get(sender)
+                    if prev is None or int(dmid) > int(prev):
+                        conv_marker[sender] = dmid
+                if row.get("outcome") == "early":
+                    continue  # prep-window messages never feed the assembler
+                code = str(row.get("submitted_claim_code") or "").upper() or None
+                replayed = assembler.feed(
+                    _P(dm_id=dmid, sender_x_id=sender,
+                       wallet=row.get("wallet") or None, claim_code=code,
+                       claim_candidates=(code,) if code else ()),
+                    _as_dt(row.get("x_created_at")) or self._clock.now(),
+                )
+                if replayed is not None:
+                    # This pair was already validated before the restart (its
+                    # outcome is in the log) — don't re-validate it now.
+                    assembler.mark_validated(sender)
+        except Exception as e:  # noqa: BLE001 — a bad log row must not block the hunt
+            self._notify(f"could not rebuild DM ingestion state ({e!r}) — starting fresh.")
+        rr_index = 0
+        # Settlement sweep (fairness): the winner is decided by the created_at
+        # of the message that COMPLETED the pair — but round-robin reads can
+        # PROCESS a later clean thread before an earlier follow-up is read
+        # (exactly the Hunt #2 injustice, recreated by read latency). So the
+        # first valid win only opens a candidacy: every active conversation is
+        # re-read once more, an earlier completion replaces the candidate, and
+        # only then does the hunt resolve. Worst case adds ~cap×cycle (~19 min)
+        # before payment; ordering is never decided by our polling schedule.
+        win_best: tuple | None = None          # (completed_at, Winner)
+        settle_pending: set[str] = set()
+        settle_deadline = None
+
         for _ in range(self._max_rounds):
             # Liveness: one beat per cycle, whatever the cycle does (idle,
             # pause, failure backoff). No beats => hung or dead => watchdog.
@@ -408,7 +634,8 @@ class Orchestrator:
 
             # ---- Phase 0b: unclaimed-hunt deadline ----
             if (
-                self._hunt_timeout_h is not None
+                win_best is None
+                and self._hunt_timeout_h is not None
                 and hunt.started_at is not None
                 and self._clock.now() >= hunt.started_at + timedelta(hours=self._hunt_timeout_h)
             ):
@@ -416,11 +643,20 @@ class Orchestrator:
                 return None
 
             # ---- Phase 1: read DMs (isolated — a failed poll is retried) ----
+            # Two streams (Hunt #2 P0): the account-level endpoint SUPPRESSES
+            # inbound events of conversations we replied in (proven in prod +
+            # devcommunity /t/254508), so it is DISCOVERY-only; follow-ups come
+            # from per-conversation reads, ONE per cycle by rate budget (each
+            # endpoint has its own 15/15min per-user bucket; at 75s/cycle both
+            # streams run at 12/15min — never read two conversations per cycle).
+            raw_batch: list = []
+            discovery_ids: set[str] = set()
             try:
-                batch = sorted(self._dm_source.poll(since), key=lambda s: s.created_at)
+                found = list(self._dm_source.poll(since))
+                discovery_ids = {s.dm_id for s in found}
+                raw_batch += found
                 poll_failures = 0
             except Exception as e:  # noqa: BLE001
-                batch = []
                 poll_failures += 1
                 self._notify(
                     f"DM poll failed ({poll_failures}x, retrying): {e!r}"
@@ -428,67 +664,179 @@ class Orchestrator:
                 # extra backoff on top of the normal sleep, capped at 5 min
                 self._clock.sleep(min(300, self._poll_interval_s * min(poll_failures, 4)))
 
+            poll_conv = getattr(self._dm_source, "poll_conversation", None)
+            if poll_conv is not None and active_convs:
+                # During settlement, prioritize conversations not yet re-read.
+                pool = [c for c in active_convs if c in settle_pending] or active_convs
+                conv = pool[rr_index % len(pool)]
+                rr_index += 1
+                try:
+                    raw_batch += list(poll_conv(conv, conv_marker.get(conv)))
+                    settle_pending.discard(conv)
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"conversation poll {conv} failed (next cycle): {e!r}")
+            elif poll_conv is None:
+                settle_pending.clear()  # single-stream source: nothing to sweep
+
+            merged: dict[str, object] = {}
+            for sub in raw_batch:
+                if sub.dm_id not in processed and sub.dm_id not in merged:
+                    merged[sub.dm_id] = sub
+            batch = sorted(merged.values(), key=lambda s: s.created_at)
+
             # ---- Phase 2: process submissions (isolated per submission) ----
+            tag = f"[hunt#{hunt.number}/db{hunt.id}]"
             if batch:
-                print(
-                    f"[hunt#{hunt.id}] processing {len(batch)} dm(s), "
-                    f"marker={since or 'start'}"
-                )
+                print(f"{tag} processing {len(batch)} dm(s), marker={since or 'start'}")
             for sub in batch:
-                # Ignore DMs from BEFORE this hunt started (old conversations are
-                # not submissions). Without this the agent would re-process every
-                # historical DM each hunt — spamming past contacts with the canned
-                # reply and burning API credits.
+                live_boundary = hunt.live_at or hunt.started_at
+
+                # Window 1 — before the hunt row existed: old conversations,
+                # not submissions. Skipped, but never silently (post-mortem P0).
                 if hunt.started_at is not None and sub.created_at < hunt.started_at:
-                    # Post-mortem P0: this skip was the one SILENT drop path in
-                    # the loop — log it so a misfiltered DM is visible in logs.
                     print(
-                        f"[hunt#{hunt.id}] dm {sub.dm_id} skipped: pre-hunt "
+                        f"{tag} dm {sub.dm_id} skipped: pre-hunt "
                         f"({sub.created_at} < {hunt.started_at}); marker advanced"
                     )
-                    since = sub.dm_id
+                    if sub.dm_id in discovery_ids:
+                        since = sub.dm_id
+                    processed.add(sub.dm_id)
                     continue
+
+                # Window 2 — the prep window (persona dressed, Clue 1 NOT out):
+                # rejected + LOGGED + replied, never able to win, never fed to
+                # the assembler (windows are watertight). Hunt #2 P2 gate.
+                if live_boundary is not None and sub.created_at < live_boundary:
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=sub.dm_id,
+                            sender_x_id=sub.sender_x_id, wallet=None,
+                            outcome="early", x_created_at=sub.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"early dm {sub.dm_id} could not be logged: {e!r}")
+                    print(f"{tag} dm {sub.dm_id} rejected: early (prep window)")
+                    if sub.dm_id in discovery_ids:
+                        since = sub.dm_id
+                    processed.add(sub.dm_id)
+                    self._touch_conv(active_convs, conv_marker, sub)
+                    try:
+                        self._publisher.reply_dm(sub.sender_x_id, DM_REPLY_EARLY)
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"early reply to @{sub.sender_handle} failed (non-fatal): {e!r}")
+                    continue
+
+                # Window 3 — the game.
                 try:
                     parsed = parse_dm(
                         sub.dm_id, sub.sender_x_id, sub.body,
                         expected_code_len=len(hunt.claim_code),
                     )
-                    res = self._validator.validate(parsed, hunt)
-                    self._repo.log_submission(
+                    # Hunt #2 rule: code and wallet may arrive in separate
+                    # messages; arrival order = the message that COMPLETED the
+                    # pair. Each raw message is still logged for the audit.
+                    assembled = assembler.feed(parsed, sub.created_at)
+                    if assembled is not None:
+                        res = self._validator.validate(assembled.parsed, hunt)
+                        assembler.mark_validated(sub.sender_x_id)
+                        outcome = res.outcome
+                        wallet_for_log = assembled.parsed.wallet
+                    else:
+                        res = None
+                        missing = assembler.missing(sub.sender_x_id)
+                        outcome = "malformed" if missing == "both" else "partial"
+                        wallet_for_log = parsed.wallet
+                    row_id = self._repo.log_submission(
                         hunt_id=hunt.id, dm_id=sub.dm_id, sender_x_id=sub.sender_x_id,
-                        wallet=parsed.wallet, outcome=res.outcome, x_created_at=sub.created_at,
+                        wallet=wallet_for_log, submitted_claim_code=parsed.claim_code,
+                        outcome=outcome, x_created_at=sub.created_at,
                     )
                 except Exception as e:  # noqa: BLE001
                     tries = sub_retries.get(sub.dm_id, 0) + 1
                     sub_retries[sub.dm_id] = tries
                     if tries < self._MAX_SUBMISSION_RETRIES:
-                        # Do NOT advance the marker: this DM is re-read and
+                        # Do NOT advance markers: this DM is re-read and
                         # retried on the next poll, preserving arrival order.
                         self._notify(
                             f"submission {sub.dm_id} failed (attempt {tries}, "
                             f"will retry): {e!r}"
                         )
                         break
-                    since = sub.dm_id  # give up on this one; don't stall the queue
+                    if sub.dm_id in discovery_ids:
+                        since = sub.dm_id  # give up on this one; don't stall the queue
+                    processed.add(sub.dm_id)
                     self._notify(
                         f"submission {sub.dm_id} SKIPPED after "
                         f"{tries} failed attempts: {e!r} — review it manually."
                     )
                     continue
-                since = sub.dm_id
-                if res.won:
-                    self._transition(hunt, HuntState.RESOLVING)
-                    self._notify(f"winner: @{sub.sender_handle}")
-                    return Winner(submission=sub, wallet=parsed.wallet)
-                reply = _REPLY_BY_OUTCOME.get(res.outcome)
+                if sub.dm_id in discovery_ids:
+                    since = sub.dm_id
+                processed.add(sub.dm_id)
+                self._touch_conv(active_convs, conv_marker, sub)
+                if res is not None and res.won:
+                    cand = Winner(
+                        submission=sub, wallet=assembled.parsed.wallet,
+                        submission_row_id=row_id if isinstance(row_id, int) else None,
+                    )
+                    if win_best is None:
+                        win_best = (sub.created_at, cand)
+                        settle_pending = {
+                            c for c in active_convs if c != sub.sender_x_id
+                        }
+                        settle_deadline = self._clock.now() + timedelta(
+                            seconds=max(600, (self._MAX_ACTIVE_CONVS + 2) * self._poll_interval_s)
+                        )
+                        self._notify(
+                            f"win candidate: @{sub.sender_handle} (completed "
+                            f"{sub.created_at:%H:%M:%S}) — settlement sweep over "
+                            f"{len(settle_pending)} conversation(s) before paying."
+                        )
+                    elif sub.created_at < win_best[0]:
+                        self._notify(
+                            f"settlement: EARLIER completion by @{sub.sender_handle} "
+                            f"({sub.created_at:%H:%M:%S}) replaces the candidate."
+                        )
+                        win_best = (sub.created_at, cand)
+                    else:
+                        # Valid but later than the candidate: they lost the race.
+                        try:
+                            self._publisher.reply_dm(sub.sender_x_id, DM_REPLY_LATE)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
+                if res is not None:
+                    reply = _REPLY_BY_OUTCOME.get(res.outcome)
+                else:
+                    reply = {
+                        "wallet": DM_REPLY_NEED_WALLET,
+                        "code": DM_REPLY_NEED_CODE,
+                        "both": DM_REPLY_NO_ADDRESS,
+                    }.get(assembler.missing(sub.sender_x_id))
                 if reply:
-                    # Courtesy loss-notice is best-effort: a failed reply (e.g. DM
+                    # Courtesy replies are best-effort: a failed reply (e.g. DM
                     # send restrictions) must NEVER abort the hunt. The winner is
                     # paid on-chain + announced publicly; no DM is required.
                     try:
                         self._publisher.reply_dm(sub.sender_x_id, reply)
                     except Exception as e:  # noqa: BLE001
                         self._notify(f"reply to @{sub.sender_handle} failed (non-fatal): {e!r}")
+
+            # ---- Phase 2b: settlement finalization ----
+            if win_best is not None:
+                deadline_hit = settle_deadline is not None and self._clock.now() >= settle_deadline
+                if not settle_pending or deadline_hit:
+                    if deadline_hit and settle_pending:
+                        self._notify(
+                            f"settlement deadline hit with {len(settle_pending)} "
+                            "conversation(s) unread — finalizing with the best known."
+                        )
+                    winner = win_best[1]
+                    self._transition(hunt, HuntState.RESOLVING)
+                    self._notify(f"winner: @{winner.submission.sender_handle}")
+                    return winner
+                self._clock.sleep(self._poll_interval_s)
+                continue  # sweeping: no clues while the hunt is decided
 
             # ---- Phase 3: post the next clue (isolated — a failed clue is a
             # skipped round, never a dead hunt) ----
@@ -597,21 +945,46 @@ class Orchestrator:
                 "may still mine — check the chain before ANY manual retry."
             )
             raise
-        self._repo.set_payout_status(intent_id, "sent", tx_hash=receipt.tx_hash)
-        self._repo.record_winner(
-            hunt_id=hunt.id, winner_x_id=winner.submission.sender_x_id,
-            wallet=winner.wallet, prize_fmml=hunt.prize_fmml,
-        )
+        # ---- THE MONEY IS OUT. From here on, NOTHING may kill the hunt ----
+        # (Hunt #2 P1: record_winner crashed on a NOT NULL column and the hunt
+        # died AFTER paying, without the Winner Announcement. Bookkeeping
+        # failures notify loudly and the flow continues to the reveal.)
+        try:
+            self._repo.set_payout_status(intent_id, "sent", tx_hash=receipt.tx_hash)
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"🚨 payout SENT ({receipt.tx_hash}) but could not be marked "
+                f"'sent' in the DB: {e!r} — fix the payouts row manually."
+            )
+        try:
+            self._repo.record_winner(
+                hunt_id=hunt.id, winner_x_id=winner.submission.sender_x_id,
+                wallet=winner.wallet, prize_fmml=hunt.prize_fmml,
+                submission_id=winner.submission_row_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"🚨 winner paid ({receipt.tx_hash}) but record_winner failed: "
+                f"{e!r} — insert the winners row manually. The reveal continues."
+            )
         self._notify(f"paid {hunt.prize_fmml:,} $FIND to {winner.wallet} ({receipt.tx_hash})")
         return receipt
 
     def _reveal(self, hunt: PreparedHunt, winner: Winner, receipt) -> None:
+        """Invariant (Hunt #2 P1): once the money is out, the announcement
+        ALWAYS goes out. DB transitions are best-effort here; the post retries."""
         now = self._clock.now()
-        self._transition(
-            hunt, HuntState.PENDING_CLEANUP,
-            resolved_at=now, cleanup_due_at=now + timedelta(seconds=self._cleanup_window_s),
-        )
-        elapsed = self._clock.now() - hunt.started_at if hunt.started_at else None
+        try:
+            self._transition(
+                hunt, HuntState.PENDING_CLEANUP,
+                resolved_at=now, cleanup_due_at=now + timedelta(seconds=self._cleanup_window_s),
+            )
+        except Exception as e:  # noqa: BLE001
+            hunt.state = HuntState.PENDING_CLEANUP  # keep the flow moving
+            self._notify(f"🚨 transition to PENDING_CLEANUP failed in the DB: {e!r} — fix the row manually.")
+        # Time-to-win measured from Clue 1 (live_at), not from the prep dress.
+        start = hunt.live_at or hunt.started_at
+        elapsed = self._clock.now() - start if start else None
         data = WinnerData(
             hunt_n=hunt.number,
             winner_handle=winner.submission.sender_handle,
@@ -623,7 +996,20 @@ class Orchestrator:
             claim_code=hunt.claim_code,
             salt=hunt.salt,
         )
-        self._publisher.post(winner_announcement(data), long_post=True)
+        text = winner_announcement(data)
+        for attempt in range(3):
+            try:
+                self._publisher.post(text, long_post=True)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 2:
+                    self._notify(
+                        f"🚨 Winner Announcement FAILED 3x: {e!r} — winner is paid "
+                        f"({receipt.tx_hash}); POST THE REVEAL MANUALLY."
+                    )
+                else:
+                    self._notify(f"winner announcement failed (retrying): {e!r}")
+                    self._clock.sleep(30)
         self._clock.sleep(self._cleanup_window_s)  # reveal window (1h prod; short in test)
 
     def _retire(self, hunt: PreparedHunt) -> None:
@@ -704,6 +1090,25 @@ class Orchestrator:
                 self._notify(f"retire of voided persona failed: {e!r} — undress it manually.")
             self._persona_source.mark_retired(hunt.persona.id)
             self._transition(hunt, HuntState.DONE)
+            return
+
+        if state is HuntState.PREPPED:
+            # Persona dressed, prep posts possibly mid-schedule, Clue 1 not out.
+            # Re-enter the prep window: golive_due_at/abort_prep live in the DB,
+            # so the operator's commands survive the restart for free.
+            self._notify(
+                f"hunt #{hunt.number} resumed in PREP window — continuing to "
+                "publish prep posts until go-live."
+            )
+            if not self._prep_window(hunt):
+                return
+            self._go_live(hunt)
+            winner = self._clue_and_dm_loop(hunt)
+            if winner is None:
+                return
+            receipt = self._pay(hunt, winner)
+            self._reveal(hunt, winner, receipt)
+            self._retire(hunt)
             return
 
         if state is HuntState.LIVE:
@@ -794,6 +1199,7 @@ class Orchestrator:
             clues=[c["clue_text"] for c in clue_rows],
             state=state,
             started_at=_as_dt(row.get("started_at")),
+            live_at=_as_dt(row.get("live_at")),
             # Pre-migration rows have no hunt_number; the DB id is a better
             # fallback than a hardcoded 1 (at least it's unique and traceable).
             number=_as_int(row.get("hunt_number")) or int(row["id"]),

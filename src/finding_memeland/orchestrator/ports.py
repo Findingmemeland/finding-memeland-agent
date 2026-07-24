@@ -37,6 +37,9 @@ class Submission:
 class Winner:
     submission: Submission
     wallet: str
+    # submissions.id of the winning row — record_winner links to it (P1: the
+    # missing NOT NULL column that crashed the hunt AFTER the money left).
+    submission_row_id: int | None = None
 
 
 @dataclass

@@ -198,10 +198,30 @@ class XClient:
         {dm_id, sender_x_id, sender_handle, text, created_at}. Empty => $0.
         Events SENT by the main account itself are filtered out.
 
+        ⚠️ KNOWN X BUG (Hunt #2 post-mortem, confirmed in production logs +
+        devcommunity /t/254508): this account-level endpoint STOPS delivering
+        subsequent inbound events of a conversation after we reply in it. Use
+        it for DISCOVERY of new conversations only; follow-ups must be read
+        with read_conversation_dms (per-conversation endpoint, reliable).
+
         PAGINATED: a viral spike can bring >50 DMs between polls; without
         pagination the oldest — the true first-arrived submissions — would be
         silently dropped. We keep fetching pages until we reach already-seen
         events (since_id), run out, or hit the page cap."""
+        return self._read_events(since_id=since_id)
+
+    def read_conversation_dms(
+        self, participant_id: str, *, since_id: str | None = None
+    ) -> list[dict]:
+        """Inbound DMs of ONE 1-1 conversation (dm_conversations/with/:id) —
+        the reliable path for follow-ups the account-level endpoint suppresses.
+        Rate limit: 15/15min per user for THIS endpoint, shared across ALL
+        participant_ids — the orchestrator budgets 1 call per poll cycle."""
+        return self._read_events(since_id=since_id, participant_id=participant_id)
+
+    def _read_events(
+        self, *, since_id: str | None = None, participant_id: str | None = None
+    ) -> list[dict]:
         me: str | None = None
         out: list[dict] = []
         page_token: str | None = None
@@ -216,6 +236,8 @@ class XClient:
                 expansions=["sender_id"],
                 user_auth=True,
             )
+            if participant_id is not None:
+                kwargs["participant_id"] = participant_id
             if page_token:
                 kwargs["pagination_token"] = page_token
             resp = self._v2().get_direct_message_events(**kwargs)
@@ -253,8 +275,9 @@ class XClient:
             if reached_seen or not page_token:
                 break
         out.sort(key=lambda d: d["created_at"])
+        scope = f"conv={participant_id} " if participant_id else ""
         print(
-            f"[dm-poll] pages={pages} raw={raw} non_message={non_msg} "
+            f"[dm-poll] {scope}pages={pages} raw={raw} non_message={non_msg} "
             f"self={self_skipped} since_skipped={since_skipped} "
             f"returned={len(out)} since={since_id or 'start'}"
         )
