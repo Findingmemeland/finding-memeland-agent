@@ -42,6 +42,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
         next_clue_due_factory,
         worst_case_hunt_hours,
     )
+    from .claims.source import XClaimSource
+    from .claims.taunts import TauntEngine
     from .content.filler import FillerEngine
     from .content.persona_posts import PersonaPostEngine
     from .db.client import Repo, make_client
@@ -142,6 +144,17 @@ def build_agent(settings: Settings | None = None) -> Agent:
         persona_post_engine=PersonaPostEngine(anthropic, s.anthropic_model),
         prep_window_h=s.prep_window_h or None,
         prep_posts_n=s.prep_posts_n,
+        # Claim-by-post (2026-07-25): submissions are public replies on the
+        # Clue 1 post, read via mentions (the DM API only reads virgin
+        # conversations). claim_channel='dm' reverts to the legacy DM loop.
+        claim_source=XClaimSource(x) if s.claim_channel == "post" else None,
+        taunt_engine=(
+            TauntEngine(anthropic, s.anthropic_model)
+            if s.claim_channel == "post" else None
+        ),
+        claim_guess_cap=s.claim_guess_cap,
+        wallet_timeout_s=s.wallet_timeout_s,
+        claim_sweep_every_n=s.claim_sweep_every_n,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.
         undress_on_retire=False,

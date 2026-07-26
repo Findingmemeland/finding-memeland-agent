@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # only fires at the end. 0 disables the window (legacy direct go-live).
     prep_window_h: float = Field(default=24.0)
     prep_posts_n: int = Field(default=3)     # 2-4 anchor posts in the window
+    # Claim-by-post channel (2026-07-25): the DM API only reads virgin
+    # conversations, so submissions moved to public replies on the Clue 1 post.
+    # 'post' = claim-by-post (production); 'dm' = legacy DM channel (fallback,
+    # kept until the post channel survives a production hunt).
+    claim_channel: str = Field(default="post")
+    claim_guess_cap: int = Field(default=5)       # code-like posts per account/hunt
+    wallet_timeout_s: int = Field(default=600)    # 10 min from OUR public ask
+    claim_sweep_every_n: int = Field(default=5)   # thread-search backstop cadence
 
     @property
     def is_production(self) -> bool:

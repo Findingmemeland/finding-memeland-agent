@@ -44,6 +44,12 @@ _DM_FETCH = 50
 # Pagination cap per poll: 10 pages x 50 = 500 DMs. Bounds the cost of a viral
 # spike while never silently dropping the oldest (= first-arrived) submissions.
 _DM_MAX_PAGES = 10
+# Mentions timeline (claim-by-post): 100/page, 5 pages = 500 mentions per poll.
+# Owned read ($0.001/resource, deduped per 24h UTC day) — polling frequency does
+# not multiply cost; only UNIQUE mentions are billed.
+_MENTIONS_FETCH = 100
+_MENTIONS_MAX_PAGES = 10
+_TWEET_FIELDS = ["author_id", "created_at", "conversation_id", "referenced_tweets"]
 
 
 def _retry_server_error(fn, *, tries: int = 3, delay: float = 4.0):
@@ -59,6 +65,13 @@ def _retry_server_error(fn, *, tries: int = 3, delay: float = 4.0):
             if attempt < tries - 1:
                 time.sleep(delay)
     raise last
+
+
+def _arrival_key(d: dict) -> tuple:
+    """created_at first, snowflake id as tiebreak — guarded so one malformed
+    id can never blind every subsequent poll."""
+    tid = d["tweet_id"]
+    return (d["created_at"], int(tid) if str(tid).isdigit() else 0)
 
 
 @dataclass(frozen=True)
@@ -282,6 +295,111 @@ class XClient:
             f"returned={len(out)} since={since_id or 'start'}"
         )
         return out
+
+    # ------------------------------------------------------------------
+    # Claim-by-post reads (2026-07-25): the DM endpoints only deliver "virgin"
+    # conversations, so submissions moved to public replies on the Clue 1 post.
+    # ------------------------------------------------------------------
+    def _tweet_rows(self, tweets, includes, me: str) -> list[dict]:
+        users = {}
+        if includes and includes.get("users"):
+            users = {str(u.id): u for u in includes["users"]}
+        rows: list[dict] = []
+        for t in tweets or []:
+            author = str(getattr(t, "author_id", "") or "")
+            if author == me:
+                continue  # our own posts/replies are not submissions
+            replied_to = None
+            for ref in (getattr(t, "referenced_tweets", None) or []):
+                if getattr(ref, "type", "") == "replied_to":
+                    replied_to = str(ref.id)
+                    break
+            u = users.get(author)
+            rows.append({
+                "tweet_id": str(t.id),
+                "author_id": author,
+                "author_handle": (u.username if u else ""),
+                "text": getattr(t, "text", "") or "",
+                "created_at": t.created_at,
+                "conversation_id": str(getattr(t, "conversation_id", "") or "") or None,
+                "replied_to_id": replied_to,
+            })
+        return rows
+
+    def read_mentions(self, *, since_id: str | None = None) -> list[dict]:
+        """Posts mentioning the main account (which includes every reply to our
+        posts), ascending by (created_at, id). Owned read — the cheap, healthy
+        endpoint the claim channel is built on. Paginated with a cap, like
+        read_dms: a viral spike must never silently drop the oldest replies."""
+        me = self._self_id()
+        out: list[dict] = []
+        page_token: str | None = None
+        pages = raw = 0
+        for _ in range(_MENTIONS_MAX_PAGES):
+            kwargs = dict(
+                id=me, max_results=_MENTIONS_FETCH,
+                tweet_fields=_TWEET_FIELDS, expansions=["author_id"],
+                user_auth=True,
+            )
+            if since_id:
+                kwargs["since_id"] = since_id
+            if page_token:
+                kwargs["pagination_token"] = page_token
+            resp = self._v2().get_users_mentions(**kwargs)
+            tweets = resp.data or []
+            pages += 1
+            raw += len(tweets)
+            out += self._tweet_rows(tweets, resp.includes, me)
+            meta = getattr(resp, "meta", None) or {}
+            page_token = meta.get("next_token")
+            if not page_token:
+                break
+        out.sort(key=_arrival_key)
+        # Flight recorder (post-mortem doctrine): one line per poll, so a
+        # healthy-but-quiet thread and a broken read never look identical.
+        # TRUNCATED means the page cap was hit with more pages available: the
+        # OLDEST (= first-arrived) mentions were NOT fetched this poll and the
+        # marker must not be trusted to have covered them — operator alert.
+        print(
+            f"[claim-poll] pages={pages} raw={raw} returned={len(out)} "
+            f"since={since_id or 'start'}"
+            + (" TRUNCATED" if page_token else "")
+        )
+        return out
+
+    def search_conversation(
+        self, conversation_id: str, *, since_id: str | None = None
+    ) -> list[dict]:
+        """Backstop sweep: EVERY post in the Clue 1 thread, including
+        replies-to-replies that don't mention us (invisible to the mentions
+        timeline). Regular read ($0.005/resource) — the orchestrator runs it
+        every N cycles, and the 24h dedup makes repeats near-free. Single page
+        on purpose: the sweep is a safety net, not the primary stream."""
+        me = self._self_id()
+        kwargs = dict(
+            query=f"conversation_id:{conversation_id}",
+            max_results=_MENTIONS_FETCH,
+            tweet_fields=_TWEET_FIELDS, expansions=["author_id"],
+            user_auth=True,
+        )
+        if since_id:
+            kwargs["since_id"] = since_id
+        resp = self._v2().search_recent_tweets(**kwargs)
+        out = self._tweet_rows(resp.data or [], resp.includes, me)
+        out.sort(key=_arrival_key)
+        print(
+            f"[claim-sweep] conv={conversation_id} raw={len(resp.data or [])} "
+            f"returned={len(out)} since={since_id or 'start'}"
+        )
+        return out
+
+    def reply_post(self, text: str, *, in_reply_to: str) -> str:
+        """Public reply on the main account (taunts, system messages, the
+        winner ask-wallet). Returns the reply's tweet id."""
+        resp = _retry_server_error(lambda: self._v2().create_tweet(
+            text=text, in_reply_to_tweet_id=in_reply_to, user_auth=True
+        ))
+        return str(resp.data["id"])
 
     def post(self, text: str, *, long_post: bool = False) -> str:
         """Publish on the main account; returns the tweet id. Long posts require

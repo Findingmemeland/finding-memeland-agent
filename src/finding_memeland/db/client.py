@@ -113,6 +113,14 @@ class Repo:
         rows = resp.data or []
         return rows[0].get("id") if rows else None
 
+    def set_submission_outcome(self, submission_id: int, outcome: str, **fields: Any) -> None:
+        """Update a submission's outcome after the fact (claim-by-post: a
+        'pending' claim resolves to won/timed_out/late/... once the public
+        wallet flow plays out; the winning row also gets the wallet)."""
+        self._db.table("submissions").update(
+            _clean({"outcome": outcome, **fields})
+        ).eq("id", submission_id).execute()
+
     def submissions_for_hunt(self, hunt_id: int) -> list[dict[str, Any]]:
         resp = (
             self._db.table("submissions").select("*").eq("hunt_id", hunt_id)

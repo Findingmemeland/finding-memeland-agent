@@ -108,11 +108,13 @@ the right track. So the persona must be DISTINCTIVE and searchable, never a
 generic name that drowns in thousands of look-alikes.
 
 Output rules:
-- display_name: max 50 chars, plain characters (letters, digits, spaces, simple \
-punctuation . , ' -). DISTINCTIVE and searchable — a search of this name should \
-return a SMALL set, not thousands. NEVER a hyper-common real-person name like \
-"Mike T" or "Sarah K". Prefer an uncommon combination, a memorable handle-style \
-name, or a distinctive phrase — without literally giving away the identity.
+- display_name: EXACTLY TWO WORDS (hard rule — X's People search chokes on \
+names of 3+ words: it returns nothing even for exact matches, so a longer name \
+makes the persona unfindable). Max 50 chars, plain characters (letters, digits, \
+spaces, simple punctuation . , ' -). DISTINCTIVE and searchable — a search of \
+this name should return a SMALL set, not thousands. NEVER a hyper-common \
+real-person name like "Mike T" or "Sarah K". Prefer an uncommon two-word \
+combination — without literally giving away the identity.
 - banner_prompt: a vivid image-generation prompt for a header banner that fits \
 the persona and can be hinted at by clues (a distinct scene/motif, no text, no \
 real-person likeness). Different from the avatar.
@@ -126,9 +128,10 @@ niche account. Must NOT state or imply it is a real living human. No URLs, no \
 @handles, no hashtags, no square brackets or special markup characters.
 - The display_name and bio must NOT openly reveal who the persona "really" is — \
 that is the puzzle. Keep it inferable, not stated.
-- Vary the naming style. Do NOT default to the "The ___" construction; mix in \
-plain names, lowercase handles-as-names, one-word names, phrases, etc., so the \
-pool has no predictable naming pattern players could filter on.
+- Vary the naming style WITHIN the two-word rule. Do NOT default to the \
+"The ___" construction; mix plain name pairs, lowercase handle-style pairs, \
+adjective+noun, noun+noun, etc., so the pool has no predictable naming pattern \
+players could filter on.
 - backstory: 2-4 sentences, the real hidden identity and the facts/paradoxes that \
 clues will later draw on. This is INTERNAL and never published.
 - voice: one short line describing how this persona posts.
@@ -167,6 +170,14 @@ def _to_persona(data: dict) -> GeneratedPersona:
     bio = sanitize_bio(str(data["bio"]))  # leaves room for the claim code
     if not name:
         raise ValueError("empty display_name after sanitization")
+    # Findability hard rule (Pedro, 2026-07-25): X's People search returns
+    # NOTHING for 3+-word names, even on exact match — a longer name makes the
+    # persona structurally unfindable. Enforced here, not just prompted.
+    if len(name.split()) != 2:
+        raise ValueError(
+            f"display_name must be exactly two words (got {len(name.split())}: "
+            f"{name!r}) — X People search can't find 3+-word names"
+        )
     if not bio:
         raise ValueError("empty bio after sanitization")
 

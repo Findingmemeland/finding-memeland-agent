@@ -115,6 +115,12 @@ class FakeRepo:
         self.submissions.append(row)
         return row["id"]
 
+    def set_submission_outcome(self, submission_id, outcome, **fields) -> None:
+        for row in self.submissions:
+            if row.get("id") == submission_id:
+                row["outcome"] = outcome
+                row.update(fields)
+
     def submissions_for_hunt(self, hunt_id) -> list:
         return [s for s in self.submissions if s.get("hunt_id") == hunt_id]
 
@@ -247,6 +253,7 @@ class FakePublisher:
     def __init__(self, verbose: bool = False):
         self.posts: list[str] = []
         self.dm_replies: list[tuple[str, str]] = []
+        self.post_replies: list[tuple[str, str]] = []  # (in_reply_to, text)
         self._verbose = verbose
         self._n = 0
 
@@ -261,6 +268,14 @@ class FakePublisher:
         self.dm_replies.append((recipient_x_id, text))
         if self._verbose:
             print(f"    [DM reply -> {recipient_x_id}] {text}")
+
+    def reply_post(self, text: str, *, in_reply_to: str) -> str:
+        """Claim-by-post public replies (taunts, system messages, wallet ask)."""
+        self._n += 1
+        self.post_replies.append((in_reply_to, text))
+        if self._verbose:
+            print(f"    [reply -> {in_reply_to}] {text}")
+        return f"tweet-{self._n}"
 
 
 class FakeValidator:

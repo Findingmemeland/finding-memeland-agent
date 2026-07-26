@@ -33,17 +33,21 @@ class WinnerData:
 # to understand what was being asked. These are the first two lines a stranger
 # reads; they must explain the game before anything else.
 #
-# Text set by Pedro (2026-07-20). Wording rules that shaped it: declared
-# fiction, never "fake person/account" (platform-manipulation vocabulary);
-# ask for the CODE in DM, never the wallet (that lives in the pinned rules);
-# no engagement-bait phrases. preflight_check still refuses to launch if this
-# ever reverts to the placeholder marker.
+# Original text set by Pedro (2026-07-20); claim channel updated 2026-07-25:
+# the DM API only reads virgin conversations, so submissions moved to PUBLIC
+# replies on this very post ("reply to this post with the code" — Pedro's
+# claim-by-post ruleset). Wording rules that still shape it: declared fiction,
+# never "fake person/account" (platform-manipulation vocabulary); ask for the
+# CODE, never the wallet (that lives in the pinned rules); no engagement-bait
+# phrases. preflight_check still refuses to launch if this ever reverts to the
+# placeholder marker.
 # --------------------------------------------------------------------------
 _EXPLAINER_PLACEHOLDER_MARK = "<<EXPLAINER-PENDING>>"
 CLUE_ONE_EXPLAINER = (
     "every hunt i invent someone who doesn't exist, "
     "and hide their account somewhere on X. \U0001F438\n"
-    "decode the clues, find it, DM me the code in its bio — first one wins the prize."
+    "decode the clues, find it, reply to this post with the code in its bio — "
+    "first one wins the prize."
 )
 
 
@@ -74,9 +78,20 @@ def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> st
     )
 
 
-def clue_followup(clue_index: int, clue_text: str, taunt: str) -> str:
-    """Clues 2+: label + clue + a varying jeer. No footer, no integrity line."""
-    return f"{_ordinal(clue_index)} Clue:\n\n{clue_text}\n\n{taunt}"
+def clue_followup(
+    clue_index: int, clue_text: str, taunt: str, claim_hint: str | None = None
+) -> str:
+    """Clues 2+: label + clue + a varying jeer. No footer, no integrity line.
+    claim_hint (claim-by-post channel): one fixed line pointing players back to
+    the Clue 1 thread — the single claim window."""
+    body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}\n\n{taunt}"
+    if claim_hint:
+        body += f"\n\n{claim_hint}"
+    return body
+
+
+# Claim-by-post: the line clues 2+ carry so late joiners know where to claim.
+CLUE_FOLLOWUP_CLAIM_HINT = "found it? reply to the Clue 1 post with the code."
 
 
 def winner_announcement(d: WinnerData) -> str:
@@ -105,6 +120,51 @@ def winner_announcement(d: WinnerData) -> str:
         f"The next hunt can begin at any time."
     )
 
+
+# --------------------------------------------------------------------------
+# Claim-by-post public replies (2026-07-25). System messages — deterministic,
+# no LLM. NEVER a URL in any of these ($0.20/post with URL vs $0.015 without).
+# Caps live in the orchestrator: max 1 of each TYPE per profile; taunts are a
+# separate engine (claims.taunts) with its own cap.
+# --------------------------------------------------------------------------
+def post_reply_win(minutes: int) -> str:
+    """Public reply to the winning code post: congrats + the wallet ask.
+    The timeout clock starts at THIS reply (Pedro: the winner only knows they
+    won when we answer), and only the same account may answer."""
+    return (
+        "you found me. \U0001F438\n"
+        f"drop your Base wallet (0x…) in a reply to THIS post — from this same "
+        f"account — within {minutes} minutes, and the prize is yours."
+    )
+
+
+POST_REPLY_MISSING_REPOST = (
+    "claim invalid — missing repost. repost the Clue 1 post, then post the "
+    "code again."
+)
+POST_REPLY_WRONG_DOOR = (
+    "the code goes in the replies of the Clue 1 post — drop it there and it "
+    "counts. \U0001F438"
+)
+POST_REPLY_INVALID_WALLET = (
+    "that address doesn't check out. reply with a valid Base wallet (0x…) — "
+    "same account, the clock is still ticking."
+)
+POST_REPLY_TIMED_OUT = (
+    "submission timed out. failed to send wallet.\n"
+    "miss your window → next in line."
+)
+POST_REPLY_LATE = (
+    "right code, but someone beat you to it — you're in line. "
+    "if they miss their window, you're up."
+)
+POST_REPLY_EARLY = (
+    "easy there — the hunt hasn't started. no clue 1, no game yet."
+)
+POST_REPLY_NO_HOLDING = (
+    "you found me, but that wallet doesn't meet the holding rule. "
+    "the hunt is back on."
+)
 
 # Canned DM auto-replies (cheap, deterministic — no LLM call).
 DM_REPLY_NO_ADDRESS = "send your wallet address with the claim code to win."

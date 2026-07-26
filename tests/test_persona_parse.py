@@ -8,14 +8,14 @@ from finding_memeland.persona.generator import (
 
 GOOD = {
     "archetype": "historical figure dead at least 50 years",
-    "display_name": "the cartographer of nowhere",
+    "display_name": "phantom cartographer",
     "bio": "drawing maps to places that moved. mostly lost, occasionally found.",
     "backstory": "A 19th-century mapmaker known for charting territories that "
     "no longer exist. Clues lean on the paradox of mapping the unmappable.",
     "voice": "wry, terse, fond of geographic metaphors",
     "avatar_prompt": "weathered antique map fragment, sepia, candlelight",
     "banner_prompt": "a fog-bound coastline dissolving into blank parchment",
-    "solution_terms": ["the cartographer of nowhere", "phantom island"],
+    "solution_terms": ["cartographer of nowhere", "phantom island"],
     "findable_post": "the quiet hum of an unfinished atlas keeps me company tonight",
 }
 
@@ -27,7 +27,7 @@ def test_extract_json_tolerates_prose_wrapping():
 
 def test_to_persona_happy_path():
     p = _to_persona(GOOD)
-    assert p.display_name == "the cartographer of nowhere"
+    assert p.display_name == "phantom cartographer"
     assert "[" not in p.bio and "]" not in p.bio
     assert len(p.bio) <= 160 - 16
 
@@ -91,3 +91,24 @@ def test_generate_gives_up_after_max_attempts():
         assert client.calls == 3
         return
     raise AssertionError("expected ValueError after exhausting attempts")
+
+
+def test_display_name_must_be_exactly_two_words():
+    """Findability hard rule (2026-07-25): X's People search returns nothing
+    for 3+-word names, even on exact match — enforced in code, not prompted."""
+    for bad in ("cartographer", "the cartographer of nowhere", "a b c"):
+        try:
+            _to_persona(dict(GOOD, display_name=bad))
+        except ValueError as e:
+            assert "two words" in str(e)
+        else:
+            raise AssertionError(f"{bad!r} should have been rejected")
+
+
+def test_generator_regenerates_on_three_word_name():
+    threeword = dict(GOOD, display_name="cartographer of nowhere")
+    client = _FakeAnthropicClient([threeword, GOOD])
+    gen = PersonaGenerator(client, model="m")
+    p = gen.generate()
+    assert client.calls == 2
+    assert p.display_name == "phantom cartographer"

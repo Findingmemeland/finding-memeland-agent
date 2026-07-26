@@ -17,3 +17,7 @@ class XPublisher:
 
     def reply_dm(self, recipient_x_id: str, text: str) -> None:
         self._x.reply_dm(recipient_x_id, text)
+
+    def reply_post(self, text: str, *, in_reply_to: str) -> str:
+        """Claim-by-post public replies (taunts, system messages, wallet ask)."""
+        return self._x.reply_post(text, in_reply_to=in_reply_to)

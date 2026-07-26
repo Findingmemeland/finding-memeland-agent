@@ -252,3 +252,29 @@ create table if not exists persona_posts (
   posted_at     timestamptz,
   tweet_id      text
 );
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-07-25 — claim-by-post channel.
+-- X's DM REST API only delivers "virgin" conversations (Hunt #2/#3
+-- investigation), so submissions moved to PUBLIC replies on the Clue 1 post.
+-- submissions.dm_id now carries the claim post's TWEET id (same audit role).
+--
+-- ⚠️ ALTER TYPE ... ADD VALUE must run OUTSIDE a transaction, ONE at a time
+-- (Supabase SQL editor: run each line separately).
+alter type submission_outcome add value if not exists 'wrong_door';   -- code posted outside the Clue 1 thread
+alter type submission_outcome add value if not exists 'timed_out';    -- winner never sent the wallet (10-min window)
+alter type submission_outcome add value if not exists 'spam_capped';  -- past the per-account guess cap; ignored
+alter type submission_outcome add value if not exists 'taunted';      -- non-claim chatter that got the one oracle jeer
+
+-- WAIT_WALLET sub-state lives on the hunt row (doctrine: critical state never
+-- lives only in process memory). Cleared when the claim resolves or lapses.
+alter table hunts add column if not exists pending_winner_x_id text;
+alter table hunts add column if not exists pending_winner_handle text;
+alter table hunts add column if not exists pending_claim_tweet_id text;
+alter table hunts add column if not exists pending_ask_tweet_id text;
+alter table hunts add column if not exists wallet_due_at timestamptz;
+
+-- Also 2026-07-25: submissions carry the author handle (the claim channel
+-- rebuilds the settlement candidate/queue from the log after a restart, and
+-- the Winner Announcement needs the @):
+alter table submissions add column if not exists sender_handle text;

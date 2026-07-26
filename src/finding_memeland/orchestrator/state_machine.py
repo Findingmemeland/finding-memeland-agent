@@ -26,7 +26,9 @@ from enum import Enum
 
 from ..content.clue_engine import PersonaContext, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
+from ..claims.parser import code_like, extract_candidates, extract_wallet
 from ..content.templates import (
+    CLUE_FOLLOWUP_CLAIM_HINT,
     DM_REPLY_BAD_CODE,
     DM_REPLY_EARLY,
     DM_REPLY_LATE,
@@ -35,14 +37,22 @@ from ..content.templates import (
     DM_REPLY_NO_ADDRESS,
     DM_REPLY_NO_HOLDING,
     DM_REPLY_NO_RESHARE,
+    POST_REPLY_EARLY,
+    POST_REPLY_INVALID_WALLET,
+    POST_REPLY_LATE,
+    POST_REPLY_MISSING_REPOST,
+    POST_REPLY_NO_HOLDING,
+    POST_REPLY_TIMED_OUT,
+    POST_REPLY_WRONG_DOOR,
     WinnerData,
     clue_followup,
     clue_one,
+    post_reply_win,
     winner_announcement,
 )
 from ..dm.assembler import SubmissionAssembler
-from ..dm.validator import parse_dm
-from .ports import PayoutReceipt, ReadyPersona, Winner
+from ..dm.validator import ParsedDM, parse_dm, screen_bot
+from .ports import PayoutReceipt, ReadyPersona, Submission, Winner
 
 
 class HuntState(str, Enum):
@@ -170,6 +180,11 @@ class Orchestrator:
         persona_post_engine=None,
         prep_window_h: float | None = None,
         prep_posts_n: int = 3,
+        claim_source=None,
+        taunt_engine=None,
+        claim_guess_cap: int = 5,
+        wallet_timeout_s: int = 600,
+        claim_sweep_every_n: int = 5,
     ):
         self._settings = settings
         self._clock = clock
@@ -218,6 +233,24 @@ class Orchestrator:
         self._persona_post_engine = persona_post_engine
         self._prep_window_h = prep_window_h
         self._prep_posts_n = prep_posts_n
+        # Claim-by-post channel (2026-07-25). claim_source set => submissions
+        # come from PUBLIC replies to the Clue 1 post (mentions timeline); the
+        # legacy DM loop stays intact as the fallback (claim_source=None) until
+        # the post channel has survived a production hunt — then it goes.
+        self._claim_source = claim_source
+        self._taunt_engine = taunt_engine
+        self._claim_guess_cap = claim_guess_cap
+        self._wallet_timeout_s = wallet_timeout_s
+        self._claim_sweep_every_n = claim_sweep_every_n
+
+    # ------------------------------------------------------------------
+    def _submission_loop(self, hunt: PreparedHunt, **kw) -> Winner:
+        """Channel selector: claim-by-post when a claim_source is wired,
+        legacy DMs otherwise. One line, so run_hunt and every resume path
+        agree forever on which channel a hunt uses."""
+        if self._claim_source is not None:
+            return self._claim_loop(hunt, **kw)
+        return self._clue_and_dm_loop(hunt, **kw)
 
     # ------------------------------------------------------------------
     def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
@@ -227,7 +260,7 @@ class Orchestrator:
             if not self._prep_window(hunt):
                 return hunt  # aborted by the operator during prep
         self._go_live(hunt)
-        winner = self._clue_and_dm_loop(hunt)
+        winner = self._submission_loop(hunt)
         if winner is None:  # deadline passed unclaimed -> voided inside the loop
             return hunt
         receipt = self._pay(hunt, winner)
@@ -840,34 +873,856 @@ class Orchestrator:
 
             # ---- Phase 3: post the next clue (isolated — a failed clue is a
             # skipped round, never a dead hunt) ----
-            if self._clock.now() >= next_due:
-                clue_index += 1
-                try:
-                    draft = self._clue_engine.next_clue(hunt.ctx, clue_index, hunt.clues)
-                    tweet_id = self._publisher.post(
-                        clue_followup(clue_index, draft.text, draft.taunt or "")
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # Guardrails exhausted, X post failed, LLM down — skip this
-                    # round, alert the operator, try again next window.
-                    clue_index -= 1
-                    self._notify(f"clue generation failed (skipping this round): {e}")
-                else:
-                    # The clue IS on X now — bookkeeping failures must not make
-                    # us repeat it. Record best-effort.
-                    hunt.clues.append(draft.text)
-                    try:
-                        self._repo.record_clue(
-                            hunt_id=hunt.id, clue_index=clue_index,
-                            clue_text=draft.text, tweet_id=tweet_id,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        self._notify(f"record_clue failed (non-fatal): {e!r}")
-                next_due = self._clue_due_fn(self._clock.now())
+            clue_index, next_due = self._maybe_post_clue(hunt, clue_index, next_due)
 
             self._clock.sleep(self._poll_interval_s)
 
         raise RuntimeError("hunt loop exceeded max rounds without a winner")
+
+    def _maybe_post_clue(
+        self, hunt: PreparedHunt, clue_index: int, next_due, claim_hint: str | None = None
+    ) -> tuple[int, object]:
+        """Post the next clue if it's due. Shared by both submission loops.
+        A failed clue is a skipped round, never a dead hunt."""
+        if self._clock.now() < next_due:
+            return clue_index, next_due
+        clue_index += 1
+        try:
+            draft = self._clue_engine.next_clue(hunt.ctx, clue_index, hunt.clues)
+            tweet_id = self._publisher.post(
+                clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
+            )
+        except Exception as e:  # noqa: BLE001
+            # Guardrails exhausted, X post failed, LLM down — skip this
+            # round, alert the operator, try again next window.
+            clue_index -= 1
+            self._notify(f"clue generation failed (skipping this round): {e}")
+        else:
+            # The clue IS on X now — bookkeeping failures must not make
+            # us repeat it. Record best-effort.
+            hunt.clues.append(draft.text)
+            try:
+                self._repo.record_clue(
+                    hunt_id=hunt.id, clue_index=clue_index,
+                    clue_text=draft.text, tweet_id=tweet_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._notify(f"record_clue failed (non-fatal): {e!r}")
+        return clue_index, self._clue_due_fn(self._clock.now())
+
+    # ==================================================================
+    # Claim-by-post (2026-07-25) — the public submission channel.
+    # Ruleset (Pedro): claims ONLY as replies to the Clue 1 post; order =
+    # tweet created_at (snowflake id tiebreak); reshare is eliminatory and
+    # checked at processing time; the wallet is asked publicly and accepted
+    # ONLY from the same author_id; 10-minute timeout from OUR ask reply;
+    # on timeout the hunt reopens; wrong codes get capped oracle taunts;
+    # the reply engine never has clue content (architecture, not promise).
+    # ==================================================================
+
+    # Row outcomes that count as a code attempt for the per-account guess cap.
+    _GUESS_OUTCOMES = frozenset(
+        {"bad_code", "no_reshare", "pending", "won", "timed_out", "spam_capped",
+         "late", "bot_disqualified"}
+    )
+    # A candidate whose public ask keeps failing (e.g. winning post deleted)
+    # is dropped after this many attempts — a wedged ask must never freeze the
+    # hunt forever (adversarial review #3).
+    _MAX_ASK_ATTEMPTS = 5
+    # Global taunt budget per hunt (cost control): pool replies are $0.015
+    # each; past this the oracle goes silent, claims still process normally.
+    _MAX_TAUNTS_PER_HUNT = 50
+
+    def _claim_loop(
+        self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
+    ) -> Winner | None:
+        """Heartbeat bracket — same contract as the DM loop."""
+        if self._heartbeat is None:
+            return self._claim_loop_body(hunt, since=since, clue_index=clue_index)
+        self._heartbeat.mark_live(True)
+        try:
+            return self._claim_loop_body(hunt, since=since, clue_index=clue_index)
+        finally:
+            self._heartbeat.mark_live(False)
+
+    def _rebuild_claim_state(self, hunt: PreparedHunt):
+        """Restart safety: everything the loop promised publicly (caps, 'one
+        reply per profile') is rebuilt from the submissions log; the WAIT_WALLET
+        sub-state is rebuilt from the hunt row (DB doctrine)."""
+        from ..claims.parser import ClaimPost
+
+        processed: set[str] = set()
+        guesses: dict[str, int] = {}
+        counted: set[str] = set()      # tweet ids already counted as guesses
+        taunted: set[str] = set()
+        sys_sent: dict[str, set[str]] = {}
+        queue: list[tuple] = []        # rebuilt open claims ('pending' rows)
+        for row in self._repo.submissions_for_hunt(hunt.id):
+            tid = str(row.get("dm_id") or "")
+            author = str(row.get("sender_x_id") or "")
+            outcome = row.get("outcome")
+            if tid:
+                processed.add(tid)
+            if not author:
+                continue
+            if outcome in self._GUESS_OUTCOMES:
+                guesses[author] = guesses.get(author, 0) + 1
+                counted.add(tid)
+            if outcome in ("bad_code", "taunted"):
+                taunted.add(author)
+            if outcome == "pending":
+                # An open claim from before the restart: the candidate/queue
+                # must survive (adversarial review #2 — otherwise the marker
+                # skips it forever and a LATER claimant would win).
+                created = _as_dt(row.get("x_created_at")) or self._clock.now()
+                pseudo = ClaimPost(
+                    tweet_id=tid, author_id=author,
+                    author_handle=str(row.get("sender_handle") or ""),
+                    text="", created_at=created,
+                    replied_to_id=hunt.reshare_post_id,
+                )
+                queue.append(
+                    (created, int(tid) if tid.isdigit() else 0, pseudo, row.get("id"))
+                )
+            kind = {
+                "no_reshare": "missing_repost", "wrong_door": "wrong_door",
+                "early": "early", "late": "late",
+            }.get(outcome)
+            if kind:
+                sys_sent.setdefault(kind, set()).add(author)
+        queue.sort(key=lambda e: (e[0], e[1]))
+
+        pending = None
+        try:
+            row = self._repo.get_hunt(hunt.id) or {}
+        except Exception:  # noqa: BLE001
+            row = {}
+        if row.get("pending_winner_x_id") and row.get("pending_ask_tweet_id"):
+            claim_tid = str(row.get("pending_claim_tweet_id") or "")
+            claim_row = next(
+                (s for s in self._repo.submissions_for_hunt(hunt.id)
+                 if str(s.get("dm_id") or "") == claim_tid),
+                {},
+            )
+            pending = {
+                "author_id": str(row["pending_winner_x_id"]),
+                "author_handle": str(row.get("pending_winner_handle") or ""),
+                "claim_tweet_id": claim_tid,
+                "ask_tweet_id": str(row["pending_ask_tweet_id"]),
+                "due_at": _as_dt(row.get("wallet_due_at")) or self._clock.now(),
+                "row_id": claim_row.get("id"),
+                "claim_created_at": _as_dt(claim_row.get("x_created_at"))
+                or self._clock.now(),
+                "corrected": False,
+            }
+            # The active pending claim is not "queued behind itself".
+            queue = [e for e in queue if e[2].tweet_id != claim_tid]
+        return processed, guesses, counted, taunted, sys_sent, pending, queue
+
+    def _sys_reply(
+        self, kind: str, post, text: str, sys_sent: dict[str, set[str]]
+    ) -> str | None:
+        """One system reply of each TYPE per profile, best-effort (a failed
+        reply never stalls the hunt). Returns the reply tweet id, if sent."""
+        sent = sys_sent.setdefault(kind, set())
+        if post.author_id in sent:
+            return None
+        sent.add(post.author_id)
+        try:
+            return self._publisher.reply_post(text, in_reply_to=post.tweet_id)
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"public reply ({kind}) to @{post.author_handle} failed (non-fatal): {e!r}"
+            )
+            return None
+
+    def _banned_reply_terms(self, hunt: PreparedHunt) -> tuple[str, ...]:
+        """The hard-validation list for outgoing taunts: solution terms, the
+        persona's name tokens + handle, and the claim code. The taunt engine
+        receives ONLY this list — never the clues or the identity."""
+        terms: list[str] = [hunt.claim_code]
+        identity = hunt.identity
+        if identity is not None:
+            terms += [str(t) for t in getattr(identity, "solution_terms", [])]
+            terms += str(getattr(identity, "display_name", "") or "").split()
+        terms.append(hunt.persona.handle.lstrip("@"))
+        return tuple(t for t in terms if t and len(t) >= 3)
+
+    def _set_pending(self, hunt: PreparedHunt, pending: dict | None) -> None:
+        """Persist / clear the WAIT_WALLET sub-state on the hunt row. Critical
+        state never lives only in process memory (post-mortem doctrine)."""
+        fields = (
+            dict(
+                pending_winner_x_id=pending["author_id"],
+                pending_winner_handle=pending["author_handle"],
+                pending_claim_tweet_id=pending["claim_tweet_id"],
+                pending_ask_tweet_id=pending["ask_tweet_id"],
+                wallet_due_at=pending["due_at"],
+            )
+            if pending
+            else dict(
+                pending_winner_x_id=None, pending_winner_handle=None,
+                pending_claim_tweet_id=None, pending_ask_tweet_id=None,
+                wallet_due_at=None,
+            )
+        )
+        try:
+            self._repo.update_hunt(hunt.id, **fields)
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"🚨 could not persist WAIT_WALLET state ({e!r}) — a restart "
+                "during this claim window would forget the pending winner."
+            )
+
+    def _ask_wallet(
+        self, hunt: PreparedHunt, cand: tuple, sys_sent: dict[str, set[str]]
+    ) -> dict | None:
+        """Public congrats + wallet ask, replying to the winning code post.
+        The 10-minute clock starts at OUR reply (the winner only learns they
+        won when we answer). Returns the pending dict, or None if the reply
+        could not be posted (retried next cycle)."""
+        created_at, _tid, post, row_id = cand
+        minutes = max(1, int(self._wallet_timeout_s // 60))
+        try:
+            ask_id = self._publisher.reply_post(
+                post_reply_win(minutes), in_reply_to=post.tweet_id
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"wallet ask reply failed (retrying next cycle): {e!r}")
+            return None
+        pending = {
+            "author_id": post.author_id,
+            "author_handle": post.author_handle,
+            "claim_tweet_id": post.tweet_id,
+            "ask_tweet_id": ask_id,
+            "due_at": self._clock.now() + timedelta(seconds=self._wallet_timeout_s),
+            "row_id": row_id,
+            "claim_created_at": created_at,
+            "corrected": False,
+        }
+        self._set_pending(hunt, pending)
+        self._notify(
+            f"claim candidate @{post.author_handle} (post {post.tweet_id}, "
+            f"{created_at:%H:%M:%S}) — wallet asked publicly, {minutes} min window."
+        )
+        return pending
+
+    def _claim_loop_body(  # noqa: C901 — the live loop is long by nature, like its DM twin
+        self, hunt: PreparedHunt, *, since: str | None = None, clue_index: int | None = None
+    ) -> Winner | None:
+        """The claim-by-post live loop. Same DESIGN RULE as the DM loop: once
+        LIVE, nothing transient may kill it — every phase is isolated, failures
+        notify + retry. Only the winner path (or void deadline) exits."""
+        clue_index = clue_index if clue_index is not None else max(1, len(hunt.clues))
+        next_due = self._clue_due_fn(self._clock.now())
+        poll_failures = 0
+        pause_notified = False
+        cycle_n = 0
+
+        (processed, guesses, counted, taunted, sys_sent, pending, rebuilt_queue) = (
+            self._rebuild_claim_state(hunt)
+        )
+        if pending is not None:
+            self._notify(
+                f"resumed with a PENDING winner @{pending['author_handle']} "
+                f"(wallet due {pending['due_at']:%H:%M:%S}) — watching the thread."
+            )
+        banned = self._banned_reply_terms(hunt)
+        judged: set[str] = set()               # authors whose chatter was LLM-judged
+        taunt_budget = {"used": len(taunted)}  # global per-hunt cost cap
+        ask_attempts: dict[str, int] = {}      # per-claim failed public asks
+        # Settlement: the first valid claim opens a short candidacy window (two
+        # extra cycles) so an earlier post still in flight through the mentions
+        # pipeline can displace it. created_at is authoritative and public.
+        win_cand: tuple | None = None          # (created_at, tweet_int, post, row_id)
+        settle_until = None
+        wait_queue: list[tuple] = []           # valid claims queued behind pending
+        if rebuilt_queue:
+            # Open claims recovered from the log after a restart: earliest one
+            # (re)opens the candidacy, the rest queue behind it.
+            if pending is None:
+                win_cand = rebuilt_queue.pop(0)
+                settle_until = self._clock.now() + timedelta(
+                    seconds=2 * self._poll_interval_s
+                )
+                self._notify(
+                    f"recovered open claim by @{win_cand[2].author_handle} "
+                    f"({win_cand[0]:%H:%M:%S}) from the log — resuming settlement."
+                )
+            wait_queue = rebuilt_queue
+
+        for _ in range(self._max_rounds):
+            if self._heartbeat is not None:
+                self._heartbeat.beat()
+            cycle_n += 1
+
+            # ---- Phase 0: kill switch ----
+            if self._control is not None and self._control.paused():
+                if not pause_notified:
+                    self._notify("⏸ hunt PAUSED by operator — idling (/resume to continue)")
+                    pause_notified = True
+                self._clock.sleep(self._poll_interval_s)
+                continue
+            if pause_notified:
+                self._notify("▶️ hunt RESUMED by operator")
+                pause_notified = False
+
+            # ---- Phase 0b: unclaimed-hunt deadline ----
+            if (
+                win_cand is None and pending is None and not wait_queue
+                and self._hunt_timeout_h is not None
+                and hunt.started_at is not None
+                and self._clock.now() >= hunt.started_at + timedelta(hours=self._hunt_timeout_h)
+            ):
+                self._void_unclaimed(hunt)
+                return None
+
+            # ---- Phase 1: read the mentions stream (+ periodic thread sweep) ----
+            raw_batch: list = []
+            mention_ids: set[str] = set()
+            try:
+                found = list(self._claim_source.poll(since))
+                mention_ids = {p.tweet_id for p in found}
+                raw_batch += found
+                poll_failures = 0
+            except Exception as e:  # noqa: BLE001
+                poll_failures += 1
+                self._notify(f"claim poll failed ({poll_failures}x, retrying): {e!r}")
+                backoff = min(300, self._poll_interval_s * min(poll_failures, 4))
+                if pending is not None:
+                    # Blind cycles must not eat the winner's 10 minutes — their
+                    # reply may already be up, unread. Extend and persist.
+                    pending["due_at"] += timedelta(seconds=backoff)
+                    self._set_pending(hunt, pending)
+                self._clock.sleep(backoff)
+
+            sweep_due = (
+                self._claim_sweep_every_n
+                and cycle_n % self._claim_sweep_every_n == 0
+            )
+            # Settlement re-read: while a candidacy is open, sweep EVERY cycle.
+            # An earlier post delivered late has a SMALLER snowflake id than the
+            # since marker — the mentions poll can never see it again; only a
+            # full markerless thread read can (the claim-channel analog of the
+            # DM settlement's "re-read all active conversations"). No since_id
+            # on sweeps, ever: the 24h per-resource dedup makes re-reads
+            # near-free, and `processed` dedupes the work.
+            if hunt.reshare_post_id and (sweep_due or win_cand is not None):
+                try:
+                    raw_batch += list(
+                        self._claim_source.sweep(hunt.reshare_post_id, None)
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"thread sweep failed (next round): {e!r}")
+
+            merged: dict[str, object] = {}
+            for p in raw_batch:
+                if p.tweet_id not in processed and p.tweet_id not in merged:
+                    merged[p.tweet_id] = p
+            batch = sorted(merged.values(), key=lambda p: p.sort_key())
+
+            # ---- Phase 2: process posts, in public arrival order ----
+            tag = f"[hunt#{hunt.number}/db{hunt.id}]"
+            if batch:
+                print(f"{tag} processing {len(batch)} post(s), marker={since or 'start'}")
+            code_len = len(hunt.claim_code)
+
+            def _done(post) -> None:
+                """Mark a post fully processed: dedupe + advance the mentions
+                marker (only for posts from the mentions stream — swept thread
+                strays must never skip unread mentions)."""
+                nonlocal since
+                if (
+                    post.tweet_id in mention_ids
+                    and post.tweet_id.isdigit()
+                    and (since is None or int(post.tweet_id) > int(since))
+                ):
+                    since = post.tweet_id
+                processed.add(post.tweet_id)
+
+            for post in batch:
+                live_boundary = hunt.live_at or hunt.started_at
+
+                # Window 1 — pre-hunt noise: skipped, never silently.
+                if hunt.started_at is not None and post.created_at < hunt.started_at:
+                    print(f"{tag} post {post.tweet_id} skipped: pre-hunt")
+                    _done(post)
+                    continue
+
+                # Window 2 — prep window: a code-like post is logged 'early' +
+                # answered once; chatter is just skipped. Never able to win.
+                if live_boundary is not None and post.created_at < live_boundary:
+                    if code_like(post.text, code_len):
+                        try:
+                            self._repo.log_submission(
+                                hunt_id=hunt.id, dm_id=post.tweet_id,
+                                sender_x_id=post.author_id, wallet=None,
+                                sender_handle=post.author_handle,
+                                outcome="early", x_created_at=post.created_at,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            self._notify(f"early post {post.tweet_id} not logged: {e!r}")
+                        self._sys_reply("early", post, POST_REPLY_EARLY, sys_sent)
+                        print(f"{tag} post {post.tweet_id} rejected: early (prep window)")
+                    _done(post)
+                    continue
+
+                # ---- WAIT_WALLET: replies to the ask tweet ----
+                if pending is not None and post.replied_to_id == pending["ask_tweet_id"]:
+                    if post.author_id != pending["author_id"]:
+                        _done(post)  # anyone else's wallet is NOT the winner's — ignore
+                        continue
+                    if post.created_at > pending["due_at"]:
+                        _done(post)  # after the window: Phase 2b will lapse it
+                        continue
+                    result = self._process_wallet_reply(hunt, pending, post, sys_sent)
+                    if result == "retry":
+                        # Validation infrastructure down (RPC, X): the reply is
+                        # NOT consumed — it is re-read and retried next cycle,
+                        # and the outage must not eat the winner's window
+                        # (adversarial review #1).
+                        pending["due_at"] = max(
+                            pending["due_at"],
+                            self._clock.now()
+                            + timedelta(seconds=2 * self._poll_interval_s),
+                        )
+                        self._set_pending(hunt, pending)
+                        break
+                    _done(post)
+                    if isinstance(result, Winner):
+                        self._mark_queue_late(wait_queue)
+                        return result
+                    if result == "lapsed":
+                        pending = self._promote_from_queue(
+                            hunt, wait_queue, sys_sent, ask_attempts
+                        )
+                    continue
+
+                is_claim_location = (
+                    hunt.reshare_post_id is not None
+                    and post.replied_to_id == hunt.reshare_post_id
+                )
+                looks_like_code = code_like(post.text, code_len)
+
+                # Wrong door — a code-like post anywhere but the Clue 1 thread.
+                if looks_like_code and not is_claim_location:
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=post.tweet_id,
+                            sender_x_id=post.author_id, wallet=None,
+                            sender_handle=post.author_handle,
+                            outcome="wrong_door", x_created_at=post.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"wrong_door post {post.tweet_id} not logged: {e!r}")
+                    self._sys_reply("wrong_door", post, POST_REPLY_WRONG_DOOR, sys_sent)
+                    _done(post)
+                    continue
+
+                if not is_claim_location:
+                    # A random mention outside the Clue 1 thread: silence.
+                    # (Taunts live in the claim thread only — Pedro's rule is
+                    # about REPLIES; also keeps the LLM judge off the mentions
+                    # firehose.)
+                    _done(post)
+                    continue
+
+                # ---- Replies to Clue 1 (the claim window) ----
+                if not looks_like_code:
+                    self._maybe_taunt_chatter(
+                        hunt, post, taunted, judged, taunt_budget, banned
+                    )
+                    _done(post)
+                    continue
+
+                # Guess cap (anti-brute-force): first N code-like posts count;
+                # past the cap the account is ignored — logged, no reply.
+                # Counted once per TWEET (a transient retry of the same post
+                # must not burn extra guesses — adversarial review #4).
+                if post.tweet_id not in counted:
+                    counted.add(post.tweet_id)
+                    guesses[post.author_id] = guesses.get(post.author_id, 0) + 1
+                if guesses[post.author_id] > self._claim_guess_cap:
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=post.tweet_id,
+                            sender_x_id=post.author_id, wallet=None,
+                            sender_handle=post.author_handle,
+                            outcome="spam_capped", x_created_at=post.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"spam_capped post {post.tweet_id} not logged: {e!r}")
+                    _done(post)
+                    continue
+
+                candidates = extract_candidates(post.text, code_len)
+                if hunt.claim_code not in candidates:
+                    # Wrong code — the oracle jeers (once per profile).
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=post.tweet_id,
+                            sender_x_id=post.author_id, wallet=None,
+                            sender_handle=post.author_handle,
+                            submitted_claim_code=(candidates[0] if candidates else None),
+                            outcome="bad_code", x_created_at=post.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"bad_code post {post.tweet_id} not logged: {e!r}")
+                    if (
+                        post.author_id not in taunted
+                        and self._taunt_engine is not None
+                        and taunt_budget["used"] < self._MAX_TAUNTS_PER_HUNT
+                    ):
+                        taunted.add(post.author_id)
+                        taunt_budget["used"] += 1
+                        try:
+                            jeer = self._taunt_engine.taunt(post.text, banned)
+                            self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
+                        except Exception as e:  # noqa: BLE001
+                            self._notify(f"taunt reply failed (non-fatal): {e!r}")
+                    _done(post)
+                    continue
+
+                # Correct code. Reshare is ELIMINATORY, checked now (the API
+                # exposes no repost timestamp, so "exists at processing time"
+                # is the enforceable rule — accepted slack of one poll cycle).
+                outcome_row_id = None
+                try:
+                    reshared = self._claim_source.has_reshared(
+                        post.author_id, hunt.reshare_post_id
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # Can't verify -> do NOT reject a possibly-valid claim and
+                    # do NOT accept an unverified one; retry next cycle.
+                    self._notify(f"reshare check failed for {post.tweet_id} (retrying): {e!r}")
+                    break
+                if not reshared:
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=post.tweet_id,
+                            sender_x_id=post.author_id, wallet=None,
+                            sender_handle=post.author_handle,
+                            submitted_claim_code=hunt.claim_code,
+                            outcome="no_reshare", x_created_at=post.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"no_reshare post {post.tweet_id} not logged: {e!r}")
+                    self._sys_reply(
+                        "missing_repost", post, POST_REPLY_MISSING_REPOST, sys_sent
+                    )
+                    _done(post)
+                    continue
+
+                # Bot screen (bright-line, public self-identification only).
+                try:
+                    profile = self._claim_source.lookup_profile(post.author_id) or {}
+                except Exception:  # noqa: BLE001
+                    profile = {}
+                bot_ok, reason = screen_bot(
+                    display_name=profile.get("name", ""),
+                    handle=profile.get("handle", post.author_handle),
+                    bio=profile.get("bio", ""),
+                    automated_label=bool(profile.get("automated", False)),
+                    own_handles=("FindingMemeland",),
+                )
+                if not bot_ok:
+                    try:
+                        self._repo.log_submission(
+                            hunt_id=hunt.id, dm_id=post.tweet_id,
+                            sender_x_id=post.author_id, wallet=None,
+                            sender_handle=post.author_handle,
+                            submitted_claim_code=hunt.claim_code,
+                            outcome="bot_disqualified", x_created_at=post.created_at,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"bot post {post.tweet_id} not logged: {e!r}")
+                    self._notify(
+                        f"claim by @{post.author_handle} disqualified (bot screen: "
+                        f"{reason}) — no public reply."
+                    )
+                    _done(post)
+                    continue
+
+                # A VALID claim.
+                try:
+                    outcome_row_id = self._repo.log_submission(
+                        hunt_id=hunt.id, dm_id=post.tweet_id,
+                        sender_x_id=post.author_id, wallet=None,
+                        sender_handle=post.author_handle,
+                        submitted_claim_code=hunt.claim_code,
+                        outcome="pending", x_created_at=post.created_at,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"🚨 valid claim {post.tweet_id} could not be logged: {e!r}")
+                tweet_int = int(post.tweet_id) if post.tweet_id.isdigit() else 0
+                entry = (post.created_at, tweet_int, post, outcome_row_id)
+                # Rows stay 'pending' while an entry is candidate OR queued —
+                # the queue is rebuilt from 'pending' rows after a restart
+                # (adversarial review #2); terminal 'late' is set only when
+                # the hunt actually resolves with someone else.
+                if pending is not None:
+                    # Someone is already being asked for the wallet: queue this
+                    # claim (earliest-first) for a possible timeout promotion.
+                    wait_queue.append(entry)
+                    wait_queue.sort(key=lambda e: (e[0], e[1]))
+                    self._sys_reply("late", post, POST_REPLY_LATE, sys_sent)
+                elif win_cand is None:
+                    win_cand = entry
+                    settle_until = self._clock.now() + timedelta(
+                        seconds=2 * self._poll_interval_s
+                    )
+                    self._notify(
+                        f"win candidate: @{post.author_handle} (post "
+                        f"{post.tweet_id}, {post.created_at:%H:%M:%S}) — settling "
+                        "for two cycles before the public ask."
+                    )
+                elif (post.created_at, tweet_int) < (win_cand[0], win_cand[1]):
+                    displaced = win_cand
+                    win_cand = entry
+                    self._notify(
+                        f"settlement: EARLIER claim by @{post.author_handle} "
+                        f"({post.created_at:%H:%M:%S}) replaces the candidate."
+                    )
+                    wait_queue.append(displaced)
+                    wait_queue.sort(key=lambda e: (e[0], e[1]))
+                    self._sys_reply("late", displaced[2], POST_REPLY_LATE, sys_sent)
+                else:
+                    wait_queue.append(entry)
+                    wait_queue.sort(key=lambda e: (e[0], e[1]))
+                    self._sys_reply("late", post, POST_REPLY_LATE, sys_sent)
+                _done(post)
+
+            # ---- Phase 2b: wallet timeout ----
+            if pending is not None and self._clock.now() >= pending["due_at"]:
+                self._notify(
+                    f"wallet window expired for @{pending['author_handle']} — "
+                    "claim lapses; the hunt reopens."
+                )
+                try:
+                    self._publisher.reply_post(
+                        POST_REPLY_TIMED_OUT, in_reply_to=pending["ask_tweet_id"]
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"timeout reply failed (non-fatal): {e!r}")
+                if pending.get("row_id") is not None:
+                    try:
+                        self._repo.set_submission_outcome(pending["row_id"], "timed_out")
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(f"timed_out outcome not recorded: {e!r}")
+                self._set_pending(hunt, None)
+                pending = self._promote_from_queue(hunt, wait_queue, sys_sent, ask_attempts)
+
+            # ---- Phase 2b2: a stalled promotion (failed ask) is retried ----
+            if pending is None and win_cand is None and wait_queue:
+                pending = self._promote_from_queue(hunt, wait_queue, sys_sent, ask_attempts)
+
+            # ---- Phase 2c: settlement -> the public ask ----
+            if win_cand is not None and pending is None:
+                if self._clock.now() >= settle_until:
+                    pending = self._ask_wallet(hunt, win_cand, sys_sent)
+                    if pending is not None:
+                        win_cand = None
+                        settle_until = None
+                    elif self._drop_unaskable(hunt, win_cand, ask_attempts):
+                        # e.g. the winning post was deleted: the ask 400s
+                        # forever — drop the claim instead of wedging the hunt.
+                        win_cand = None
+                        settle_until = None
+                        pending = self._promote_from_queue(
+                            hunt, wait_queue, sys_sent, ask_attempts
+                        )
+                self._clock.sleep(self._poll_interval_s)
+                continue  # no clues while a claim is being decided
+
+            if pending is not None:
+                self._clock.sleep(self._poll_interval_s)
+                continue  # no clues while waiting for the winner's wallet
+
+            # ---- Phase 3: next clue ----
+            clue_index, next_due = self._maybe_post_clue(
+                hunt, clue_index, next_due, CLUE_FOLLOWUP_CLAIM_HINT
+            )
+
+            self._clock.sleep(self._poll_interval_s)
+
+        raise RuntimeError("claim loop exceeded max rounds without a winner")
+
+    def _promote_from_queue(
+        self,
+        hunt: PreparedHunt,
+        wait_queue: list[tuple],
+        sys_sent: dict[str, set[str]],
+        ask_attempts: dict[str, int],
+    ) -> dict | None:
+        """After a lapse: the earliest queued valid claim gets the wallet ask.
+        Empty queue => the window simply reopens (next valid code post wins —
+        possibly the original claimant posting again)."""
+        if not wait_queue:
+            return None
+        entry = wait_queue[0]
+        pending = self._ask_wallet(hunt, entry, sys_sent)
+        if pending is None:
+            # Ask failed. Transient X hiccup -> entry stays queued and is
+            # retried next cycle; permanently unaskable (deleted post) ->
+            # drop it so the queue never wedges.
+            if self._drop_unaskable(hunt, entry, ask_attempts):
+                wait_queue.pop(0)
+            return None
+        wait_queue.pop(0)
+        return pending
+
+    def _drop_unaskable(
+        self, hunt: PreparedHunt, entry: tuple, ask_attempts: dict[str, int]
+    ) -> bool:
+        """Count a failed public ask for this claim; past the cap, retire the
+        claim (row -> 'timed_out') and tell the operator. Returns True when
+        the claim was dropped."""
+        tid = entry[2].tweet_id
+        ask_attempts[tid] = ask_attempts.get(tid, 0) + 1
+        if ask_attempts[tid] < self._MAX_ASK_ATTEMPTS:
+            return False
+        self._notify(
+            f"🚨 could not post the wallet ask for claim {tid} "
+            f"({self._MAX_ASK_ATTEMPTS} attempts — post deleted?) — dropping "
+            "the claim; the hunt continues."
+        )
+        if entry[3] is not None:
+            try:
+                self._repo.set_submission_outcome(entry[3], "timed_out")
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+
+    def _mark_queue_late(self, wait_queue: list[tuple]) -> None:
+        """The hunt resolved: every still-queued claim is terminally 'late'
+        (their rows were 'pending' so a restart could rebuild the queue)."""
+        for entry in wait_queue:
+            if entry[3] is not None:
+                try:
+                    self._repo.set_submission_outcome(entry[3], "late")
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _maybe_taunt_chatter(
+        self,
+        hunt: PreparedHunt,
+        post,
+        taunted: set[str],
+        judged: set[str],
+        taunt_budget: dict,
+        banned: tuple[str, ...],
+    ) -> None:
+        """Non-code chatter: one jeer per profile, ONLY if the LLM judge finds
+        it game-funny (fail-closed — 'Good morning' gets silence). The reply is
+        logged ('taunted') so the once-per-profile promise survives restarts.
+        Each author's chatter is judged at most ONCE per process (LLM cost:
+        one flood of 'gm' posts must not become one LLM call each), and the
+        global per-hunt taunt budget applies."""
+        if self._taunt_engine is None or post.author_id in taunted:
+            return
+        if post.author_id in judged:
+            return
+        judged.add(post.author_id)
+        if taunt_budget["used"] >= self._MAX_TAUNTS_PER_HUNT:
+            return
+        try:
+            if not self._taunt_engine.should_taunt_chatter(post.text):
+                return
+            jeer = self._taunt_engine.taunt(post.text, banned)
+            self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"chatter taunt failed (non-fatal): {e!r}")
+            return
+        taunted.add(post.author_id)
+        taunt_budget["used"] += 1
+        try:
+            self._repo.log_submission(
+                hunt_id=hunt.id, dm_id=post.tweet_id, sender_x_id=post.author_id,
+                sender_handle=post.author_handle,
+                wallet=None, outcome="taunted", x_created_at=post.created_at,
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"taunted post {post.tweet_id} not logged: {e!r}")
+
+    def _process_wallet_reply(
+        self, hunt: PreparedHunt, pending: dict, post, sys_sent: dict[str, set[str]]
+    ):
+        """A reply from the pending winner to our ask tweet. Returns a Winner,
+        'lapsed' (claim failed terminally — hunt reopens), or None (waiting)."""
+        wallet = extract_wallet(post.text)
+        if not wallet:
+            # No parseable/checksum-valid address: ONE public correction ask
+            # per claim window; the clock keeps ticking.
+            if not pending["corrected"]:
+                pending["corrected"] = True
+                try:
+                    self._publisher.reply_post(
+                        POST_REPLY_INVALID_WALLET, in_reply_to=post.tweet_id
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"invalid-wallet reply failed (non-fatal): {e!r}")
+            return None
+
+        # Final validation — the SAME production validator as the DM channel
+        # (code trivially passes; holding, reshare re-check, bot screen).
+        parsed = ParsedDM(
+            dm_id=post.tweet_id, sender_x_id=post.author_id, wallet=wallet,
+            claim_code=hunt.claim_code, claim_candidates=(hunt.claim_code,),
+        )
+        try:
+            res = self._validator.validate(parsed, hunt)
+        except Exception as e:  # noqa: BLE001
+            # Infrastructure down, not a bad wallet: the caller keeps the reply
+            # unconsumed and extends the window (adversarial review #1).
+            self._notify(f"final validation failed (will retry, reply kept): {e!r}")
+            return "retry"
+
+        if res.won:
+            if pending.get("row_id") is not None:
+                try:
+                    self._repo.set_submission_outcome(
+                        pending["row_id"], "won", wallet=wallet
+                    )
+                except Exception as e:  # noqa: BLE001
+                    self._notify(f"won outcome not recorded ({e!r}) — fix the row manually.")
+            self._set_pending(hunt, None)
+            winner = Winner(
+                submission=Submission(
+                    dm_id=pending["claim_tweet_id"],
+                    sender_x_id=post.author_id,
+                    sender_handle=pending["author_handle"] or post.author_handle,
+                    body=post.text,
+                    created_at=pending["claim_created_at"],
+                ),
+                wallet=wallet,
+                submission_row_id=pending.get("row_id"),
+            )
+            self._transition(hunt, HuntState.RESOLVING)
+            self._notify(f"winner: @{winner.submission.sender_handle}")
+            return winner
+
+        # Terminal failures reopen the hunt (Pedro's ruleset: the claim lapses).
+        outcome = res.outcome
+        if pending.get("row_id") is not None:
+            try:
+                self._repo.set_submission_outcome(pending["row_id"], outcome)
+            except Exception:  # noqa: BLE001
+                pass
+        reply = {
+            "no_holding": POST_REPLY_NO_HOLDING,
+            "no_reshare": POST_REPLY_MISSING_REPOST,
+        }.get(outcome)
+        if reply:
+            try:
+                self._publisher.reply_post(reply, in_reply_to=post.tweet_id)
+            except Exception as e:  # noqa: BLE001
+                self._notify(f"{outcome} reply failed (non-fatal): {e!r}")
+        self._notify(
+            f"pending claim by @{pending['author_handle']} failed final "
+            f"validation ({outcome}) — the hunt reopens."
+        )
+        self._set_pending(hunt, None)
+        return "lapsed"
 
     def _void_unclaimed(self, hunt: PreparedHunt) -> None:
         """Nobody won before the deadline: end the hunt publicly and cleanly.
@@ -1103,7 +1958,7 @@ class Orchestrator:
             if not self._prep_window(hunt):
                 return
             self._go_live(hunt)
-            winner = self._clue_and_dm_loop(hunt)
+            winner = self._submission_loop(hunt)
             if winner is None:
                 return
             receipt = self._pay(hunt, winner)
@@ -1125,7 +1980,11 @@ class Orchestrator:
                     "NOT auto-paying — verify and settle manually."
                 )
                 return
-            since = self._latest_dm_marker(hunt.id)
+            since = (
+                self._latest_claim_marker(hunt.id)
+                if self._claim_source is not None
+                else self._latest_dm_marker(hunt.id)
+            )
             if hunt.ctx is None:
                 self._notify(
                     f"hunt #{hunt.number} resumed WITHOUT persona identity (old DB "
@@ -1134,9 +1993,11 @@ class Orchestrator:
                 )
             self._notify(
                 f"hunt #{hunt.number} RESUMED live after a restart — "
-                f"{len(hunt.clues)} clues out, DM marker {since or 'start'}."
+                f"{len(hunt.clues)} clues out, marker {since or 'start'}."
             )
-            winner = self._clue_and_dm_loop(hunt, since=since)
+            winner = self._submission_loop(hunt, since=since)
+            if winner is None:
+                return
             receipt = self._pay(hunt, winner)
             self._reveal(hunt, winner, receipt)
             self._retire(hunt)
@@ -1204,6 +2065,20 @@ class Orchestrator:
             # fallback than a hardcoded 1 (at least it's unique and traceable).
             number=_as_int(row.get("hunt_number")) or int(row["id"]),
         )
+
+    def _latest_claim_marker(self, hunt_id: int) -> str | None:
+        """Resume marker for the claim channel. Sweep-discovered posts
+        (wrong_door/taunted can come from the markerless thread sweep) are
+        EXCLUDED: their ids may be ahead of what the mentions stream actually
+        delivered, and a poisoned marker would permanently skip unread
+        mentions (adversarial review #6). Re-reading a few already-processed
+        posts is free (processed-set dedupe + 24h billing dedup)."""
+        ids = [
+            int(s["dm_id"]) for s in self._repo.submissions_for_hunt(hunt_id)
+            if s.get("dm_id") and str(s["dm_id"]).isdigit()
+            and s.get("outcome") not in ("wrong_door", "taunted")
+        ]
+        return str(max(ids)) if ids else None
 
     def _latest_dm_marker(self, hunt_id: int) -> str | None:
         """Highest processed dm_id from the submission log = where to resume the

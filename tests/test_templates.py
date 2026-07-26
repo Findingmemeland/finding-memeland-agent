@@ -70,7 +70,10 @@ def test_shipped_explainer_is_real_and_leads_the_post():
     assert out.startswith("Hunt #2 is live.")
     assert "every hunt i invent someone who doesn't exist" in out
     assert out.index("is live.") < out.index("every hunt i invent")
-    assert "DM me the code" in out
+    # Claim-by-post (2026-07-25): submissions are public replies to THIS post
+    # — the DM channel is dead (X's API only reads virgin conversations).
+    assert "reply to this post with the code" in out
+    assert "DM me" not in out
     low = out.lower()
     assert "wallet" not in low  # the wallet ask lives in the pinned rules, never in clue 1
     assert "fake" not in low
