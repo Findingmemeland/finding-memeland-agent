@@ -135,30 +135,47 @@ def guidance_for(facet: str, persona: "PersonaContext") -> str:
 
 def clue_plan(persona: "PersonaContext") -> list[str]:
     """Deterministic ORDERED facet template (fallback when no per-hunt plan was
-    shuffled). Ends on the locator post."""
-    return [*_name_facets(persona.display_name), "avatar", "banner", "bio", "signature_post"]
+    shuffled). Same structure as the shuffled plan, without the shuffling."""
+    base = [*_name_facets(persona.display_name), "avatar"]
+    return [*base, *base, "signature_post"]
 
 
 def shuffled_facet_plan(display_name: str) -> list[str]:
-    """Per-hunt plan: a facet per name word + avatar/banner/bio in RANDOM order,
-    with signature_post forced last (the searchable locator is always last)."""
-    facets = [*_name_facets(display_name), "avatar", "banner", "bio"]
-    random.shuffle(facets)
-    return [*facets, "signature_post"]
+    """Per-hunt plan (Hunt #3 post-mortem, Pedro's difficulty spec, 2026-07-29):
+
+    TWO ROUNDS over the oblique facets — each name word and the avatar — so
+    every target gets exactly two clues: a hard pass (round 1) and a clearer
+    revisit (round 2). Each round is shuffled independently, which also means
+    the same facet never appears twice in a row. Banner and bio are OUT (they
+    don't help the search). The searchable posts only enter from clue 7 —
+    see clue_vector_for."""
+    base = [*_name_facets(display_name), "avatar"]
+    round1 = base[:]
+    random.shuffle(round1)
+    round2 = base[:]
+    random.shuffle(round2)
+    while round2 and round1 and round2[0] == round1[-1]:
+        random.shuffle(round2)  # no same-facet back-to-back across the seam
+    return [*round1, *round2, "signature_post"]
+
+
+# The searchable-post escalation starts here (Pedro, 2026-07-29). Hunt #3
+# collapsed to 39 minutes because anchor-post clues fired from clue 3; the
+# oblique game (names + avatar, two passes each) now owns clues 1-6, the
+# pinned locator arrives at clue 7, and from clue 8 the clues alternate
+# between the pinned post and the prep-window anchor posts.
+POST_CLUES_FROM = 7
 
 
 def clue_vector_for(clue_index: int, persona: "PersonaContext") -> str:
-    """Facet this clue targets. Uses the persona's per-hunt shuffled plan if set,
-    else the ordered template. Beyond the plan it stays on the searchable-post
-    facets — the longer a hunt runs, the more the clues point at REAL posts
-    (the findability vector that provably works; name search is suppressed for
-    fresh accounts — Hunt #2 post-mortem)."""
+    """Facet this clue targets: the per-hunt oblique plan up to clue 6, the
+    persona's POSTS from clue 7 on (pinned locator first; anchors alternate
+    in from clue 8 when they exist)."""
     plan = persona.clue_facet_plan or clue_plan(persona)
-    if persona.anchor_posts:
-        # Weave anchor-post facets in from clue 3 on: every second clue targets
-        # a real post, alternating with the original plan.
-        if clue_index >= 3 and clue_index % 2 == 1:
+    if clue_index >= POST_CLUES_FROM:
+        if persona.anchor_posts and clue_index > POST_CLUES_FROM and clue_index % 2 == 0:
             return "anchor_post"
+        return "signature_post"
     return plan[min(clue_index - 1, len(plan) - 1)]
 
 
@@ -263,6 +280,14 @@ lazy degens, money's on the line").
 Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
 
 
+def _is_second_visit(vector: str, clue_index: int, persona: PersonaContext) -> bool:
+    """True when this oblique facet already had a clue earlier in the plan —
+    the round-2 revisit must be clearer, not a rephrase."""
+    plan = persona.clue_facet_plan or clue_plan(persona)
+    earlier = plan[: min(clue_index - 1, len(plan) - 1)]
+    return vector in earlier
+
+
 def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: list[str]) -> str:
     prior = "\n".join(f"- {c}" for c in prior_clues) if prior_clues else "(none — this is the first clue)"
     vector = clue_vector_for(clue_index, persona)
@@ -275,9 +300,12 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"- banner (header image): {persona.banner_description}\n"
         f"- pinned locator post: {persona.findable_post}\n"
         + (
-            "- the account's own posts (anchors for clues):\n"
+            # The prep-window anchor posts are lethal search vectors: the
+            # generator only sees them once the post-clue phase begins
+            # (clue 7+), so earlier clues cannot leak them even by accident.
+            "- the account's own posts (anchors for post-phase clues):\n"
             + "".join(f"    * {p}\n" for p in persona.anchor_posts)
-            if persona.anchor_posts else ""
+            if persona.anchor_posts and clue_index >= POST_CLUES_FROM else ""
         )
         + "\n"
         f"Theme (FLAVOUR ONLY — do NOT make players guess this, do not write it): "
@@ -285,7 +313,13 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"Terms to NEVER write: {persona.solution_terms}\n\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness_for(clue_index)}.\n"
         f"FACET for this clue: {vector} — {guidance_for(vector, persona)}\n"
-        f"Previous clues:\n{prior}\n\n"
+        + (
+            "NOTE: this facet was already hinted at in an earlier clue — give a "
+            "COMPLETELY NEW, noticeably CLEARER angle on the same target (do not "
+            "rephrase the earlier hint).\n"
+            if _is_second_visit(vector, clue_index, persona) else ""
+        )
+        + f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )
 

@@ -140,7 +140,7 @@ def post_reply_win(minutes: int) -> str:
 
 POST_REPLY_MISSING_REPOST = (
     "claim invalid — missing repost. repost the Clue 1 post, then post the "
-    "code again."
+    "code again (add a word or two — X blocks identical posts)."
 )
 POST_REPLY_WRONG_DOOR = (
     "the code goes in the replies of the Clue 1 post — drop it there and it "
