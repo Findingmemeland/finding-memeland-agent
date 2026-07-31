@@ -62,6 +62,14 @@ class ManualPriceFeed:
         # 16,300,000 $FIND, not 16,260,163. Same value used for post AND transfer.
         return round_sig(usd / self._price, self._sig)
 
+    def fmml_to_usd(self, tokens: int) -> float | None:
+        """Informational only (token-denominated prizes, 2026-07-31): a USD
+        figure for logs/DB when a price is set; None otherwise — never raises,
+        never blocks a launch."""
+        if self._price <= 0:
+            return None
+        return tokens * self._price
+
 
 class StdoutNotifier:
     """Fallback Notifier: prints. Replaced by the Telegram notifier in prod."""
@@ -282,3 +290,41 @@ def env_token_resolver(oauth_ref: str) -> tuple[str, str]:
     if not token or not secret:
         raise RuntimeError(f"missing OAuth tokens for persona ref {oauth_ref!r}")
     return token, secret
+
+
+def parse_token_amount(arg: str) -> int:
+    """Parse the /launch prize as a TOKEN amount (2026-07-31): plain integers
+    ("500000000"), separators ("500,000,000" / "500_000_000") and the k/m/b
+    suffixes Pedro asked for ("500M", "1B", "0.5b"). Raises ValueError on
+    anything else; the result is a positive whole number of $FIND."""
+    s = (arg or "").strip().lower().replace(",", "").replace("_", "")
+    if not s:
+        raise ValueError("empty amount")
+    mult = 1
+    if s.endswith("b"):
+        mult, s = 1_000_000_000, s[:-1]
+    elif s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    try:
+        val = float(s)
+    except OverflowError as e:  # e.g. "1e400"
+        raise ValueError("amount out of range") from e
+    if not math.isfinite(val):
+        raise ValueError("amount must be a finite number")
+    tokens = int(round(val * mult))
+    if tokens <= 0:
+        raise ValueError("prize must be positive")
+    if tokens > 1_000_000_000_000_000:  # 1000x total supply — a typo, not a prize
+        raise ValueError("amount out of range")
+    return tokens
+
+
+def fmt_tokens(tokens: int) -> str:
+    """Compact display for token amounts: 1.5B, 500M, 250k, else thousands-sep."""
+    for unit, label in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
+        if tokens >= unit and tokens % (unit // 10) == 0:
+            val = tokens / unit
+            return f"{val:g}{label}"
+    return f"{tokens:,}"

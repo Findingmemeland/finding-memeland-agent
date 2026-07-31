@@ -9,7 +9,8 @@ is the one import-heavy module.
 
 The agent boots idle. Hunts fire on the admin's Telegram /launch (the bot loop —
 TelegramAdmin.build_application — is the final live wiring step). run_hunt()
-fails fast via settings.assert_ready_for_hunt() if token/wallet/price aren't set.
+fails fast via settings.assert_ready_for_hunt() if token/wallet aren't set
+(prizes are token-denominated since 2026-07-31 — no price needed to launch).
 """
 
 from __future__ import annotations
@@ -56,6 +57,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .persona.source import DBPersonaSource
     from .runtime import (
         DBHuntPause,
+        fmt_tokens,
+        parse_token_amount,
         ManualPriceFeed,
         PollHeartbeat,
         StdoutNotifier,
@@ -155,25 +158,17 @@ def build_agent(settings: Settings | None = None) -> Agent:
         claim_guess_cap=s.claim_guess_cap,
         wallet_timeout_s=s.wallet_timeout_s,
         claim_sweep_every_n=s.claim_sweep_every_n,
+        non_holder_prize_pct=s.non_holder_prize_pct,
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.
         undress_on_retire=False,
     )
 
-    # Admin/approval surface. /launch <prize_usd> fires a hunt in the BACKGROUND
+    # Admin/approval surface. /launch <prize in $FIND> fires a hunt in the BACKGROUND
     # (it can run for hours) so the bot stays responsive. The prize is set per hunt
-    # by the operator; the agent converts $ -> $FIND at the current price and posts
-    # the token amount. The dynamic rule (economics.suggested_prize) is a guide.
+    # by the operator, DIRECTLY in tokens since 2026-07-31 (/launch 500M) — no
+    # USD conversion, no FMML_USD_PRICE required to launch.
     import threading
-
-    from .economics import fdv_from_price, suggested_prize
-
-    def _suggestion() -> str:
-        try:
-            fdv = fdv_from_price(s.fmml_usd_price, s.total_supply) if s.fmml_usd_price else 0
-        except Exception:  # noqa: BLE001
-            fdv = 0
-        return f" (suggested at current FDV: ${suggested_prize(fdv):.0f})" if fdv else ""
 
     # One hunt at a time: a double-tapped /launch must never start two hunts
     # (two personas, two prize payouts, one shared DM stream).
@@ -182,13 +177,19 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     def _launch(arg: str) -> str:
         if not arg:
-            return f"usage: /launch <prize in $>, e.g. /launch 250{_suggestion()}"
+            return "usage: /launch <prize in $FIND>, e.g. /launch 500M or /launch 1B"
         try:
-            prize_usd = float(arg)
+            prize_fmml = parse_token_amount(arg)
         except ValueError:
-            return f"'{arg}' isn't a number. usage: /launch <prize in $>"
-        if prize_usd < s.min_prize_usd:
-            return f"minimum prize is ${s.min_prize_usd:.0f} — nobody plays for less."
+            return (
+                f"'{arg}' isn't a token amount. usage: /launch <prize in $FIND> "
+                "— e.g. /launch 500M, /launch 1B, /launch 500000000"
+            )
+        if prize_fmml < s.min_prize_fmml:
+            return (
+                f"minimum prize is {fmt_tokens(s.min_prize_fmml)} $FIND — "
+                "nobody plays for less."
+            )
         with hunt_lock:
             if hunt_flag["active"]:
                 return "⛔ a hunt is already LIVE — one at a time. /status for details."
@@ -206,7 +207,6 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 anthropic=anthropic, anthropic_model=s.anthropic_model, openai=openai, x=x
             )
             # Money checks: RPC alive, gas in the hot wallet, tokens >= prize.
-            prize_fmml = price_feed.usd_to_fmml(prize_usd)
             problems += preflight_money(
                 web3=web3, payout=payout_engine,
                 hot_address=hot_address, prize_fmml=prize_fmml,
@@ -227,7 +227,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # but if anything DOES escape (bug, unrecoverable failure), the
             # operator must hear about it on Telegram — never a silent death.
             try:
-                orchestrator.run_hunt(prize_usd=prize_usd)
+                orchestrator.run_hunt(prize_fmml=prize_fmml)
             except Exception as e:  # noqa: BLE001
                 import traceback
 
@@ -243,11 +243,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
         threading.Thread(target=_run_hunt, daemon=True).start()
         if s.prep_window_h:
             return (
-                f"hunt launching with a ${prize_usd:.0f} prize 🏴 — persona "
+                f"hunt launching with a {prize_fmml:,} $FIND prize 🏴 — persona "
                 f"dresses NOW; Clue 1 fires in ~{s.prep_window_h:g}h "
                 "(/abort_prep to abort, /delay_golive <h> to push it)."
             )
-        return f"hunt launching with a ${prize_usd:.0f} prize 🏴"
+        return f"hunt launching with a {prize_fmml:,} $FIND prize 🏴"
 
     def _status(arg: str = "") -> str:
         """State + the config the agent ACTUALLY loaded.
@@ -274,6 +274,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
             lines.append(
                 f"floor: ⚠️ USD fallback (${s.holding_floor_usd:g}) | hold: {s.holding_hours}h"
                 + ("  🚨 FLOOR IS ZERO — anyone can claim!" if not s.holding_floor_usd else "")
+                + (
+                    "  🚨 price NOT SET — /launch will REFUSE (set HOLDING_FLOOR_FMML or FMML_USD_PRICE)"
+                    if s.holding_floor_usd and not s.fmml_usd_price else ""
+                )
             )
 
         worst = worst_case_hunt_hours(s.clue_max_gap_s)
@@ -287,15 +291,17 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 else f"❌ EXCEEDS the {s.holding_hours}h window — a mid-hunt buyer could win"
             )
         )
-        lines.append(f"prize min: ${s.min_prize_usd:.0f}")
+        lines.append(
+            f"prize min: {fmt_tokens(s.min_prize_fmml)} $FIND "
+            f"(/launch {fmt_tokens(s.min_prize_fmml)}) | non-holder share: "
+            f"{s.non_holder_prize_pct}%"
+        )
 
         if s.fmml_usd_price:
             one_b = 1_000_000_000 * s.fmml_usd_price
-            lines.append(f"price: {s.fmml_usd_price:g} → 1B = ${one_b:.0f} (/launch {one_b:.0f})")
-            if one_b < s.min_prize_usd:
-                lines.append(f"  ⚠️ 1B is BELOW the ${s.min_prize_usd:.0f} minimum — /launch would refuse")
+            lines.append(f"price (info): {s.fmml_usd_price:g} → 1B ≈ ${one_b:.0f}")
         else:
-            lines.append("price: ⚠️ NOT SET — /launch cannot convert $ → $FIND")
+            lines.append("price: not set (ok — /launch takes $FIND amounts)")
 
         return "\n".join(lines)
 
@@ -468,7 +474,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
 def main() -> None:
     s = get_settings()
     agent = build_agent(s)
-    token_ready = bool(s.fmml_token_address and s.fmml_usd_price > 0)
+    # Token prizes (2026-07-31): a price is no longer required to launch.
+    token_ready = bool(s.fmml_token_address)
     print(f"[finding-memeland] agent built (env={s.fmml_env}). hunt-ready: {token_ready}")
 
     # Crash recovery: if the previous process died mid-hunt, pick it back up

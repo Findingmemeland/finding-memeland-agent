@@ -40,6 +40,9 @@ class Winner:
     # submissions.id of the winning row — record_winner links to it (P1: the
     # missing NOT NULL column that crashed the hunt AFTER the money left).
     submission_row_id: int | None = None
+    # Holder reward split (2026-07-31): holding no longer eliminates — a
+    # non-holder winner is paid non_holder_prize_pct% of the pot instead.
+    holder: bool = True
 
 
 @dataclass

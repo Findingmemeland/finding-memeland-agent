@@ -76,7 +76,14 @@ class Settings(BaseSettings):
     filler_daily_enabled: bool = Field(default=True)
     filler_hour_utc: int = Field(default=15)  # start of the crypto-X peak window
     min_warmup_days: int = Field(default=7)          # persona must be phone-verified + this old
-    min_prize_usd: float = Field(default=200.0)      # floor — minimum prize worth playing for
+    min_prize_usd: float = Field(default=200.0)      # legacy USD floor (unused by /launch since token prizes)
+    # /launch takes a TOKEN amount ("500M", "1B") since 2026-07-31 — no more
+    # FMML_USD_PRICE dance in Doppler just to launch a hunt.
+    min_prize_fmml: int = Field(default=100_000_000)  # floor — 100M $FIND
+    # Holder reward split: a winner whose wallet fails the holding rule still
+    # WINS, but gets this % of the pot (holders get 100%). Dormant while the
+    # holding floor is zero (everyone passes).
+    non_holder_prize_pct: int = Field(default=10, ge=1, le=100)
     # Watchdog: alert on Telegram if a LIVE hunt's loop completes no cycle for
     # this long (hung HTTP call, dead thread). Must exceed the loop's longest
     # legitimate cycle: poll_interval (75s) + max failure backoff (300s).

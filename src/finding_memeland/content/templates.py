@@ -25,6 +25,9 @@ class WinnerData:
     persona_user_id: str
     claim_code: str
     salt: str
+    # Holder reward split (2026-07-31): non-holder winners get pct% of the pot.
+    holder: bool = True
+    non_holder_pct: int = 10
 
 
 # --------------------------------------------------------------------------
@@ -57,7 +60,10 @@ def explainer_pending() -> bool:
     return _EXPLAINER_PLACEHOLDER_MARK in CLUE_ONE_EXPLAINER
 
 
-def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> str:
+def clue_one(
+    hunt_n: int, clue_text: str, prize: str, integrity_hash: str,
+    non_holder_pct: int = 10,
+) -> str:
     """Opening post: cold-traffic explainer + announcement + clue 1 + reshare
     gate + integrity hash.
 
@@ -72,6 +78,9 @@ def clue_one(hunt_n: int, clue_text: str, prize: str, integrity_hash: str) -> st
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
         f"The first to find me wins {prize} $FIND.\n"
+        # Holder reward split (Pedro, 2026-07-31): the split is public from the
+        # first post — nobody discovers the 10% rule only after winning.
+        f"hold $FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
         f"Reshare this post to enter.\n\n"
         f"integrity: {integrity_hash}\n\n"
         f"Check pinned for rules."
@@ -102,10 +111,18 @@ def winner_announcement(d: WinnerData) -> str:
         f"Hunt #{d.hunt_n} is halted. We have a winner!\n\n"
         f"Congratulations @{winner} — solved in {d.time_to_win}.\n"
         f"{d.prize_amount} $FIND transferred to your wallet ({d.tx_link}).\n"
+        + (
+            # Text set by Pedro (2026-07-31) — the reduced share is stated
+            # plainly, right under the transfer it explains.
+            f"heads up: this wallet isn't holding $FIND — non-holders win "
+            f"{d.non_holder_pct}% of the pot. hold on to your tokens and the "
+            f"full bounty is yours next time.\n"
+            if not d.holder else ""
+        )
         # Truth in the reveal (post-mortem P3.1): production never undresses the
         # persona (undress_on_retire=False) — saying "dormant in 1 hour" was
         # false, three lines above the block asking people to VERIFY our honesty.
-        f"The hidden persona was @{persona} — the profile stays up as a trophy. "
+        + f"The hidden persona was @{persona} — the profile stays up as a trophy. "
         f"It played once, and never again.\n\n"
         f"Integrity check — recompute SHA-256 of:\n"
         f"  user_id: {d.persona_user_id}\n"

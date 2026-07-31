@@ -53,6 +53,9 @@ class ValidationResult:
     check_reshare: bool = False
     check_bot: bool = False
     bot_reason: str | None = None
+    # Holder reward split (2026-07-31): holding is NO LONGER eliminatory — it
+    # sets this flag instead, and a non-holder winner gets a reduced prize.
+    holder: bool = True
 
 
 def _normalize_wallet(raw: str) -> str | None:
@@ -148,31 +151,31 @@ class DMValidator:
         if hunt.claim_code not in candidates:
             return ValidationResult(False, "bad_code")
 
-        # 2. Holding floor + continuity (free, our RPC).
-        if not self._chain.has_continuous_holding(
-            wallet=dm.wallet,
-            min_balance=hunt.min_balance_fmml,
-            holding_hours=hunt.holding_hours,
-        ):
-            return ValidationResult(False, "no_holding", check_code=True)
-
-        # 3. Public reshare of Clue 1 (PAID — only reached if 1 & 2 pass).
+        # 2. Public reshare of Clue 1 (PAID — only reached if the code passed).
         if not self._x.has_reshared(user_id=dm.sender_x_id, post_id=hunt.reshare_post_id):
             return ValidationResult(
-                False, "no_reshare", check_code=True, check_holding=True
+                False, "no_reshare", check_code=True
             )
 
-        # 4. Bot defences — bright-line public self-identification.
+        # 3. Bot defences — bright-line public self-identification.
         bot_ok, reason = self._bot_check(dm.sender_x_id)
         if not bot_ok:
             return ValidationResult(
                 False, "bot_disqualified", check_code=True,
-                check_holding=True, check_reshare=True, bot_reason=reason,
+                check_reshare=True, bot_reason=reason,
             )
 
+        # 4. Holding floor + continuity (free, our RPC) — checked LAST and no
+        # longer eliminatory (Pedro, 2026-07-31): a non-holder still WINS, but
+        # is paid non_holder_prize_pct% of the pot instead of 100%.
+        holder = bool(self._chain.has_continuous_holding(
+            wallet=dm.wallet,
+            min_balance=hunt.min_balance_fmml,
+            holding_hours=hunt.holding_hours,
+        ))
         return ValidationResult(
-            True, "won", check_code=True, check_holding=True,
-            check_reshare=True, check_bot=True,
+            True, "won", check_code=True, check_holding=holder,
+            check_reshare=True, check_bot=True, holder=holder,
         )
 
     def _bot_check(self, sender_x_id: str) -> tuple[bool, str | None]:

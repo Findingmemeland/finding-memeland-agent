@@ -185,6 +185,7 @@ class Orchestrator:
         claim_guess_cap: int = 5,
         wallet_timeout_s: int = 600,
         claim_sweep_every_n: int = 5,
+        non_holder_prize_pct: int = 10,
     ):
         self._settings = settings
         self._clock = clock
@@ -242,6 +243,11 @@ class Orchestrator:
         self._claim_guess_cap = claim_guess_cap
         self._wallet_timeout_s = wallet_timeout_s
         self._claim_sweep_every_n = claim_sweep_every_n
+        # Holder reward split (2026-07-31): holding no longer eliminates — a
+        # non-holder winner is paid this % of the pot (holders get 100%).
+        # Clamped 1-100: 0 would pay a winner nothing while the announcement
+        # declares them a winner; >100 would exceed the preflight-checked pot.
+        self._non_holder_pct = min(100, max(1, int(non_holder_prize_pct)))
 
     # ------------------------------------------------------------------
     def _submission_loop(self, hunt: PreparedHunt, **kw) -> Winner:
@@ -253,9 +259,18 @@ class Orchestrator:
         return self._clue_and_dm_loop(hunt, **kw)
 
     # ------------------------------------------------------------------
-    def run_hunt(self, prize_usd: float | None = None) -> PreparedHunt:
+    def run_hunt(
+        self, prize_fmml: int | None = None, *, prize_usd: float | None = None
+    ) -> PreparedHunt:
+        """Token-denominated prizes (Pedro, 2026-07-31): production launches
+        with an exact $FIND amount (/launch 500M) — no USD conversion, no
+        FMML_USD_PRICE required. The prize_usd keyword remains for the
+        live-test harness and simulations (converted via the price feed)."""
         self._settings.assert_ready_for_hunt()
-        hunt = self._prepare(prize_usd if prize_usd is not None else self._settings.prize_usd_max)
+        if prize_fmml is None:
+            usd = prize_usd if prize_usd is not None else self._settings.prize_usd_max
+            prize_fmml = self._price_feed.usd_to_fmml(usd)
+        hunt = self._prepare(prize_fmml)
         if self._prep_window_h:
             if not self._prep_window(hunt):
                 return hunt  # aborted by the operator during prep
@@ -279,7 +294,23 @@ class Orchestrator:
         self._notifier.notify(text)
 
     # ------------------------------------------------------------------
-    def _prepare(self, prize_usd: float) -> PreparedHunt:
+    def _prepare(self, prize_fmml: int) -> PreparedHunt:
+        # Eligibility floor FIRST — before any account is acquired or dressed.
+        # Fail-CLOSED (review 2026-07-31): a USD floor without a price must
+        # refuse the launch, never silently become "no floor" (the public
+        # anti-sniper rule would be unenforced while still advertised).
+        min_balance_fmml = self._holding_floor_fmml
+        if not min_balance_fmml and self._holding_floor_usd > 0:
+            try:
+                min_balance_fmml = self._price_feed.usd_to_fmml(self._holding_floor_usd)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    f"holding floor is ${self._holding_floor_usd:g} (USD fallback) but "
+                    f"the price is unavailable ({e}) — set HOLDING_FLOOR_FMML (token "
+                    "floor, no price needed) or FMML_USD_PRICE, or set the floor to 0 "
+                    "explicitly. Refusing to launch with an unenforceable floor."
+                ) from e
+
         persona = self._persona_source.acquire_ready()
 
         # Public hunt number from the DB (max+1). On failure, fall back to the
@@ -313,15 +344,19 @@ class Orchestrator:
         salt = generate_salt()
         integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
 
-        prize_fmml = self._price_feed.usd_to_fmml(prize_usd)
+        prize_fmml = int(prize_fmml)
+        # Informational only: a USD figure for the DB row, when a price is set.
+        prize_usd = None
+        fmml_to_usd = getattr(self._price_feed, "fmml_to_usd", None)
+        if fmml_to_usd is not None:
+            try:
+                prize_usd = fmml_to_usd(prize_fmml)
+            except Exception:  # noqa: BLE001 — cosmetic, never blocks a launch
+                prize_usd = None
         # Eligibility floor: prefer the PRE-ANNOUNCED fixed token amount — the
         # 24h holding window looks BACK in time, so players must have known the
         # exact number before they bought. Trigger-time USD conversion is only
         # the fallback (and can unfairly raise the bar if price fell overnight).
-        min_balance_fmml = self._holding_floor_fmml or self._price_feed.usd_to_fmml(
-            self._holding_floor_usd
-        )
-
         avatar_path = None
         png = self._avatar_generator.generate_png(identity.avatar_prompt)
         if png and self._avatar_writer is not None:
@@ -410,7 +445,7 @@ class Orchestrator:
             claim_code=claim_code,
             salt=salt,
             integrity_hash=integrity_hash,
-            prize_usd=prize_usd,
+            prize_usd=prize_usd or 0.0,
             prize_fmml=prize_fmml,
             min_balance_fmml=min_balance_fmml,
             holding_hours=self._holding_hours,
@@ -525,6 +560,7 @@ class Orchestrator:
             clue_text=draft.text,
             prize=f"{hunt.prize_fmml:,}",
             integrity_hash=hunt.integrity_hash,
+            non_holder_pct=self._non_holder_pct,
         )
         tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id
@@ -811,6 +847,7 @@ class Orchestrator:
                     cand = Winner(
                         submission=sub, wallet=assembled.parsed.wallet,
                         submission_row_id=row_id if isinstance(row_id, int) else None,
+                        holder=getattr(res, "holder", True),
                     )
                     if win_best is None:
                         win_best = (sub.created_at, cand)
@@ -1696,6 +1733,7 @@ class Orchestrator:
                 ),
                 wallet=wallet,
                 submission_row_id=pending.get("row_id"),
+                holder=getattr(res, "holder", True),
             )
             self._transition(hunt, HuntState.RESOLVING)
             self._notify(f"winner: @{winner.submission.sender_handle}")
@@ -1781,12 +1819,24 @@ class Orchestrator:
                 "Check the chain (hot wallet nonce/txs) and settle manually."
             )
 
+        # Holder reward split (2026-07-31): the pot is advertised in full; a
+        # winner whose wallet fails the holding rule is paid this reduced share.
+        paid_fmml = (
+            hunt.prize_fmml
+            if winner.holder
+            else max(1, hunt.prize_fmml * self._non_holder_pct // 100)
+        )
+        if not winner.holder:
+            self._notify(
+                f"winner @{winner.submission.sender_handle} is NOT a holder — "
+                f"paying {self._non_holder_pct}% of the pot: {paid_fmml:,} $FIND."
+            )
         intent_id = self._repo.create_payout_intent(
-            hunt_id=hunt.id, wallet=winner.wallet, amount_fmml=hunt.prize_fmml
+            hunt_id=hunt.id, wallet=winner.wallet, amount_fmml=paid_fmml
         )
         try:
             receipt = self._payout.send_prize(
-                hunt_id=hunt.id, to_wallet=winner.wallet, amount_fmml=hunt.prize_fmml
+                hunt_id=hunt.id, to_wallet=winner.wallet, amount_fmml=paid_fmml
             )
         except Exception as e:
             # The tx MAY have been broadcast (e.g. receipt timeout). Mark it so
@@ -1814,7 +1864,7 @@ class Orchestrator:
         try:
             self._repo.record_winner(
                 hunt_id=hunt.id, winner_x_id=winner.submission.sender_x_id,
-                wallet=winner.wallet, prize_fmml=hunt.prize_fmml,
+                wallet=winner.wallet, prize_fmml=paid_fmml,
                 submission_id=winner.submission_row_id,
             )
         except Exception as e:  # noqa: BLE001
@@ -1822,7 +1872,7 @@ class Orchestrator:
                 f"🚨 winner paid ({receipt.tx_hash}) but record_winner failed: "
                 f"{e!r} — insert the winners row manually. The reveal continues."
             )
-        self._notify(f"paid {hunt.prize_fmml:,} $FIND to {winner.wallet} ({receipt.tx_hash})")
+        self._notify(f"paid {paid_fmml:,} $FIND to {winner.wallet} ({receipt.tx_hash})")
         return receipt
 
     def _reveal(self, hunt: PreparedHunt, winner: Winner, receipt) -> None:
@@ -1844,12 +1894,16 @@ class Orchestrator:
             hunt_n=hunt.number,
             winner_handle=winner.submission.sender_handle,
             time_to_win=_fmt_duration(elapsed),
-            prize_amount=f"{hunt.prize_fmml:,}",
+            # The amount actually TRANSFERRED (a non-holder gets the reduced
+            # share) — the reveal must never overstate the payout.
+            prize_amount=f"{_as_int(receipt.amount_fmml) or hunt.prize_fmml:,}",
             tx_link=receipt.tx_hash,
             persona_handle=hunt.persona.handle,
             persona_user_id=hunt.persona.x_user_id,
             claim_code=hunt.claim_code,
             salt=hunt.salt,
+            holder=winner.holder,
+            non_holder_pct=self._non_holder_pct,
         )
         text = winner_announcement(data)
         for attempt in range(3):
