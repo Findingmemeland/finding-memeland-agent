@@ -217,3 +217,19 @@ def test_zero_floor_launches_fine_without_price():
     orch._holding_floor_usd = 0.0
     hunt = orch.run_hunt(prize_fmml=500_000_000)
     assert hunt.state == HuntState.DONE
+
+
+def test_zero_floor_clue_one_omits_the_split_line():
+    """Floor 0 = holding OFF (Hunt #4 bridge): Clue 1 must NOT advertise the
+    holder split — never announce a rule that isn't being enforced."""
+    rig = build_simulation()
+    orch = rig.orchestrator
+    orch._holding_floor_fmml = 0
+    orch._holding_floor_usd = 0.0
+    orch.run_hunt(prize_fmml=500_000_000)
+    clue1 = rig.publisher.posts[0]
+    assert "non-holders" not in clue1
+    assert "hold $FIND to win the full prize" not in clue1
+    # The rest of the post is intact around the omitted line.
+    assert "The first to find me wins 500,000,000 $FIND." in clue1
+    assert "Reshare this post to enter." in clue1

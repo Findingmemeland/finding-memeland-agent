@@ -560,7 +560,12 @@ class Orchestrator:
             clue_text=draft.text,
             prize=f"{hunt.prize_fmml:,}",
             integrity_hash=hunt.integrity_hash,
-            non_holder_pct=self._non_holder_pct,
+            # Floor 0 = holding OFF for this hunt: omit the split line rather
+            # than advertise a rule that isn't enforced. Reactivates by itself
+            # the moment the floor is set again (Hunt #5).
+            non_holder_pct=(
+                self._non_holder_pct if hunt.min_balance_fmml > 0 else None
+            ),
         )
         tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id

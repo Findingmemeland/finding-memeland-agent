@@ -62,12 +62,14 @@ def explainer_pending() -> bool:
 
 def clue_one(
     hunt_n: int, clue_text: str, prize: str, integrity_hash: str,
-    non_holder_pct: int = 10,
+    non_holder_pct: int | None = 10,
 ) -> str:
     """Opening post: cold-traffic explainer + announcement + clue 1 + reshare
     gate + integrity hash.
 
     The footer 'Check pinned for rules' appears ONLY on Clue 1.
+    non_holder_pct=None means the holding floor is OFF for this hunt (floor 0):
+    the split line is omitted — never advertise a rule that isn't enforced.
     """
     # Order (Pedro, 2026-07-20): the announcement leads, the explainer follows
     # — regulars get the signal first, strangers get the context immediately
@@ -80,8 +82,11 @@ def clue_one(
         f"The first to find me wins {prize} $FIND.\n"
         # Holder reward split (Pedro, 2026-07-31): the split is public from the
         # first post — nobody discovers the 10% rule only after winning.
-        f"hold $FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
-        f"Reshare this post to enter.\n\n"
+        + (
+            f"hold $FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
+            if non_holder_pct is not None else ""
+        )
+        + f"Reshare this post to enter.\n\n"
         f"integrity: {integrity_hash}\n\n"
         f"Check pinned for rules."
     )
