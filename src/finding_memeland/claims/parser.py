@@ -69,6 +69,27 @@ def code_like(text: str, expected_code_len: int) -> bool:
     return False
 
 
+_GUESS_LIKE_RE = re.compile(r"^[A-Z0-9]{5,14}$")
+
+
+def guess_like(text: str, expected_code_len: int) -> bool:
+    """A token that LOOKS like a code attempt with the wrong shape: claim-code
+    alphabet as typed, 5-14 chars, and BOTH a letter and a digit — 'TSU19'
+    yes; 'WAGMI' and token amounts like '10000000' no. Exact-length tokens are
+    code_like's business; this catches the drive-by guesses that got silence
+    in Hunt #4 (post-mortem: the thread needs the oracle to bite back)."""
+    for tok in _TOKEN_RE.findall(text or ""):
+        if len(tok) == expected_code_len:
+            continue
+        if (
+            _GUESS_LIKE_RE.match(tok)
+            and any(c.isdigit() for c in tok)
+            and any(c.isalpha() for c in tok)
+        ):
+            return True
+    return False
+
+
 def extract_wallet(text: str) -> str | None:
     """First EIP-55-valid wallet in the text (same rules as the DM parser:
     a bad mixed-case checksum parses as NO wallet, so the winner is asked to

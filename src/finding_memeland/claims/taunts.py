@@ -50,10 +50,14 @@ never confirm or deny how close they are thematically. No URLs, no hashtags, \
 no @mentions, no emojis except 🐸 (optional). Reply with ONLY the jeer text."""
 
 _FUNNY_SYSTEM = """You judge replies in an X treasure-hunt thread. Given a \
-player's reply (NOT a code guess), answer YES if it is funny/witty/playful IN \
-THE SPIRIT OF THE GAME and deserves a jeering reply from the game's oracle — \
-or NO if it is generic chatter (greetings, spam, questions, complaints, \
-anything mundane). Be strict: when unsure, say NO. Reply with ONLY YES or NO."""
+player's reply (NOT a code guess), answer YES if the game's oracle should \
+reply with a playful jeer. YES for anything ABOUT the game: complaints that \
+it's hard or impossible, begging for hints or mercy, taunting or challenging \
+the oracle, jokes about the hunt, declaring defeat, wrong-theory banter. NO \
+for: greetings, generic spam, shilling or links, scam offers, serious \
+questions that need a real answer, anything unrelated to the game, or \
+genuine (non-playful) hostility. When unsure whether it is about the game, \
+say NO. Reply with ONLY YES or NO."""
 
 
 class TauntEngine:

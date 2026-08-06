@@ -621,3 +621,157 @@ def test_global_taunt_budget_caps_total_replies():
     except RuntimeError:
         pass
     assert len(rig.publisher.post_replies) == 3, "oracle goes silent past the budget"
+
+
+# ---------------------------------------------------------------------------
+# Hunt #4 post-mortem (2026-08-06): the thread got silence — wrong-shape
+# guesses ('TSU19') and 'this is hard' chatter never earned a jeer, and a
+# lowercase-typed CORRECT code would have been judged as chatter and lost.
+
+
+def test_guess_like_detects_wrong_shape_attempts_only():
+    from finding_memeland.claims.parser import guess_like
+
+    assert guess_like("is it TSU19?", 8)            # letters+digit, wrong length
+    assert guess_like("maybe X7Q2ZZ", 8)
+    assert not guess_like("WAGMI frens", 8)          # no digit: not an attempt
+    assert not guess_like("i hold 10000000 $FIND", 8)  # amount: no letter
+    assert not guess_like("AB2DEF7X", 8)             # exact length: code_like's job
+    assert not guess_like("wallet 0x" + "a" * 40, 8)
+    assert not guess_like("gm", 8)
+
+
+def test_wrong_shape_guess_gets_a_jeer_without_llm():
+    """'TSU19' in the claim thread earns a pool jeer even with no LLM wired —
+    once per profile, and it must NOT burn real guess-cap attempts."""
+    rig, orch, hunt, src = _rig()
+    t0 = hunt.live_at
+    src.reshared |= {"77"}
+    src.schedule[1] = lambda: [
+        _post(9910, "55", "is it TSU19?", t0 + timedelta(minutes=1),
+              hunt.reshare_post_id),
+        _post(9911, "55", "ok then TSU20", t0 + timedelta(minutes=2),
+              hunt.reshare_post_id),
+    ]
+    src.schedule[5] = lambda: [
+        _post(9920, "77", f"code {_code(rig)}", rig.clock.now(),
+              hunt.reshare_post_id)
+    ]
+    src.schedule[9] = lambda: [
+        _post(9930, "77", WALLET_A, rig.clock.now(), _ask_id(rig, hunt))
+    ]
+    winner = orch._claim_loop(hunt)
+    assert winner.submission.sender_x_id == "77"
+    jeers_1 = _replies_to(rig, 9910)
+    jeers_2 = _replies_to(rig, 9911)
+    assert len(jeers_1) == 1 and jeers_1[0] in TAUNT_POOL
+    assert jeers_2 == [], "once per profile — the second guess gets silence"
+    outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
+    assert outcomes["9910"] == "taunted"
+    # NOT logged as bad_code: wrong-shape guesses must not burn guess caps.
+    assert "bad_code" not in {outcomes.get("9910"), outcomes.get("9911")}
+
+
+def test_lowercase_correct_code_wins():
+    """'matching is generous' must hold on the gate too: the correct code
+    typed in lowercase is a CLAIM, not chatter (latent bug, Hunt #4 PM)."""
+    rig, orch, hunt, src = _rig()
+    t0 = hunt.live_at
+    src.reshared |= {"42"}
+    src.schedule[1] = lambda: [
+        _post(9940, "42", f"i think it's {_code(rig).lower()}",
+              t0 + timedelta(minutes=1), hunt.reshare_post_id)
+    ]
+    src.schedule[5] = lambda: [
+        _post(9950, "42", WALLET_A, rig.clock.now(), _ask_id(rig, hunt))
+    ]
+    winner = orch._claim_loop(hunt)
+    assert winner is not None and winner.submission.sender_x_id == "42"
+
+
+def test_lowercase_wrong_word_stays_chatter_silence():
+    """An ordinary lowercase 8-letter word ('birthday') still never triggers
+    the code path or a jeer (anti-spam bar unchanged; judge fail-closed)."""
+    rig, orch, hunt, src = _rig()
+    t0 = hunt.live_at
+    src.reshared |= {"77"}
+    src.schedule[1] = lambda: [
+        _post(9960, "9", "happy birthday oracle", t0 + timedelta(minutes=1),
+              hunt.reshare_post_id)
+    ]
+    src.schedule[5] = lambda: [
+        _post(9970, "77", f"code {_code(rig)}", rig.clock.now(),
+              hunt.reshare_post_id)
+    ]
+    src.schedule[9] = lambda: [
+        _post(9980, "77", WALLET_A, rig.clock.now(), _ask_id(rig, hunt))
+    ]
+    winner = orch._claim_loop(hunt)
+    assert winner.submission.sender_x_id == "77"
+    assert not _replies_to(rig, 9960)
+    outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
+    assert "9960" not in outcomes or outcomes["9960"] not in ("bad_code", "spam_capped")
+
+
+def test_game_chatter_judged_yes_gets_a_jeer():
+    """With an LLM judge saying YES ('this is hard' is game chatter now), the
+    oracle replies — once, budget-capped, banned-terms enforced."""
+
+    class YesLLM:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                sys = kw.get("system", "")
+                txt = "YES" if "judge replies" in sys else "skill issue. the pond forgives no one. 🐸"
+
+                class B:
+                    type = "text"
+                    text = txt
+                return type("R", (), {"content": [B()]})()
+
+    rig, orch, hunt, src = _rig()
+    orch._taunt_engine = TauntEngine(YesLLM(), "m")
+    t0 = hunt.live_at
+    src.reshared |= {"77"}
+    src.schedule[1] = lambda: [
+        _post(9990, "12", "this is hard, oracle", t0 + timedelta(minutes=1),
+              hunt.reshare_post_id)
+    ]
+    src.schedule[5] = lambda: [
+        _post(9991, "77", f"code {_code(rig)}", rig.clock.now(),
+              hunt.reshare_post_id)
+    ]
+    src.schedule[9] = lambda: [
+        _post(9992, "77", WALLET_A, rig.clock.now(), _ask_id(rig, hunt))
+    ]
+    winner = orch._claim_loop(hunt)
+    assert winner.submission.sender_x_id == "77"
+    jeers = _replies_to(rig, 9990)
+    assert len(jeers) == 1
+    outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
+    assert outcomes["9990"] == "taunted"
+
+
+def test_correct_code_takes_precedence_over_guess_shaped_noise():
+    """Adversarial precedence (Opus review): a post carrying BOTH a
+    guess-shaped token ('TSU19') and the CORRECT code must go down the claim
+    path and win — never intercepted by the jeer path. And the only reply the
+    winning post gets is the wallet ask, not a pool taunt."""
+    rig, orch, hunt, src = _rig()
+    t0 = hunt.live_at
+    src.reshared |= {"42"}
+    code = _code(rig)
+    assert code_like(code, len(code)), "generated codes are code_like by construction"
+    src.schedule[1] = lambda: [
+        _post(9995, "42", f"TSU19? no wait — it's {code}",
+              t0 + timedelta(minutes=1), hunt.reshare_post_id)
+    ]
+    src.schedule[5] = lambda: [
+        _post(9996, "42", WALLET_A, rig.clock.now(), _ask_id(rig, hunt))
+    ]
+    winner = orch._claim_loop(hunt)
+    assert winner is not None and winner.submission.sender_x_id == "42"
+    for reply in _replies_to(rig, 9995):
+        assert reply not in TAUNT_POOL, "winning post must never be jeered"
+    outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
+    assert outcomes.get("9995") not in ("taunted", "bad_code")

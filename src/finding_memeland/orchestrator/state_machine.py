@@ -26,7 +26,7 @@ from enum import Enum
 
 from ..content.clue_engine import PersonaContext, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
-from ..claims.parser import code_like, extract_candidates, extract_wallet
+from ..claims.parser import code_like, extract_candidates, extract_wallet, guess_like
 from ..content.templates import (
     CLUE_FOLLOWUP_CLAIM_HINT,
     DM_REPLY_BAD_CODE,
@@ -1344,7 +1344,15 @@ class Orchestrator:
                     hunt.reshare_post_id is not None
                     and post.replied_to_id == hunt.reshare_post_id
                 )
-                looks_like_code = code_like(post.text, code_len)
+                candidates = extract_candidates(post.text, code_len)
+                # The code path must open for the CORRECT code in any casing —
+                # "matching is generous" (parser.py) has to hold on this gate
+                # too, or a lowercase-typed winner would be judged as chatter
+                # and silently lost (Hunt #4 post-mortem, latent bug). Wrong
+                # lowercase words stay chatter: only the exact code opens it.
+                looks_like_code = (
+                    code_like(post.text, code_len) or hunt.claim_code in candidates
+                )
 
                 # Wrong door — a code-like post anywhere but the Clue 1 thread.
                 if looks_like_code and not is_claim_location:
@@ -1371,8 +1379,15 @@ class Orchestrator:
 
                 # ---- Replies to Clue 1 (the claim window) ----
                 if not looks_like_code:
+                    # Wrong-shape guesses ('TSU19') jeer directly — no humor
+                    # judge, works without an LLM (pool), same once-per-profile
+                    # + global budget caps, and NOT counted against the real
+                    # guess cap (they are not codes; they must not burn
+                    # anyone's attempts). Everything else: the (now game-wide)
+                    # humor judge decides.
                     self._maybe_taunt_chatter(
-                        hunt, post, taunted, judged, taunt_budget, banned
+                        hunt, post, taunted, judged, taunt_budget, banned,
+                        skip_judge=guess_like(post.text, code_len),
                     )
                     _done(post)
                     continue
@@ -1397,7 +1412,6 @@ class Orchestrator:
                     _done(post)
                     continue
 
-                candidates = extract_candidates(post.text, code_len)
                 if hunt.claim_code not in candidates:
                     # Wrong code — the oracle jeers (once per profile).
                     try:
@@ -1653,13 +1667,17 @@ class Orchestrator:
         judged: set[str],
         taunt_budget: dict,
         banned: tuple[str, ...],
+        *,
+        skip_judge: bool = False,
     ) -> None:
         """Non-code chatter: one jeer per profile, ONLY if the LLM judge finds
-        it game-funny (fail-closed — 'Good morning' gets silence). The reply is
-        logged ('taunted') so the once-per-profile promise survives restarts.
-        Each author's chatter is judged at most ONCE per process (LLM cost:
-        one flood of 'gm' posts must not become one LLM call each), and the
-        global per-hunt taunt budget applies."""
+        it game-related (fail-closed — 'Good morning' gets silence). With
+        skip_judge=True (wrong-shape guesses like 'TSU19') the jeer fires
+        without the judge — pool-backed, so it works even with no LLM. The
+        reply is logged ('taunted') so the once-per-profile promise survives
+        restarts. Each author's chatter is judged at most ONCE per process
+        (LLM cost: one flood of 'gm' posts must not become one LLM call
+        each), and the global per-hunt taunt budget applies."""
         if self._taunt_engine is None or post.author_id in taunted:
             return
         if post.author_id in judged:
@@ -1668,7 +1686,7 @@ class Orchestrator:
         if taunt_budget["used"] >= self._MAX_TAUNTS_PER_HUNT:
             return
         try:
-            if not self._taunt_engine.should_taunt_chatter(post.text):
+            if not skip_judge and not self._taunt_engine.should_taunt_chatter(post.text):
                 return
             jeer = self._taunt_engine.taunt(post.text, banned)
             self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
