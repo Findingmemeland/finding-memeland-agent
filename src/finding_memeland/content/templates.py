@@ -83,7 +83,9 @@ def clue_one(
         # Holder reward split (Pedro, 2026-07-31): the split is public from the
         # first post — nobody discovers the 10% rule only after winning.
         + (
-            f"hold $FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
+            # No second cashtag (X 403, 2026-08-10: API posts are limited to
+            # ONE cashtag) — the prize line above already carries $FIND.
+            f"hold FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
             if non_holder_pct is not None else ""
         )
         + f"Reshare this post to enter.\n\n"
@@ -119,7 +121,8 @@ def winner_announcement(d: WinnerData) -> str:
         + (
             # Text set by Pedro (2026-07-31) — the reduced share is stated
             # plainly, right under the transfer it explains.
-            f"heads up: this wallet isn't holding $FIND — non-holders win "
+            # Same one-cashtag rule: the transfer line above already has $FIND.
+            f"heads up: this wallet isn't holding FIND — non-holders win "
             f"{d.non_holder_pct}% of the pot. hold on to your tokens and the "
             f"full bounty is yours next time.\n"
             if not d.holder else ""

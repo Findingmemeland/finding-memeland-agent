@@ -115,7 +115,7 @@ def test_non_holder_winner_paid_pct_and_told_publicly():
     assert rig.payout.sent[0]["amount"] == 100_000_000   # 10% paid
     reveal = next(p for p in rig.publisher.posts if "We have a winner" in p)
     assert "100,000,000 $FIND transferred" in reveal
-    assert "heads up: this wallet isn't holding $FIND" in reveal
+    assert "heads up: this wallet isn't holding FIND" in reveal
     assert "non-holders win 10% of the pot" in reveal
     assert "hold on to your tokens and the full bounty is yours next time" in reveal
     # Books record what was PAID, not the advertised pot.
@@ -128,7 +128,8 @@ def test_clue_one_announces_the_holder_split():
     rig.orchestrator.run_hunt(prize_fmml=1_000_000_000)
     clue1 = rig.publisher.posts[0]
     assert "The first to find me wins 1,000,000,000 $FIND." in clue1
-    assert "hold $FIND to win the full prize — non-holders win 10%." in clue1
+    assert "hold FIND to win the full prize — non-holders win 10%." in clue1
+    assert clue1.count("$FIND") == 1, "X allows ONE cashtag per API post (403, 2026-08-10)"
     # The split line sits directly under the prize line (Pedro's placement).
     assert clue1.index("wins 1,000,000,000 $FIND.") < clue1.index("non-holders win 10%")
     assert clue1.index("non-holders win 10%") < clue1.index("Reshare this post")
@@ -229,7 +230,25 @@ def test_zero_floor_clue_one_omits_the_split_line():
     orch.run_hunt(prize_fmml=500_000_000)
     clue1 = rig.publisher.posts[0]
     assert "non-holders" not in clue1
-    assert "hold $FIND to win the full prize" not in clue1
+    assert "hold FIND to win the full prize" not in clue1
     # The rest of the post is intact around the omitted line.
     assert "The first to find me wins 500,000,000 $FIND." in clue1
     assert "Reshare this post to enter." in clue1
+
+
+def test_no_template_post_ever_has_two_cashtags():
+    """X API 403 (2026-08-10): posts are limited to ONE cashtag. The Hunt #5
+    go-live died on this — clue_one and the settlement post must never carry
+    a second $FIND."""
+    from finding_memeland.content.templates import WinnerData, clue_one, winner_announcement
+
+    c1 = clue_one(5, "some clue", "500,000,000", "abc123", non_holder_pct=10)
+    assert c1.count("$FIND") == 1
+
+    d = WinnerData(
+        hunt_n=5, winner_handle="@w", time_to_win="1h",
+        prize_amount="50,000,000", tx_link="tx", persona_handle="@p",
+        persona_user_id="123", claim_code="C", salt="s",
+        holder=False, non_holder_pct=10,
+    )
+    assert winner_announcement(d).count("$FIND") == 1
