@@ -52,6 +52,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .dm.validator import DMValidator
     from .orchestrator.state_machine import Orchestrator
     from .persona.avatar import AvatarGenerator
+    from .persona.dress_pipeline import DressPipeline
     from .persona.dresser import PersonaDresser
     from .persona.generator import PersonaGenerator
     from .persona.source import DBPersonaSource
@@ -248,6 +249,61 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 "(/abort_prep to abort, /delay_golive <h> to push it)."
             )
         return f"hunt launching with a {prize_fmml:,} $FIND prize 🏴"
+
+    # ------------------------------------------------------------------
+    # /dress <ref> [handle hint...] — pre-dress a persona (design 2026-08-12).
+    # Runs in the background (LLM identity + 2 image generations + spaced
+    # anchor posts take minutes); the pipeline reports on Telegram when done.
+    # Refused while a hunt is active: dressing shares the X app's rate
+    # budget, and the doctrine is to never touch the agent mid-hunt.
+    # ------------------------------------------------------------------
+    dress_pipeline = DressPipeline(
+        repo=repo,
+        token_resolver=env_token_resolver,
+        generator=PersonaGenerator(anthropic, s.anthropic_model),
+        avatar_generator=AvatarGenerator(
+            openai, model=s.openai_image_model, size=s.openai_image_size
+        ),
+        dresser=PersonaDresser(x),
+        post_engine=PersonaPostEngine(anthropic, s.anthropic_model),
+        notifier=notifier,
+        avatar_writer=write_temp_png,
+        register=s.persona_register,
+    )
+    dress_flag = {"active": False}
+
+    def _dress(arg: str) -> str:
+        parts = arg.split(maxsplit=1)
+        if not parts:
+            return (
+                "usage: /dress <ref|handle> [handle hint]\n"
+                "e.g. /dress 07 charging = what a phone does plugged in; "
+                "capas = capes in PT"
+            )
+        ref = parts[0]
+        hint = parts[1].strip() if len(parts) > 1 else None
+        refusal = active_hunt_guard(repo)
+        if refusal:
+            return f"⛔ not dressing during an active hunt. {refusal}"
+        with hunt_lock:
+            if dress_flag["active"]:
+                return "⛔ a /dress is already running — wait for its report."
+            dress_flag["active"] = True
+
+        def _run_dress():
+            try:
+                dress_pipeline.dress(ref, handle_hint=hint)
+            except Exception as e:  # noqa: BLE001
+                notifier.notify(f"🚨 /dress {ref} FAILED: {e}")
+            finally:
+                dress_flag["active"] = False
+
+        threading.Thread(target=_run_dress, daemon=True).start()
+        return (
+            f"a vestir a persona {ref} em background — identidade, código, "
+            "avatar, banner, locator + anchor posts. Relatório aqui quando "
+            "terminar (sem o código: continuas cego 🐸)."
+        )
 
     def _status(arg: str = "") -> str:
         """State + the config the agent ACTUALLY loaded.
@@ -455,6 +511,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     actions = {
         "launch": _launch,
+        "dress": _dress,
         "status": _status,
         "silence": _silence,
         "resume": _resume,

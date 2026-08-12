@@ -278,3 +278,25 @@ alter table hunts add column if not exists wallet_due_at timestamptz;
 -- rebuilds the settlement candidate/queue from the log after a restart, and
 -- the Winner Announcement needs the @):
 alter table submissions add column if not exists sender_handle text;
+
+-- ---------------------------------------------------------------------------
+-- Migration 2026-08-12 — pre-dressing (design doc: Design_Pre_Dressing.md).
+-- Personas are dressed at link time (/dress) and wait weeks fully indexed;
+-- /launch becomes instantaneous. The persona row carries the DESCRIPTOR: the
+-- single source of truth for everything applied to the account (R1) — the
+-- clue engine generates facets from THIS, never from memory (R2).
+--
+-- ⚠️ ALTER TYPE ... ADD VALUE must run OUTSIDE a transaction (Supabase SQL
+-- editor: run this line separately, before the alter tables):
+alter type persona_state add value if not exists 'dressed';  -- fully dressed, indexing, awaiting a hunt
+
+alter table personas add column if not exists persona_identity jsonb;        -- full GeneratedPersona (facets for clues)
+alter table personas add column if not exists claim_code text;               -- lives here for weeks now (accepted risk, Pedro 11/08)
+alter table personas add column if not exists applied_display_name text;     -- EXACT name sent to X (R3 verifies ==)
+alter table personas add column if not exists applied_bio text;              -- EXACT bio sent to X, code included (R3 verifies)
+alter table personas add column if not exists locator_post_id text;          -- the findable/pinned locator post
+alter table personas add column if not exists avatar_applied boolean not null default false;
+alter table personas add column if not exists banner_applied boolean not null default false;
+alter table personas add column if not exists handle_hint text;              -- Pedro's decomposable-handle hint (clues 8-9)
+alter table personas add column if not exists anchor_posts jsonb;            -- [{text, tweet_id, posted_at}] published at dress time
+alter table personas add column if not exists dressed_at timestamptz;        -- indexing age; launch picks the oldest

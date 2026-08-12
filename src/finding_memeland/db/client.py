@@ -202,6 +202,33 @@ class Repo:
             "id", persona_id
         ).execute()
 
+    def update_persona(self, persona_id: str, **fields: Any) -> None:
+        """Update persona fields WITHOUT touching state (descriptor bookkeeping
+        — e.g. anchor_posts as they publish)."""
+        self._db.table("personas").update(_clean(fields)).eq("id", persona_id).execute()
+
+    def persona_by_ref_or_handle(self, key: str) -> dict[str, Any] | None:
+        """Find a persona by oauth_ref ('07') or handle ('@X' / 'X') — the two
+        names the operator knows. oauth_ref first (it's what authorize prints)."""
+        key = str(key).strip()
+        resp = self._db.table("personas").select("*").eq("oauth_ref", key).execute()
+        rows = resp.data or []
+        if rows:
+            return rows[0]
+        handle = key if key.startswith("@") else f"@{key}"
+        resp = self._db.table("personas").select("*").eq("handle", handle).execute()
+        rows = resp.data or []
+        return rows[0] if rows else None
+
+    def dressed_personas(self) -> list[dict[str, Any]]:
+        """The pre-dressed pool, oldest dress first (launch picks the most
+        indexed; /dress uses the identities for anti-repetition)."""
+        resp = (
+            self._db.table("personas").select("*").eq("state", "dressed")
+            .order("dressed_at").execute()
+        )
+        return resp.data or []
+
     def create_persona(self, *, handle: str, x_user_id: str, oauth_ref: str, state: str = "ready", **fields: Any) -> str:
         resp = self._db.table("personas").insert(
             _clean({"handle": handle, "x_user_id": x_user_id, "oauth_ref": oauth_ref,

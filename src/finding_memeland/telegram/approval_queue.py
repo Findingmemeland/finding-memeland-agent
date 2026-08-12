@@ -7,6 +7,7 @@ protocol, so the operator must not see clues before they publish.
 
 Admin commands (from the hardcoded admin chat id only):
   /launch   — trigger a new hunt (manual trigger, not cron)
+  /dress    — pre-dress a persona (identity + code + avatar + posts), weeks ahead
   /silence  — kill switch: pause the agent
   /resume   — resume after a pause
   /status   — current hunt + pipeline state
@@ -108,7 +109,7 @@ class TelegramAdmin:
             await update.message.reply_text(reply)
 
         app.add_handler(CommandHandler(
-            ["launch", "silence", "resume", "status", "post",
+            ["launch", "dress", "silence", "resume", "status", "post",
              "abort_prep", "delay_golive",
              "tease", "approve", "reject"],
             _handle,

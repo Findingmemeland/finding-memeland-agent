@@ -45,7 +45,7 @@ def test_compose_bio_embeds_claim_code_and_sanitizes():
 
 def test_dress_sets_avatar_banner_profile_and_posts_locator():
     x = _FakeX()
-    PersonaDresser(x).dress(
+    receipt = PersonaDresser(x).dress(
         access_token="t", access_secret="s", identity=_persona(),
         claim_code="ABCDEFGH", avatar_path="/tmp/a.png", banner_path="/tmp/b.png",
     )
@@ -53,13 +53,19 @@ def test_dress_sets_avatar_banner_profile_and_posts_locator():
     assert kinds == ["avatar", "banner", "profile", "post"]
     # the locator post published is the persona's findable_post
     assert ("post", "auditing the silent arithmetic of the void tonight") in x.calls
+    # R1 receipt: the exact applied strings + the locator post id come back
+    assert receipt.applied_name == "Celestial Mechanic"
+    assert receipt.applied_bio.endswith("code: ABCDEFGH")
+    assert receipt.locator_post_id == "tweet-1"
+    assert receipt.avatar_applied is True and receipt.banner_applied is True
 
 
 def test_dress_skips_images_when_paths_missing():
     x = _FakeX()
-    PersonaDresser(x).dress(
+    receipt = PersonaDresser(x).dress(
         access_token="t", access_secret="s", identity=_persona(), claim_code="ABCDEFGH",
     )
     kinds = [c[0] for c in x.calls]
     assert "avatar" not in kinds and "banner" not in kinds
     assert kinds == ["profile", "post"]  # still publishes the locator post
+    assert receipt.avatar_applied is False and receipt.banner_applied is False
