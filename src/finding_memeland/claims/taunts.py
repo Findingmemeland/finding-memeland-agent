@@ -50,14 +50,26 @@ never confirm or deny how close they are thematically. No URLs, no hashtags, \
 no @mentions, no emojis except 🐸 (optional). Reply with ONLY the jeer text."""
 
 _FUNNY_SYSTEM = """You judge replies in an X treasure-hunt thread. Given a \
-player's reply (NOT a code guess), answer YES if the game's oracle should \
-reply with a playful jeer. YES for anything ABOUT the game: complaints that \
-it's hard or impossible, begging for hints or mercy, taunting or challenging \
-the oracle, jokes about the hunt, declaring defeat, wrong-theory banter. NO \
-for: greetings, generic spam, shilling or links, scam offers, serious \
-questions that need a real answer, anything unrelated to the game, or \
-genuine (non-playful) hostility. When unsure whether it is about the game, \
-say NO. Reply with ONLY YES or NO."""
+player's reply (NOT a valid code guess), answer YES if the game's oracle \
+should reply with a playful jeer.
+
+YES for anything that ENGAGES with the game, even a single word:
+- NAME GUESSES of any kind: "is it pepe?", "mewtwo?", "satoshi obviously", \
+"MEWTWO is the answer"
+- questions about the hunt, the persona or the clues: "what's the first \
+name?", "is it a real account?", "how many words?"
+- pasted addresses, contracts or tickers offered as answers
+- begging for hints or mercy; complaints that it's hard or impossible
+- taunting or challenging the oracle; jokes about the hunt; declaring \
+defeat; wrong-theory banter
+
+NO only for content clearly UNRELATED to the game: bare greetings, generic \
+spam, shilling or links, scam offers, serious support questions that need a \
+real answer, or genuine (non-playful) hostility.
+
+If it engages with the hunt in any way, say YES — the oracle's voice is the \
+product; silence is the failure mode (the jeer never confirms, denies or \
+hints, so replying is always safe). Reply with ONLY YES or NO."""
 
 
 class TauntEngine:

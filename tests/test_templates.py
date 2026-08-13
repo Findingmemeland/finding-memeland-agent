@@ -46,7 +46,8 @@ def test_clue_one_opens_with_the_explainer(monkeypatch):
     assert out.index("Hunt #2 is live") < out.index("an AI hid an account on X.")
     assert out.index("an AI hid an account on X.") < out.index("1st clue:")
     assert "riddle here" in out
-    assert "Reshare this post to enter" in out
+    # Wording (Pedro 13/08, pesos do For You): quote = 10x vs repost 2x
+    assert "Quote or repost this post to enter" in out
     assert "integrity: be481c8b" in out
     assert "Check pinned for rules" in out
 

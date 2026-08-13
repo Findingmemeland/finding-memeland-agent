@@ -775,3 +775,79 @@ def test_correct_code_takes_precedence_over_guess_shaped_noise():
         assert reply not in TAUNT_POOL, "winning post must never be jeered"
     outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
     assert outcomes.get("9995") not in ("taunted", "bad_code")
+
+
+# ---------------------------------------------------------------------------
+# Hunt #5 post-mortem (13/08): o oráculo tem de responder — MEWTWO, perguntas
+# de jogo e coles de contrato ficaram em silêncio e a interação é produto
+# ---------------------------------------------------------------------------
+def test_lone_caps_name_guess_is_guess_like():
+    from finding_memeland.claims.parser import guess_like
+
+    assert guess_like("MEWTWO", 8)                    # o caso real do Hunt 5
+    assert guess_like("PIKACHU?", 8)                  # pontuação não conta como token
+    assert not guess_like("MEWTWO is the answer", 8)  # multi-palavra: vai ao juiz
+    assert not guess_like("WAGMI", 8)                 # shout comum: stoplist
+    assert not guess_like("GM", 8)                    # curto demais
+    assert not guess_like("mewtwo", 8)                # minúsculas: não é grito de palpite
+
+
+def test_contract_paste_is_jeered_material():
+    from finding_memeland.claims.parser import contract_paste_like
+
+    assert contract_paste_like("0x460766cc4158ffbd70feffd3d2891237e064ab54")
+    assert contract_paste_like("the answer is 0xDEADbeef99 obviously")
+    assert not contract_paste_like("just 0x alone")
+    assert not contract_paste_like("no hex here fren")
+
+
+def test_contract_paste_in_claim_thread_gets_a_pool_taunt_without_judge():
+    """O cole do contrato no thread da Clue 1 leva jeer do pool — sem LLM
+    nenhum (TauntEngine() sem cliente), provando que não depende do juiz."""
+    rig, orch, hunt, src = _rig()
+    t0 = hunt.live_at
+    src.schedule[1] = lambda: [
+        _post(1010, "77", "found it: 0x460766cc4158ffbd70feffd3d2891237e064ab54",
+              t0 + timedelta(minutes=1), hunt.reshare_post_id, handle="paster"),
+    ]
+    src.schedule[3] = lambda: [
+        _post(1030, "42", f"ok fine: {_code(rig)}", t0 + timedelta(minutes=3),
+              hunt.reshare_post_id, handle="sharp_anon"),
+    ]
+    src.reshared.add("42")
+    src.schedule[6] = lambda: [
+        _post(1060, "42", f"wallet {WALLET_A}", t0 + timedelta(minutes=6),
+              _ask_id(rig, hunt)),
+    ]
+    orch._claim_loop(hunt)
+    jeers = _replies_to(rig, 1010)
+    assert jeers, "o cole de contrato tem de levar resposta"
+    assert jeers[0] in TAUNT_POOL
+    taunted_rows = [s for s in rig.repo.submissions
+                    if s.get("outcome") == "taunted" and s["dm_id"] == "1010"]
+    assert taunted_rows, "o jeer fica no log (once-per-profile sobrevive restarts)"
+
+
+def test_judge_prompt_now_classifies_name_guesses_and_game_questions_as_yes():
+    """A recalibração é prompt-level; o contrato mínimo testável é que os
+    exemplos do Hunt 5 estão no prompt como YES e o default virou engajamento."""
+    from finding_memeland.claims.taunts import _FUNNY_SYSTEM
+
+    assert "NAME GUESSES" in _FUNNY_SYSTEM
+    assert "is it pepe?" in _FUNNY_SYSTEM
+    assert "what's the first name?" in _FUNNY_SYSTEM
+    assert "engages with the hunt in any way, say YES" in _FUNNY_SYSTEM
+    # o fail-closed em ERRO mantém-se (testado em
+    # test_taunt_engine_chatter_judge_fails_closed)
+
+
+def test_lone_caps_hostility_never_takes_the_direct_jeer_path():
+    """Opus (13/08): jeerar a uma acusação convida os negativos pesados do
+    algoritmo (report −468 likes). Hostilidade em caps cai para o juiz, cujo
+    NO a hostilidade genuína é o escudo — nunca para o jeer direto."""
+    from finding_memeland.claims.parser import guess_like
+
+    for hostile in ("SCAMMER", "RUGPULL", "PONZI", "FRAUD", "REPORTED",
+                    "GARBAGE", "THIEVES"):
+        assert not guess_like(hostile, 8), hostile
+    assert guess_like("MEWTWO", 8)          # os palpites a sério continuam a jeerar

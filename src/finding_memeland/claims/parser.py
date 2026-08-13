@@ -70,15 +70,40 @@ def code_like(text: str, expected_code_len: int) -> bool:
 
 
 _GUESS_LIKE_RE = re.compile(r"^[A-Z0-9]{5,14}$")
+_LONE_CAPS_RE = re.compile(r"^[A-Z]{5,14}$")
+# Common crypto-Twitter shouts that a lone-caps reply is NOT guessing with.
+_CAPS_SHOUT_STOPLIST = frozenset({"WAGMI", "BULLISH", "BEARISH", "LETSGO"})
+# Hostility/accusation guard (Opus, oracle review 13/08): a lone-caps
+# accusation must NEVER take the direct-jeer path — jeering at "SCAMMER"
+# invites the heavy algorithm negatives (report −468 likes, mute −118,
+# block −62). These fall through to the humor judge, whose NO for genuine
+# hostility is the shield. (5-14 letters only — shorter words like SCAM
+# never match the lone-caps rule in the first place.)
+_CAPS_HOSTILE_STOPLIST = frozenset({
+    "SCAMMER", "SCAMMERS", "RUGPULL", "RUGGED", "FRAUD", "FRAUDS",
+    "PONZI", "HONEYPOT", "GRIFT", "GRIFTER", "GRIFTERS", "REPORT",
+    "REPORTED", "REPORTING", "BLOCKED", "BLOCKING", "THIEF", "THIEVES",
+    "LIARS", "TRASH", "GARBAGE", "PATHETIC", "DISGUSTING", "CRIMINAL",
+    "CRIMINALS", "STOLEN", "STEALING",
+})
 
 
 def guess_like(text: str, expected_code_len: int) -> bool:
-    """A token that LOOKS like a code attempt with the wrong shape: claim-code
-    alphabet as typed, 5-14 chars, and BOTH a letter and a digit — 'TSU19'
-    yes; 'WAGMI' and token amounts like '10000000' no. Exact-length tokens are
-    code_like's business; this catches the drive-by guesses that got silence
-    in Hunt #4 (post-mortem: the thread needs the oracle to bite back)."""
-    for tok in _TOKEN_RE.findall(text or ""):
+    """A reply that LOOKS like a guess with the wrong shape — the oracle jeers
+    without the humor judge. Two patterns:
+
+    - a token in the claim-code alphabet as typed, 5-14 chars, with BOTH a
+      letter and a digit — 'TSU19' yes; 'i hold 10000000' no (Hunt #4
+      post-mortem: drive-by guesses got silence).
+    - a LONE all-caps word, 5-14 letters ('MEWTWO') — Hunt #5 post-mortem:
+      shouted name guesses have no digit, weren't caught here, and the strict
+      judge stayed silent. Lone only: 'MEWTWO' jeers directly; 'MEWTWO is the
+      answer' goes to the (recalibrated) judge. Common CT shouts ('WAGMI')
+      are stoplisted.
+
+    Exact-length tokens are code_like's business."""
+    tokens = _TOKEN_RE.findall(text or "")
+    for tok in tokens:
         if len(tok) == expected_code_len:
             continue
         if (
@@ -87,7 +112,27 @@ def guess_like(text: str, expected_code_len: int) -> bool:
             and any(c.isalpha() for c in tok)
         ):
             return True
+    if len(tokens) == 1:
+        tok = tokens[0]
+        if (
+            len(tok) != expected_code_len
+            and _LONE_CAPS_RE.match(tok)
+            and tok not in _CAPS_SHOUT_STOPLIST
+            and tok not in _CAPS_HOSTILE_STOPLIST
+        ):
+            return True
     return False
+
+
+_CONTRACT_PASTE_RE = re.compile(r"\b0x[a-fA-F0-9]{8,}\b")
+
+
+def contract_paste_like(text: str) -> bool:
+    """A pasted hex address/contract offered as an 'answer' (Hunt #5
+    post-mortem: the token contract got pasted in the claim thread and the
+    oracle stayed silent). These are mechanical engagement with the game —
+    they jeer directly, no judge needed."""
+    return bool(_CONTRACT_PASTE_RE.search(text or ""))
 
 
 def extract_wallet(text: str) -> str | None:

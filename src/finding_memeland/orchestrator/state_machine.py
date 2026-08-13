@@ -26,7 +26,13 @@ from enum import Enum
 
 from ..content.clue_engine import PersonaContext, clue_slot_for, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
-from ..claims.parser import code_like, extract_candidates, extract_wallet, guess_like
+from ..claims.parser import (
+    code_like,
+    contract_paste_like,
+    extract_candidates,
+    extract_wallet,
+    guess_like,
+)
 from ..content.templates import (
     CLUE_FOLLOWUP_CLAIM_HINT,
     DM_REPLY_BAD_CODE,
@@ -1612,15 +1618,21 @@ class Orchestrator:
 
                 # ---- Replies to Clue 1 (the claim window) ----
                 if not looks_like_code:
-                    # Wrong-shape guesses ('TSU19') jeer directly — no humor
-                    # judge, works without an LLM (pool), same once-per-profile
-                    # + global budget caps, and NOT counted against the real
-                    # guess cap (they are not codes; they must not burn
-                    # anyone's attempts). Everything else: the (now game-wide)
-                    # humor judge decides.
+                    # Wrong-shape guesses ('TSU19'), lone shouted name guesses
+                    # ('MEWTWO' — Hunt #5) and pasted contracts jeer directly —
+                    # no humor judge, works without an LLM (pool), same
+                    # once-per-profile + global budget caps, and NOT counted
+                    # against the real guess cap (they are not codes; they
+                    # must not burn anyone's attempts). Everything else: the
+                    # recalibrated humor judge decides (name guesses and game
+                    # questions are YES since the Hunt #5 post-mortem — the
+                    # oracle's voice is the product).
                     self._maybe_taunt_chatter(
                         hunt, post, taunted, judged, taunt_budget, banned,
-                        skip_judge=guess_like(post.text, code_len),
+                        skip_judge=(
+                            guess_like(post.text, code_len)
+                            or contract_paste_like(post.text)
+                        ),
                     )
                     _done(post)
                     continue

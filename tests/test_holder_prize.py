@@ -132,7 +132,7 @@ def test_clue_one_announces_the_holder_split():
     assert clue1.count("$FIND") == 1, "X allows ONE cashtag per API post (403, 2026-08-10)"
     # The split line sits directly under the prize line (Pedro's placement).
     assert clue1.index("wins 1,000,000,000 $FIND.") < clue1.index("non-holders win 10%")
-    assert clue1.index("non-holders win 10%") < clue1.index("Reshare this post")
+    assert clue1.index("non-holders win 10%") < clue1.index("Quote or repost this post")
 
 
 def test_holder_winner_paid_in_full_no_note():
@@ -233,7 +233,7 @@ def test_zero_floor_clue_one_omits_the_split_line():
     assert "hold FIND to win the full prize" not in clue1
     # The rest of the post is intact around the omitted line.
     assert "The first to find me wins 500,000,000 $FIND." in clue1
-    assert "Reshare this post to enter." in clue1
+    assert "Quote or repost this post to enter." in clue1
 
 
 def test_no_template_post_ever_has_two_cashtags():

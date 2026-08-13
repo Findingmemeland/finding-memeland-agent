@@ -88,7 +88,10 @@ def clue_one(
             f"hold FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
             if non_holder_pct is not None else ""
         )
-        + f"Reshare this post to enter.\n\n"
+        # Wording (Pedro, 2026-08-13, X algorithm weights release): a quote is
+        # a 10× ranking event vs 2× for a repost — lead with it. Validation is
+        # unchanged: has_reshared always accepted retweeted AND quoted.
+        + f"Quote or repost this post to enter.\n\n"
         f"integrity: {integrity_hash}\n\n"
         f"Check pinned for rules."
     )
@@ -164,8 +167,8 @@ def post_reply_win(minutes: int) -> str:
 
 
 POST_REPLY_MISSING_REPOST = (
-    "claim invalid — missing repost. repost the Clue 1 post, then post the "
-    "code again (add a word or two — X blocks identical posts)."
+    "claim invalid — missing repost. quote or repost the Clue 1 post, then "
+    "post the code again (add a word or two — X blocks identical posts)."
 )
 POST_REPLY_WRONG_DOOR = (
     "the code goes in the replies of the Clue 1 post — drop it there and it "
