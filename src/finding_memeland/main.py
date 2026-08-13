@@ -56,6 +56,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .persona.dresser import PersonaDresser
     from .persona.generator import PersonaGenerator
     from .persona.source import DBPersonaSource
+    from .persona.verification import DressedProfileVerifier
     from .runtime import (
         DBHuntPause,
         fmt_tokens,
@@ -163,6 +164,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
         # Real hunts NEVER undress the persona: single-use accounts, and the
         # dressed profile stays up as the hunt's public artifact.
         undress_on_retire=False,
+        # Pre-dressing (Fase 2, 2026-08-13): production launches consume the
+        # DRESSED pool (oldest first) with fail-closed R3 verification. The old
+        # generate-at-launch flow is retired here — no dressed persona means a
+        # clean refusal, never a fallback to an unindexed account.
+        predressed_launch=True,
+        launch_verifier=DressedProfileVerifier(x),
     )
 
     # Admin/approval surface. /launch <prize in $FIND> fires a hunt in the BACKGROUND
@@ -242,13 +249,13 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 hunt_flag["active"] = False
 
         threading.Thread(target=_run_hunt, daemon=True).start()
-        if s.prep_window_h:
-            return (
-                f"hunt launching with a {prize_fmml:,} $FIND prize 🏴 — persona "
-                f"dresses NOW; Clue 1 fires in ~{s.prep_window_h:g}h "
-                "(/abort_prep to abort, /delay_golive <h> to push it)."
-            )
-        return f"hunt launching with a {prize_fmml:,} $FIND prize 🏴"
+        # Pre-dressed launch (Fase 2): no prep window — the persona comes
+        # dressed+indexed from the pool; R3 verifies; Clue 1 fires in seconds.
+        return (
+            f"hunt launching with a {prize_fmml:,} $FIND prize 🏴 — persona do "
+            "pool (a mais antiga), verificação R3, Clue 1 em segundos. "
+            "Se a R3 falhar, recebes o alerta e nada é publicado."
+        )
 
     # ------------------------------------------------------------------
     # /dress <ref> [handle hint...] — pre-dress a persona (design 2026-08-12).
@@ -352,6 +359,27 @@ def build_agent(settings: Settings | None = None) -> Agent:
             f"(/launch {fmt_tokens(s.min_prize_fmml)}) | non-holder share: "
             f"{s.non_holder_prize_pct}%"
         )
+
+        # Pre-dressed pool (Fase 2): what /launch will actually pick from.
+        try:
+            pool = repo.dressed_personas()
+            if pool:
+                from datetime import datetime, timezone
+
+                oldest = pool[0]
+                d = str(oldest.get("dressed_at") or "")
+                age = ""
+                if d:
+                    dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+                    age = f", a mais antiga há {(datetime.now(timezone.utc) - dt).days}d"
+                lines.append(
+                    f"dressed pool: {len(pool)} persona(s){age} — next: "
+                    f"{oldest.get('handle')}"
+                )
+            else:
+                lines.append("dressed pool: VAZIA — /dress antes de /launch")
+        except Exception:  # noqa: BLE001 — cosmetic, never breaks /status
+            pass
 
         if s.fmml_usd_price:
             one_b = 1_000_000_000 * s.fmml_usd_price

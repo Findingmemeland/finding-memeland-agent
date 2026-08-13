@@ -173,6 +173,33 @@ class FakeRepo:
     def latest_claim_code(self) -> str:
         return self.hunts[self._next_id - 1]["claim_code"]
 
+    # --- persona pipeline (pre-dressing, Fase 2) ---
+    def add_persona(self, **row) -> None:
+        if not hasattr(self, "personas"):
+            self.personas: dict[str, dict] = {}
+        self.personas[row["id"]] = dict(row)
+
+    def dressed_personas(self) -> list[dict]:
+        rows = [
+            dict(r) for r in getattr(self, "personas", {}).values()
+            if r.get("state") == "dressed"
+        ]
+        return sorted(rows, key=lambda r: r.get("dressed_at"))  # oldest first
+
+    def next_ready_persona(self) -> dict | None:
+        rows = [
+            r for r in getattr(self, "personas", {}).values()
+            if r.get("state") == "ready"
+        ]
+        return dict(rows[0]) if rows else None
+
+    def get_persona(self, persona_id) -> dict | None:
+        row = getattr(self, "personas", {}).get(persona_id)
+        return dict(row) if row else None
+
+    def set_persona_state(self, persona_id, state, **fields) -> None:
+        self.personas[persona_id].update({"state": state, **fields})
+
 
 class FakePersonaSource:
     def __init__(self):
@@ -376,14 +403,20 @@ def build_simulation(
     register: str = "medium",
     hunt_number: int = 1,
     verbose: bool = False,
+    persona_source=None,
+    predressed_launch: bool = False,
+    launch_verifier=None,
+    prep_window_h=None,
+    persona_post_engine=None,
 ) -> SimRig:
     """`repo` may be passed in to share state across two rigs — that's how the
-    crash-resume tests simulate a process restart."""
+    crash-resume tests simulate a process restart. The pre-dressing tests
+    (Fase 2) inject a real DBPersonaSource + a fake verifier."""
     clock = FakeClock()
     repo = repo or FakeRepo()
     publisher = FakePublisher(verbose=verbose)
     dresser = FakeDresser()
-    persona_source = FakePersonaSource()
+    persona_source = persona_source or FakePersonaSource()
     payout = FakePayout()
     notifier = FakeNotifier(verbose=verbose)
     dm_source = ScriptedDMSource(repo, clock, win_after_polls=win_after_polls)
@@ -406,6 +439,10 @@ def build_simulation(
         hunt_number=hunt_number,
         register=register,
         poll_interval_s=poll_interval_s,
+        predressed_launch=predressed_launch,
+        launch_verifier=launch_verifier,
+        prep_window_h=prep_window_h,
+        persona_post_engine=persona_post_engine,
     )
     return SimRig(
         orchestrator=orch, repo=repo, publisher=publisher, dresser=dresser,

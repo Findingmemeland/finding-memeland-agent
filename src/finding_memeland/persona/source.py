@@ -82,6 +82,46 @@ class DBPersonaSource:
             access_secret=secret,
         )
 
+    # ------------------------------------------------------------------
+    # Pre-dressed pool (Fase 2, design 2026-08-12)
+    # ------------------------------------------------------------------
+    def peek_dressed(self) -> tuple[ReadyPersona, dict]:
+        """The next persona from the DRESSED pool — the OLDEST dress first
+        (Pedro's rule: dressed_at asc = most indexing time), WITHOUT any state
+        change: the caller runs the R3 verification first and only then calls
+        mark_in_play. If the oldest fails R3 the launch is REFUSED — never
+        silently substituted by the next one (a divergence can mean someone
+        touched the account; the operator must know).
+
+        Returns (ReadyPersona with tokens, the full descriptor row)."""
+        rows = self._repo.dressed_personas()
+        if not rows:
+            raise RuntimeError(
+                "no 'dressed' persona in the pool — run /dress first "
+                "(the old generate-at-launch flow is retired)"
+            )
+        row = rows[0]  # repo orders by dressed_at asc — oldest = most indexed
+        token, secret = self._resolve(row["oauth_ref"])
+        persona = ReadyPersona(
+            id=row["id"],
+            handle=row["handle"],
+            x_user_id=row["x_user_id"],
+            access_token=token,
+            access_secret=secret,
+        )
+        return persona, row
+
+    def mark_in_play(self, persona_id: str) -> None:
+        """dressed -> in_play, AFTER R3 passed. State only — every descriptor
+        field stays intact on the row (the hunt reads them from the DB)."""
+        self._repo.set_persona_state(persona_id, "in_play")
+
+    def release_to_pool(self, persona_id: str) -> None:
+        """in_play -> dressed: a hunt that died BEFORE going live (resume of a
+        stuck PREPARING) returns the persona to the pool untouched — the dress
+        and its weeks of indexing are NOT lost (no undress)."""
+        self._repo.set_persona_state(persona_id, "dressed")
+
     def acquire_by_id(self, persona_id: str) -> ReadyPersona:
         """Reload a SPECIFIC persona (crash resume): it is already in_play, so no
         readiness gate and no state change — just row + tokens."""

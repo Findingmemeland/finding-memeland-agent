@@ -300,3 +300,8 @@ alter table personas add column if not exists banner_applied boolean not null de
 alter table personas add column if not exists handle_hint text;              -- Pedro's decomposable-handle hint (clues 8-9)
 alter table personas add column if not exists anchor_posts jsonb;            -- [{text, tweet_id, posted_at}] published at dress time
 alter table personas add column if not exists dressed_at timestamptz;        -- indexing age; launch picks the oldest
+
+-- Migration 2026-08-13 — Fase 2 do pré-vestir: o launch consome a pool
+-- 'dressed'. A flag marca hunts pré-vestidos: um crash em PREPARING devolve a
+-- persona à pool (sem undress) em vez de a reformar.
+alter table hunts add column if not exists predressed boolean not null default false;

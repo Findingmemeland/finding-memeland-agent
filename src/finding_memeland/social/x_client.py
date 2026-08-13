@@ -80,6 +80,10 @@ class Profile:
     screen_name: str
     name: str
     description: str
+    # R3 (pre-dressing): the avatar can't be verified byte-for-byte (X
+    # re-encodes images), so launch verification checks EXISTENCE only —
+    # a dressed persona must not be showing X's default egg.
+    has_custom_avatar: bool = True
 
 
 class XClient:
@@ -128,6 +132,9 @@ class XClient:
         return Profile(
             user_id=me.id_str, screen_name=me.screen_name,
             name=me.name or "", description=getattr(me, "description", "") or "",
+            # v1.1 exposes this directly: True = the account still shows X's
+            # default avatar (never a dressed persona).
+            has_custom_avatar=not bool(getattr(me, "default_profile_image", False)),
         )
 
     def update_profile(self, access_token, access_secret, *, name=None, description=None) -> Profile:
@@ -180,6 +187,20 @@ class XClient:
         self._persona_v2(access_token, access_secret).delete_tweet(
             id=tweet_id, user_auth=True
         )
+
+    def get_persona_post(
+        self, access_token: str, access_secret: str, tweet_id: str
+    ) -> dict | None:
+        """Fetch ONE post in the PERSONA's own OAuth context (R3 launch
+        verification: does the locator post still exist?). Returns
+        {'id', 'text'} or None if the post is gone/inaccessible."""
+        client = self._persona_v2(access_token, access_secret)
+        resp = _retry_server_error(
+            lambda: client.get_tweet(tweet_id, user_auth=True)
+        )
+        if resp is None or resp.data is None:
+            return None
+        return {"id": str(resp.data.id), "text": resp.data.text or ""}
 
     def search_recent(self, query: str, *, max_results: int = 10) -> list[dict]:
         """Search recent tweets (v2) — used for the pre-hunt findability check:

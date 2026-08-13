@@ -123,6 +123,10 @@ class PreparedHunt:
     # on resume. ONE source of truth (P3.2: posts said #1 forever while resume
     # printed the DB id).
     number: int = 1
+    # Pre-dressing (Fase 2): True = this hunt consumed a persona from the
+    # DRESSED pool (descriptor is the source of truth; prep window skipped;
+    # a pre-live crash returns the persona to the pool instead of undressing).
+    predressed: bool = False
 
 
 def _theme_line(row: dict) -> str:
@@ -186,6 +190,8 @@ class Orchestrator:
         wallet_timeout_s: int = 600,
         claim_sweep_every_n: int = 5,
         non_holder_prize_pct: int = 10,
+        predressed_launch: bool = False,
+        launch_verifier=None,
     ):
         self._settings = settings
         self._clock = clock
@@ -248,6 +254,13 @@ class Orchestrator:
         # Clamped 1-100: 0 would pay a winner nothing while the announcement
         # declares them a winner; >100 would exceed the preflight-checked pot.
         self._non_holder_pct = min(100, max(1, int(non_holder_prize_pct)))
+        # Pre-dressing (Fase 2, design 2026-08-12): with predressed_launch on,
+        # _prepare consumes the DRESSED pool (oldest first) and the descriptor
+        # is the single source of truth (R2) — the old generate-at-launch flow
+        # is unreachable in production (never a silent fallback: no dressed
+        # persona = a clean refusal). launch_verifier implements R3.
+        self._predressed_launch = predressed_launch
+        self._launch_verifier = launch_verifier
 
     # ------------------------------------------------------------------
     def _submission_loop(self, hunt: PreparedHunt, **kw) -> Winner:
@@ -271,7 +284,10 @@ class Orchestrator:
             usd = prize_usd if prize_usd is not None else self._settings.prize_usd_max
             prize_fmml = self._price_feed.usd_to_fmml(usd)
         hunt = self._prepare(prize_fmml)
-        if self._prep_window_h:
+        # Pre-dressed hunts skip the prep window: its two jobs (indexing time,
+        # anchor posts) were done at /dress time, weeks ago. Fase 3 retires the
+        # window entirely.
+        if self._prep_window_h and not hunt.predressed:
             if not self._prep_window(hunt):
                 return hunt  # aborted by the operator during prep
         self._go_live(hunt)
@@ -311,16 +327,15 @@ class Orchestrator:
                     "explicitly. Refusing to launch with an unenforceable floor."
                 ) from e
 
+        # Pre-dressed launch (Fase 2): consume the dressed pool + descriptor.
+        # The old generate-at-launch flow below stays ONLY for simulation and
+        # the live test — production never falls back to it.
+        if self._predressed_launch:
+            return self._prepare_predressed(prize_fmml, min_balance_fmml)
+
         persona = self._persona_source.acquire_ready()
 
-        # Public hunt number from the DB (max+1). On failure, fall back to the
-        # constructor default and say so — a numbering hiccup must not block a
-        # launch, but it must never be silent either.
-        try:
-            number = self._repo.next_hunt_number()
-        except Exception as e:  # noqa: BLE001
-            number = self._hunt_number
-            self._notify(f"hunt numbering query failed ({e!r}) — falling back to #{number}")
+        number = self._next_number()
 
         # Anti-repetition (post-mortem P1a): both halves existed — the
         # generator's avoid_recent parameter and the stored persona_identity —
@@ -345,14 +360,7 @@ class Orchestrator:
         integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
 
         prize_fmml = int(prize_fmml)
-        # Informational only: a USD figure for the DB row, when a price is set.
-        prize_usd = None
-        fmml_to_usd = getattr(self._price_feed, "fmml_to_usd", None)
-        if fmml_to_usd is not None:
-            try:
-                prize_usd = fmml_to_usd(prize_fmml)
-            except Exception:  # noqa: BLE001 — cosmetic, never blocks a launch
-                prize_usd = None
+        prize_usd = self._prize_usd_of(prize_fmml)
         # Eligibility floor: prefer the PRE-ANNOUNCED fixed token amount — the
         # 24h holding window looks BACK in time, so players must have known the
         # exact number before they bought. Trigger-time USD conversion is only
@@ -454,6 +462,202 @@ class Orchestrator:
             number=number,
         )
         self._notify(f"hunt #{hunt.number}: persona {persona.handle} dressed, preparing")
+        return hunt
+
+    # ------------------------------------------------------------------
+    # Shared prepare helpers (used by BOTH prepare paths — one source of truth)
+    # ------------------------------------------------------------------
+    def _next_number(self) -> int:
+        """Public hunt number from the DB (max+1). On failure, fall back to the
+        constructor default and say so — a numbering hiccup must not block a
+        launch, but it must never be silent either."""
+        try:
+            return self._repo.next_hunt_number()
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"hunt numbering query failed ({e!r}) — falling back to "
+                f"#{self._hunt_number}"
+            )
+            return self._hunt_number
+
+    def _prize_usd_of(self, prize_fmml: int) -> float | None:
+        """Informational only: a USD figure for the DB row, when a price is set."""
+        fmml_to_usd = getattr(self._price_feed, "fmml_to_usd", None)
+        if fmml_to_usd is None:
+            return None
+        try:
+            return fmml_to_usd(int(prize_fmml))
+        except Exception:  # noqa: BLE001 — cosmetic, never blocks a launch
+            return None
+
+    # ------------------------------------------------------------------
+    # Pre-dressed prepare (Fase 2, design 2026-08-12).
+    #
+    # The launch CONSUMES the descriptor (R2): identity and claim code come
+    # from the persona row persisted at /dress time — never regenerated. If
+    # the launch regenerated the code, the bio on the account and the hunt
+    # would diverge and the right code would validate as wrong.
+    # ------------------------------------------------------------------
+    def _prepare_predressed(self, prize_fmml: int, min_balance_fmml: int) -> PreparedHunt:
+        if self._launch_verifier is None:
+            raise RuntimeError(
+                "pre-dressed launch requires a launch verifier (R3) — refusing "
+                "to launch unverified"
+            )
+        # Selection: the OLDEST dressed persona (dressed_at asc = most indexing
+        # time — Pedro's rule). No state change yet: R3 runs first.
+        persona, row = self._persona_source.peek_dressed()
+
+        # R3 — fail-closed. A mismatch OR an unverifiable profile refuses the
+        # launch; the persona stays 'dressed'. NEVER silently pick the next
+        # persona: a divergence can mean someone touched the account.
+        try:
+            mismatches = self._launch_verifier.verify(
+                row, persona.access_token, persona.access_secret
+            )
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"🚨 R3: perfil de {persona.handle} NÃO VERIFICÁVEL ({e!r}) — "
+                "launch RECUSADO. Verifica a conta/API e tenta de novo."
+            )
+            raise RuntimeError(
+                f"R3 verification errored for {persona.handle}: {e!r}"
+            ) from e
+        if mismatches:
+            detail = "; ".join(mismatches)
+            self._notify(
+                f"🚨 R3 FALHOU para {persona.handle}: {detail} — launch RECUSADO. "
+                f"A conta diverge do descritor (alguém lhe mexeu?). Corrige com "
+                f"/dress {row.get('oauth_ref')} (re-dress formal) e relança."
+            )
+            raise RuntimeError(f"R3 mismatch for {persona.handle}: {detail}")
+
+        # R2 — rebuild the identity and read the claim code FROM THE DESCRIPTOR.
+        payload = row.get("persona_identity")
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not payload:
+            raise RuntimeError(
+                f"persona {persona.handle} has no persona_identity descriptor — "
+                "re-dress it"
+            )
+        from ..persona.generator import GeneratedPersona
+
+        identity = GeneratedPersona(**payload)
+        claim_code = str(row.get("claim_code") or "")
+        if not claim_code:
+            raise RuntimeError(
+                f"persona {persona.handle} has no claim_code in the descriptor — "
+                "re-dress it"
+            )
+        # The public commitment is computed NOW, over the persisted code: the
+        # hash in Clue 1 proves the target never moved during the hunt.
+        salt = generate_salt()
+        integrity_hash = compute_integrity_hash(persona.x_user_id, claim_code, salt)
+
+        dressed_at = _as_dt(row.get("dressed_at"))
+        age_days = (
+            (self._clock.now() - dressed_at).days if dressed_at is not None else None
+        )
+        if age_days is not None and age_days < 3:
+            self._notify(
+                f"⚠️ persona {persona.handle} vestida há só {age_days}d — a "
+                "indexação do X pode ainda estar fraca (Hunt #5 lesson)."
+            )
+
+        number = self._next_number()
+        prize_fmml = int(prize_fmml)
+        prize_usd = self._prize_usd_of(prize_fmml)
+        started_at = self._clock.now()
+
+        base_fields = dict(
+            persona_id=persona.id,
+            persona_display_name=identity.display_name,
+            persona_bio=identity.bio,
+            claim_code=claim_code,
+            integrity_salt=salt,
+            integrity_hash=integrity_hash,
+            prize_usd=prize_usd,
+            prize_fmml=prize_fmml,
+            min_balance_fmml=min_balance_fmml,
+            holding_hours=self._holding_hours,
+            started_at=started_at,
+            state=HuntState.PREPARING.value,
+        )
+        try:
+            hunt_id = self._repo.create_hunt(
+                **base_fields, persona_identity=asdict(identity),
+                hunt_number=number, predressed=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Fallback ONLY for a genuinely missing column (older DB) — a
+            # transient DB error must re-raise, not silently create a row
+            # WITHOUT predressed=True (a later crash in PREPARING would then
+            # take the undress path and throw away the indexing). Opus note
+            # #2, Fase 2 review.
+            msg = str(e).lower()
+            if not any(w in msg for w in ("column", "schema cache", "pgrst204")):
+                raise
+            hunt_id = self._repo.create_hunt(**base_fields)
+            self._notify(
+                "🚨 hunts.persona_identity/hunt_number/predressed missing in the "
+                "DB — row created WITHOUT the predressed flag (a pre-live crash "
+                "would undress the persona). Run the 2026-08 migrations NOW."
+            )
+
+        # dressed -> in_play only AFTER the hunt row exists. State only — the
+        # descriptor fields stay intact on the row (this hunt reads from them).
+        try:
+            self._persona_source.mark_in_play(persona.id)
+        except Exception as e:  # noqa: BLE001
+            self._notify(
+                f"🚨 hunt row #{hunt_id} criada mas {persona.handle} NÃO ficou "
+                f"in_play ({e!r}) — launch RECUSADO (um /dress concorrente podia "
+                "re-vestir a persona deste hunt). Vê a BD e relança."
+            )
+            raise
+
+        # R2 — the clue engine's context is built from the descriptor: the
+        # identity above and the anchor posts persisted at dress time.
+        ctx = PersonaContext.from_generated(identity, persona.handle)
+        anchors_raw = row.get("anchor_posts")
+        if isinstance(anchors_raw, str):
+            try:
+                anchors_raw = json.loads(anchors_raw)
+            except ValueError:
+                anchors_raw = []
+        anchor_texts = [
+            str(a.get("text")) for a in (anchors_raw or [])
+            if isinstance(a, dict) and a.get("text")
+        ]
+        if anchor_texts and hasattr(ctx, "anchor_posts"):
+            ctx.anchor_posts = anchor_texts
+
+        hunt = PreparedHunt(
+            id=hunt_id,
+            persona=persona,
+            identity=identity,
+            ctx=ctx,
+            claim_code=claim_code,
+            salt=salt,
+            integrity_hash=integrity_hash,
+            prize_usd=prize_usd or 0.0,
+            prize_fmml=prize_fmml,
+            min_balance_fmml=min_balance_fmml,
+            holding_hours=self._holding_hours,
+            state=HuntState.PREPARING,
+            started_at=started_at,
+            number=number,
+            predressed=True,
+        )
+        # Operator blindness: name yes (the /dress report already showed it),
+        # claim code NEVER.
+        self._notify(
+            f"hunt #{number}: persona {persona.handle} ('{identity.display_name}') "
+            f"selecionada do pool — a mais antiga"
+            + (f", vestida há {age_days}d" if age_days is not None else "")
+            + f", R3 ✓ ({len(anchor_texts)} anchor(s)). A lançar."
+        )
         return hunt
 
     # Poll cadence inside the prep window (checks abort/delay flags + due posts).
@@ -2008,6 +2212,29 @@ class Orchestrator:
         hunt = self._rebuild_hunt(row, state)
 
         if state is HuntState.PREPARING:
+            if row.get("predressed"):
+                # Pre-dressed hunt died before going live (no players yet, no
+                # Clue 1). Void the hunt but KEEP the dress: the persona goes
+                # back to the pool untouched — undressing would throw away
+                # weeks of indexing over a mere crash.
+                self._notify(
+                    f"hunt #{hunt.number} (db #{hunt.id}) was stuck in PREPARING "
+                    "(pre-dressed) — voiding the hunt and returning the persona "
+                    "to the dressed pool (no undress)."
+                )
+                self._transition(hunt, HuntState.VOIDED)
+                self._transition(hunt, HuntState.RETIRING)
+                release = getattr(self._persona_source, "release_to_pool", None)
+                if release is not None:
+                    try:
+                        release(hunt.persona.id)
+                    except Exception as e:  # noqa: BLE001
+                        self._notify(
+                            f"🚨 persona {hunt.persona.handle} not returned to the "
+                            f"pool ({e!r}) — set personas.state='dressed' manually."
+                        )
+                self._transition(hunt, HuntState.DONE)
+                return
             # Never went LIVE (no players yet). Cheapest safe move: void it and
             # undress the persona; a fresh /launch starts clean.
             self._notify(f"hunt #{hunt.number} (db #{hunt.id}) was stuck in PREPARING — voiding it.")
