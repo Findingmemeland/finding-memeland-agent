@@ -54,7 +54,7 @@ def main() -> int:
             return 1
         prior.append(draft.text)
         vector = clue_vector_for(i, ctx)
-        print(f"\n--- clue {i}  (obliqueness {obliqueness_for(i)}, facet: {vector}) ---")
+        print(f"\n--- clue {i}  (obliqueness {obliqueness_for(i, ctx)}, facet: {vector}) ---")
         print(draft.text)
         if draft.taunt:
             print(f"taunt: {draft.taunt}")

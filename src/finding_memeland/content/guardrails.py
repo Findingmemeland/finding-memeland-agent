@@ -60,7 +60,12 @@ def _claimed_number(token: str) -> int:
 def _forbidden_tokens(display_name: str, handle: str) -> set[str]:
     tokens: set[str] = set()
     for source in (display_name, handle):
-        for word in re.findall(r"[A-Za-z]{3,}", source or ""):
+        # Split camelCase/digit boundaries FIRST (Fase 4 pre-deploy fix): a
+        # handle like @ExpressoTitgo must ban 'expresso' and 'titgo' as words,
+        # not just the whole 'expressotitgo' — sub-tokens are exactly what a
+        # handle clue could leak.
+        spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", source or "")
+        for word in re.findall(r"[A-Za-z]{3,}", spaced):
             w = word.lower()
             if w not in STOPWORDS:
                 tokens.add(w)

@@ -74,13 +74,15 @@ def test_defaults_still_match_the_published_pirate_code():
 
 
 def test_worst_case_maths():
-    assert worst_case_hunt_hours(1800) == 4.0  # Genesis: 8 x 30min
-    assert worst_case_hunt_hours(10800) == 24.0  # default: 8 x 3h
+    # Rampa 2026-08-13: o handle quase-explícito chega à pista 9, por isso o
+    # número de planeamento subiu de 8 para 10 pistas.
+    assert worst_case_hunt_hours(1800) == 5.0   # 10 x 30min
+    assert worst_case_hunt_hours(10800) == 30.0  # default: 10 x 3h
     assert worst_case_hunt_hours(1800, assumed_clues=4) == 2.0
 
 
 def test_genesis_config_satisfies_the_golden_rule():
-    """Genesis: janela de 8h vs pior caso de 4h."""
+    """Genesis: janela de 8h vs pior caso de 5h (10 x 30min)."""
     assert holding_window_covers_hunt(holding_hours=8, max_gap_s=1800)
 
 
@@ -107,9 +109,10 @@ def test_KNOWN_GAP_defaults_do_not_satisfy_the_golden_rule():
 
 def test_equal_is_not_enough():
     """Janela == pior caso deixa o empate a favor do sniper. Tem de ser >."""
-    assert not holding_window_covers_hunt(holding_hours=4, max_gap_s=1800)
-    assert holding_window_covers_hunt(holding_hours=5, max_gap_s=1800)
+    assert not holding_window_covers_hunt(holding_hours=5, max_gap_s=1800)  # == 5h
+    assert holding_window_covers_hunt(holding_hours=6, max_gap_s=1800)
 
 
 def test_assumed_max_clues_is_the_documented_planning_number():
-    assert ASSUMED_MAX_CLUES == 8
+    # 10 desde a rampa 2026-08-13 (handle phase na pista 9; fim realista ≤10).
+    assert ASSUMED_MAX_CLUES == 10

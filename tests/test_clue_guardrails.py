@@ -75,3 +75,62 @@ def test_counting_without_units_still_passes():
     # Numbers that are not sub-word counting claims stay legal.
     r = check_clue("I count in fours but never reach five.", clue_index=1, **PERSONA)
     assert r.ok, r.reasons
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 pré-deploy (Opus): sub-tokens camelCase do handle são bloqueados
+# ---------------------------------------------------------------------------
+def test_camelcase_handle_subtokens_are_blocked():
+    from finding_memeland.content.guardrails import check_clue
+
+    for leak in ("order an expresso and wait", "the titgo of this story"):
+        r = check_clue(
+            leak, clue_index=9, persona_display_name="Cassandra Tired",
+            persona_handle="@ExpressoTitgo", persona_bio="b", solution_terms=[],
+        )
+        assert not r.ok, leak
+    clean = check_clue(
+        "a small strong coffee starts the day", clue_index=9,
+        persona_display_name="Cassandra Tired",
+        persona_handle="@ExpressoTitgo", persona_bio="b", solution_terms=[],
+    )
+    assert clean.ok
+
+
+def test_hint_parts_reach_the_ban_list_via_next_clue():
+    """O caminho completo: partes do hint ('tit') entram como solution_terms
+    no check_clue de next_clue — uma pista que as contenha é regenerada."""
+    from finding_memeland.content.clue_engine import (
+        ClueEngine, PersonaContext, ramp_plan,
+    )
+
+    class _Block:
+        def __init__(self, text):
+            self.type, self.text = "text", text
+
+    class _FakeAnthropic:
+        """1ª resposta vaza 'tit'; a 2ª é limpa — next_clue tem de regenerar."""
+
+        def __init__(self):
+            self.calls = 0
+            self.messages = self
+
+        def create(self, **kw):
+            self.calls += 1
+            leak = '{"clue": "a tit for tat game, no?", "taunt": "slow degens"}'
+            clean = '{"clue": "the last part is a starting pistol word", "taunt": "tick tock"}'
+            resp = type("R", (), {})()
+            resp.content = [_Block(leak if self.calls == 1 else clean)]
+            return resp
+
+    p = PersonaContext(
+        display_name="Cassandra Tired", handle="@ExpressoTitgo", bio="b",
+        avatar_description="a", voice="v", backstory="bs",
+        solution_terms=["Cassandra"],
+        handle_hint="expresso = coffee; tit = two minus one; go = after ready set",
+    )
+    p.clue_facet_plan = ramp_plan("Cassandra Tired")
+    fake = _FakeAnthropic()
+    draft = ClueEngine(fake, "model").next_clue(p, 9, [])
+    assert fake.calls == 2                       # o vazamento foi rejeitado
+    assert "tit" not in draft.text.lower()

@@ -316,3 +316,22 @@ def test_resume_preparing_predressed_releases_persona_without_undress():
     assert rig.dresser.retired is False                       # NEVER undressed
     assert repo.hunts[hunt_id]["state"] == "done"             # hunt voided/closed
     assert any("dressed pool" in m for m in rig.notifier.messages)
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 — audit trail: every published clue records its planned facet
+# (Hunt #5 post-mortem: the facet distribution looked wrong and there was no
+# ground truth to check it against)
+# ---------------------------------------------------------------------------
+def test_every_recorded_clue_carries_facet_and_obliqueness():
+    repo = FakeRepo()
+    repo.add_persona(**_dressed_row("p-old", "07", "@ExpressoTitgo", days_dressed=30))
+    rig = _rig(repo)
+    rig.orchestrator.run_hunt()
+    assert repo.clues, "the hunt must have recorded clues"
+    for row in repo.clues:
+        assert row.get("facet"), row
+        assert isinstance(row.get("obliqueness"), float), row
+    # Clue 1 comes from the ramp's shuffled head: a name word or the avatar.
+    first = next(r for r in repo.clues if r["clue_index"] == 1)
+    assert first["facet"] in {"name_word_1", "name_word_2", "avatar"}

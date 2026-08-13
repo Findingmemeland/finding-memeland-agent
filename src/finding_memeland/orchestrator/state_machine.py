@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from ..content.clue_engine import PersonaContext, next_clue_due
+from ..content.clue_engine import PersonaContext, clue_slot_for, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
 from ..claims.parser import code_like, extract_candidates, extract_wallet, guess_like
 from ..content.templates import (
@@ -618,8 +618,12 @@ class Orchestrator:
             raise
 
         # R2 — the clue engine's context is built from the descriptor: the
-        # identity above and the anchor posts persisted at dress time.
-        ctx = PersonaContext.from_generated(identity, persona.handle)
+        # identity above, the handle hint (last-resort clues 9+) and the
+        # anchor posts persisted at dress time.
+        ctx = PersonaContext.from_generated(
+            identity, persona.handle,
+            handle_hint=str(row.get("handle_hint") or ""),
+        )
         anchors_raw = row.get("anchor_posts")
         if isinstance(anchors_raw, str):
             try:
@@ -774,9 +778,7 @@ class Orchestrator:
         tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id
         hunt.clues.append(draft.text)
-        self._repo.record_clue(
-            hunt_id=hunt.id, clue_index=1, clue_text=draft.text, tweet_id=tweet_id
-        )
+        self._record_clue_audited(hunt, 1, draft.text, tweet_id)
         # reshare_post_id persisted so a restarted agent keeps the SAME gate;
         # live_at is the prep-window boundary for the DM gate (P2).
         hunt.live_at = self._clock.now()
@@ -1148,13 +1150,40 @@ class Orchestrator:
             # us repeat it. Record best-effort.
             hunt.clues.append(draft.text)
             try:
-                self._repo.record_clue(
-                    hunt_id=hunt.id, clue_index=clue_index,
-                    clue_text=draft.text, tweet_id=tweet_id,
-                )
+                self._record_clue_audited(hunt, clue_index, draft.text, tweet_id)
             except Exception as e:  # noqa: BLE001
                 self._notify(f"record_clue failed (non-fatal): {e!r}")
         return clue_index, self._clue_due_fn(self._clock.now())
+
+    def _record_clue_audited(
+        self, hunt: PreparedHunt, clue_index: int, clue_text: str, tweet_id: str
+    ) -> None:
+        """record_clue + the ramp audit trail (Hunt #5 post-mortem: the clues'
+        facet distribution looked wrong and we couldn't prove which facet each
+        clue targeted — only the text was stored). Persists the PLANNED facet
+        and obliqueness alongside each clue; falls back to the legacy shape if
+        the columns are missing (older DB)."""
+        base = dict(
+            hunt_id=hunt.id, clue_index=clue_index,
+            clue_text=clue_text, tweet_id=tweet_id,
+        )
+        facet = obl = None
+        if hunt.ctx is not None:
+            try:
+                facet, obl = clue_slot_for(clue_index, hunt.ctx)
+            except Exception:  # noqa: BLE001 — audit must never block a clue
+                facet = obl = None
+        if facet is None:
+            self._repo.record_clue(**base)
+            return
+        try:
+            self._repo.record_clue(**base, facet=facet, obliqueness=obl)
+        except Exception:  # noqa: BLE001 — e.g. columns missing on an older DB
+            self._repo.record_clue(**base)
+            self._notify(
+                "clues_history.facet/obliqueness missing in the DB — clue "
+                "recorded without the ramp audit. Run the 2026-08-13 migration."
+            )
 
     # ==================================================================
     # Claim-by-post (2026-07-25) — the public submission channel.
@@ -2342,7 +2371,26 @@ class Orchestrator:
             if isinstance(payload, str):
                 payload = json.loads(payload)
             identity = GeneratedPersona(**payload)
-            ctx = PersonaContext.from_generated(identity, persona.handle)
+            # The handle hint and anchor posts live on the persona row
+            # (descriptor) — reread them so a resumed hunt keeps its post
+            # ladder (anchors) and last-resort handle clues (9+).
+            hint = ""
+            anchors: list[str] = []
+            try:
+                prow = self._repo.get_persona(row["persona_id"]) or {}
+                hint = str(prow.get("handle_hint") or "")
+                raw = prow.get("anchor_posts")
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                anchors = [
+                    str(a.get("text")) for a in (raw or [])
+                    if isinstance(a, dict) and a.get("text")
+                ]
+            except Exception:  # noqa: BLE001 — old repo/schema: clues degrade, hunt survives
+                pass
+            ctx = PersonaContext.from_generated(identity, persona.handle, handle_hint=hint)
+            if anchors:
+                ctx.anchor_posts = anchors
 
         clue_rows = self._repo.clues_for_hunt(row["id"])
         reshare = row.get("reshare_post_id") or next(

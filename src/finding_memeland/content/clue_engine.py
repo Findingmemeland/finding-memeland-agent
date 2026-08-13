@@ -1,11 +1,15 @@
-"""Clue Engine — generates one clue at a time with an easing curve.
+"""Clue Engine — generates one clue at a time along a fixed difficulty ramp.
 
-Design (memory: design decisions, 2026-05-23):
-- Number of clues is NOT fixed. Drop progressively more obvious clues until won.
-- Cadence between clues: random 1h-3h.
-- Aggressive easing: each clue ~30% more obvious than the last.
-- Clues 1-3 stay oblique (identify by inference, never direct lookup).
-  Clues 4+ may become structurally direct, but never name the answer.
+Ramp (Pedro, 2026-08-13 — replaces the two-round shuffled plan):
+- Clues 1-3, in RANDOM order among themselves: name word 1 (HARD), name word 2
+  (HARD), avatar (OBVIOUS — the photo matters least for search, so it gets ONE
+  plain clue).
+- Clues 4-5: name word 1 (EASY), name word 2 (EASY).
+- Clues 6-7-8: the persona's POSTS, on a ladder — 6 harder, 7 clearer, 8
+  easiest (locator post first; anchor posts join when they exist).
+- Clue 9+: the @HANDLE, the last-resort locator, generated from the operator's
+  handle_hint (pre-dressing descriptor), each one clearer than the last.
+- Number of clues is NOT fixed — the ramp keeps going until someone wins.
 - Clue 1 is special: it also carries the announcement + reshare gate + integrity
   hash (added by the orchestrator via templates.clue_one). The Clue Engine only
   produces the puzzle TEXT; templates wrap it.
@@ -22,15 +26,25 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .guardrails import check_clue
 
-# Easing: obliqueness starts at 1.0 and multiplies by ~0.7 per clue (~30% easier).
+# Legacy easing (pre-ramp fallback): 1.0 easing by ~30% per clue.
 EASING_FACTOR = 0.70
 MIN_GAP_SECONDS = 60 * 60        # 1h
 MAX_GAP_SECONDS = 3 * 60 * 60    # 3h
+
+# Ramp obliqueness levels (Pedro, 2026-08-13). 1.0 = maximally subtle.
+RAMP_NAME_HARD = 0.9    # the enigmatic first pass on each name word (clues 1-3)
+RAMP_NAME_EASY = 0.4    # the obvious revisit (clues 4-5)
+RAMP_AVATAR = 0.25      # the photo's ONE clue is plain-obvious (least searchable)
+RAMP_POSTS = (0.5, 0.3, 0.15)   # the post ladder: 6 harder, 7 clearer, 8 easiest
+RAMP_HANDLE_START = 0.1          # clue 9+: the handle, near-explicit
+RAMP_HANDLE_FLOOR = 0.05
+_RAMP_HANDLE_STEP = 0.01         # each extra handle clue gets slightly clearer
 
 
 @dataclass
@@ -46,16 +60,21 @@ class PersonaContext:
     solution_terms: list[str] = field(default_factory=list)
     banner_description: str = ""
     findable_post: str = ""
-    clue_facet_plan: list[str] = field(default_factory=list)  # shuffled once per hunt
-    # P2: the persona's prep-window posts — REAL searchable anchors the clues
-    # point players at (the vector that provably works; Hunt #2).
+    # The per-hunt ramp: (facet, obliqueness) pairs for the NAME+AVATAR phase
+    # (head shuffled once per hunt; the easy revisits follow in fixed order).
+    clue_facet_plan: list = field(default_factory=list)
+    # The persona's own posts (anchors published at /dress time) — searchable
+    # anchors the post-phase clues point players at.
     anchor_posts: list[str] = field(default_factory=list)
+    # Operator's decomposition of the @ (pre-dressing descriptor) — feeds the
+    # last-resort handle clues (9+). Internal, never published verbatim.
+    handle_hint: str = ""
 
     @classmethod
-    def from_generated(cls, generated, handle: str) -> "PersonaContext":
+    def from_generated(cls, generated, handle: str, *, handle_hint: str = "") -> "PersonaContext":
         """Build from a GeneratedPersona plus the account's actual @handle.
-        The facet plan is shuffled per hunt (variety), with signature_post forced
-        last (the locator anchor must be the final escalation)."""
+        The ramp's opening trio is shuffled per hunt (variety); everything
+        after it is fixed by the ramp."""
         return cls(
             display_name=generated.display_name,
             handle=handle,
@@ -66,7 +85,8 @@ class PersonaContext:
             solution_terms=list(generated.solution_terms),
             banner_description=getattr(generated, "banner_prompt", ""),
             findable_post=getattr(generated, "findable_post", ""),
-            clue_facet_plan=shuffled_facet_plan(generated.display_name),
+            clue_facet_plan=ramp_plan(generated.display_name),
+            handle_hint=handle_hint,
         )
 
 
@@ -76,8 +96,13 @@ class ClueDraft:
     taunt: str | None = None    # None for clue 1; a jeer for clues 2+
 
 
-def obliqueness_for(clue_index: int) -> float:
-    """1.0 (max oblique) easing down. clue_index is 1-based."""
+def obliqueness_for(clue_index: int, persona: "PersonaContext | None" = None) -> float:
+    """Target obliqueness for this clue. With a persona, it comes from the
+    RAMP (difficulty is tied to the clue's ROLE, not its position — the avatar
+    clue is obvious even though it lands in clues 1-3). Without a persona,
+    the legacy exponential easing (kept for standalone callers)."""
+    if persona is not None:
+        return clue_slot_for(clue_index, persona)[1]
     return round(EASING_FACTOR ** (clue_index - 1), 3)
 
 
@@ -89,7 +114,9 @@ def obliqueness_for(clue_index: int) -> float:
 # resolved by guidance_for(), so a name of ANY length gets a clue for EVERY word.
 VECTOR_GUIDANCE = {
     "avatar": "the PROFILE PICTURE — describe a distinctive visual element of the "
-    "avatar so players recognise the exact account among look-alikes.",
+    "avatar so players recognise the exact account among look-alikes. Signal "
+    "UNMISTAKABLY that this clue is about the picture (it is the only "
+    "picture clue of the hunt).",
     "banner": "the HEADER BANNER image — describe a distinctive visual element of "
     "the banner.",
     "bio": "the BIO — hint at the wording or attitude of the account's bio so "
@@ -100,6 +127,11 @@ VECTOR_GUIDANCE = {
     "anchor_post": "one of the account's OWN POSTS — point players (cryptically, "
     "more directly as clues ease) toward a distinctive phrase from the post quoted "
     "in your context, so searching that phrase lands them on the exact account.",
+    "handle": "the @HANDLE itself — the LAST-RESORT locator. Using the operator's "
+    "handle hint in your context, hint at each PART of the @ (meaning, wordplay, "
+    "definition) so a player who decodes the parts can type the exact handle into "
+    "search. Signal clearly that this clue is about the @. Never write the handle "
+    "or any of its parts.",
 }
 
 
@@ -128,55 +160,84 @@ def guidance_for(facet: str, persona: "PersonaContext") -> str:
             f"{which} of the display NAME (the word '{word}') — hint at THAT EXACT "
             "word (its meaning, a synonym, or wordplay on it) so a player decoding "
             "the hint arrives at the literal word and can search it. Do NOT "
-            "substitute a theme-related word. Never write the word itself."
+            "substitute a theme-related word. Never write the word itself. "
+            # Cross-contamination rule (Hunt #5 post-mortem: name clues framed
+            # with visual imagery read as PICTURE clues — 'Mirrored' vs a
+            # mirrored avatar): a NAME clue must never describe the profile
+            # picture or any visual element of the account.
+            "CRITICAL: signal this is about a WORD of the NAME, and do NOT "
+            "describe the profile picture or any visual element — a visually "
+            "framed clue misreads as a picture clue."
         )
     return VECTOR_GUIDANCE[facet]
 
 
-def clue_plan(persona: "PersonaContext") -> list[str]:
-    """Deterministic ORDERED facet template (fallback when no per-hunt plan was
-    shuffled). Same structure as the shuffled plan, without the shuffling."""
-    base = [*_name_facets(persona.display_name), "avatar"]
-    return [*base, *base, "signature_post"]
+def clue_plan(persona: "PersonaContext") -> list:
+    """Deterministic ORDERED ramp (fallback when no per-hunt plan was
+    shuffled). Same structure as ramp_plan, without the shuffling."""
+    words = _name_facets(persona.display_name)
+    head = [(f, RAMP_NAME_HARD) for f in words] + [("avatar", RAMP_AVATAR)]
+    tail = [(f, RAMP_NAME_EASY) for f in words]
+    return [*head, *tail]
 
 
-def shuffled_facet_plan(display_name: str) -> list[str]:
-    """Per-hunt plan (Hunt #3 post-mortem, Pedro's difficulty spec, 2026-07-29):
+def ramp_plan(display_name: str) -> list:
+    """The per-hunt NAME+AVATAR ramp (Pedro, 2026-08-13), as (facet,
+    obliqueness) pairs:
 
-    TWO ROUNDS over the oblique facets — each name word and the avatar — so
-    every target gets exactly two clues: a hard pass (round 1) and a clearer
-    revisit (round 2). Each round is shuffled independently, which also means
-    the same facet never appears twice in a row. Banner and bio are OUT (they
-    don't help the search). The searchable posts only enter from clue 7 —
-    see clue_vector_for."""
-    base = [*_name_facets(display_name), "avatar"]
-    round1 = base[:]
-    random.shuffle(round1)
-    round2 = base[:]
-    random.shuffle(round2)
-    while round2 and round1 and round2[0] == round1[-1]:
-        random.shuffle(round2)  # no same-facet back-to-back across the seam
-    return [*round1, *round2, "signature_post"]
+    - HEAD, shuffled once per hunt: each name word HARD + the avatar's single
+      OBVIOUS clue (the photo matters least for search, so exactly one clue,
+      and a plain one). For a 2-word name these are clues 1-3, in random order
+      — EXCEPT clue 1 is never the avatar (Opus, Fase 4 review): the hunt
+      always opens on a hard, oblique name clue; the photo varies between
+      positions 2 and 3.
+    - TAIL, fixed order: each name word again, EASY (clues 4-5).
+
+    After the plan runs out, clue_slot_for takes over with the POST ladder
+    (3 clues, 6-7-8) and then the HANDLE phase (9+)."""
+    words = _name_facets(display_name)
+    head = [(f, RAMP_NAME_HARD) for f in words] + [("avatar", RAMP_AVATAR)]
+    random.shuffle(head)
+    if head[0][0] == "avatar":
+        # Swap the avatar with a random name position — never the opener.
+        j = random.randrange(1, len(head))
+        head[0], head[j] = head[j], head[0]
+    tail = [(f, RAMP_NAME_EASY) for f in words]
+    return [*head, *tail]
 
 
-# The searchable-post escalation starts here (Pedro, 2026-07-29). Hunt #3
-# collapsed to 39 minutes because anchor-post clues fired from clue 3; the
-# oblique game (names + avatar, two passes each) now owns clues 1-6, the
-# pinned locator arrives at clue 7, and from clue 8 the clues alternate
-# between the pinned post and the prep-window anchor posts.
-POST_CLUES_FROM = 7
+def clue_slot_for(clue_index: int, persona: "PersonaContext") -> tuple:
+    """(facet, obliqueness) for this clue.
+
+    Phases (2-word name): 1-3 = shuffled head (names hard + avatar obvious);
+    4-5 = names easy; 6-7-8 = the POST ladder (locator first, then the
+    persona's own anchor posts when they exist, each step clearer); 9+ = the
+    HANDLE, near-explicit and getting clearer, forever (a hunt with no winner
+    keeps escalating the handle until the timeout voids it)."""
+    plan = persona.clue_facet_plan or clue_plan(persona)
+    n = len(plan)
+    if clue_index <= n:
+        return tuple(plan[clue_index - 1])
+    post_slot = clue_index - n  # 1-based inside the post ladder
+    if post_slot <= len(RAMP_POSTS):
+        obl = RAMP_POSTS[post_slot - 1]
+        if post_slot == 1 or not persona.anchor_posts:
+            return ("signature_post", obl)
+        return ("anchor_post", obl)
+    step = clue_index - n - len(RAMP_POSTS) - 1
+    return ("handle", round(max(RAMP_HANDLE_FLOOR, RAMP_HANDLE_START - _RAMP_HANDLE_STEP * step), 3))
 
 
 def clue_vector_for(clue_index: int, persona: "PersonaContext") -> str:
-    """Facet this clue targets: the per-hunt oblique plan up to clue 6, the
-    persona's POSTS from clue 7 on (pinned locator first; anchors alternate
-    in from clue 8 when they exist)."""
+    """Facet this clue targets (see clue_slot_for for the full ramp)."""
+    return clue_slot_for(clue_index, persona)[0]
+
+
+def post_phase_start(persona: "PersonaContext") -> int:
+    """First clue index of the POST ladder — anchors stay hidden from the
+    prompt before this (need-to-know: earlier clues can't leak them)."""
     plan = persona.clue_facet_plan or clue_plan(persona)
-    if clue_index >= POST_CLUES_FROM:
-        if persona.anchor_posts and clue_index > POST_CLUES_FROM and clue_index % 2 == 0:
-            return "anchor_post"
-        return "signature_post"
-    return plan[min(clue_index - 1, len(plan) - 1)]
+    return len(plan) + 1
 
 
 def next_clue_due(now: datetime | None = None) -> datetime:
@@ -185,9 +246,9 @@ def next_clue_due(now: datetime | None = None) -> datetime:
 
 
 # A hunt has no clue limit, so "how long can it run?" has no hard answer. This
-# is the planning assumption: by clue 8 the easing (0.7^7 ≈ 8% obliqueness) has
-# made it near-explicit, so hunts realistically end at or before it.
-ASSUMED_MAX_CLUES = 8
+# is the planning assumption: the ramp reaches the near-explicit handle phase
+# at clue 9 (2-word name), so hunts realistically end at or before clue 10.
+ASSUMED_MAX_CLUES = 10
 
 
 def worst_case_hunt_hours(max_gap_s: int, assumed_clues: int = ASSUMED_MAX_CLUES) -> float:
@@ -239,10 +300,10 @@ is a HIDDEN persona ACCOUNT on X. Players WIN by FINDING that account, reading t
 claim code in its bio, and DMing it.
 
 Your clues must point at the persona's REAL, OBSERVABLE attributes — the words of \
-its display name, its profile picture, its banner image, its bio, and its \
-distinctive pinned post — so a player can LOCATE and RECOGNISE the exact account. \
-A player must be able to ACT on each clue (search a name, recognise an image, \
-search a phrase). Do NOT make them guess an abstract idea.
+its display name, its profile picture, its distinctive posts, and (as the very \
+last resort) its @handle — so a player can LOCATE and RECOGNISE the exact \
+account. A player must be able to ACT on each clue (search a name, recognise an \
+image, search a phrase, type an @). Do NOT make them guess an abstract idea.
 
 The persona is themed around a concept/figure (the 'theme' below) ONLY for \
 coherence and flavour — never make players guess the theme; make them FIND the \
@@ -257,9 +318,10 @@ Hard rules for the clue text:
 - NEVER write verbatim: the display name or any of its words, the @handle, the \
 theme/solution terms, any URL, or hashtags. You HINT at them; you never spell them \
 out — that is the puzzle.
-- Obliqueness by progression. You are writing clue #{index}; target obliqueness \
-{obliqueness} (1.0 = maximally subtle; lower = clearer). Early clues are subtle, \
-later clues clearer — but never just write the name.
+- Obliqueness. You are writing clue #{index}; target obliqueness {obliqueness} \
+(1.0 = maximally subtle; lower = clearer). The difficulty of EACH clue is set by \
+the game's ramp — obey the number, not the clue's position (an early clue can be \
+deliberately obvious). Never just write the name.
 - Each clue must add a NEW angle, roughly 30% clearer than the previous one. Do \
 not repeat earlier clues.
 - NEVER build a clue on counting: do not state how many syllables, letters, \
@@ -271,7 +333,7 @@ Prefer qualitative hints (meaning, imagery, etymology, rhythm) over any counting
 CRYPTICALLY signal which one — so players know whether to look at the name, the \
 profile picture, the banner, the bio, or the pinned post. Signal it indirectly \
 (e.g. "a picture's worth a thousand...", "check what hangs above their head"), \
-naming the facet outright only when obviousness is high (clue 5+).
+naming the facet outright only when obviousness is high (obliqueness 0.4 or lower).
 
 For clue #1 only, set taunt to "". For clue #2 and later, also write a short, \
 varying jeer that pokes fun at players for not solving it yet (e.g. "c'mon you \
@@ -281,16 +343,22 @@ Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
 
 
 def _is_second_visit(vector: str, clue_index: int, persona: PersonaContext) -> bool:
-    """True when this oblique facet already had a clue earlier in the plan —
-    the round-2 revisit must be clearer, not a rephrase."""
+    """True when this facet already had a clue earlier in the ramp — the easy
+    revisit (clues 4-5) must be clearer, not a rephrase. Post/handle phases:
+    every clue after the phase's first is a revisit too."""
     plan = persona.clue_facet_plan or clue_plan(persona)
-    earlier = plan[: min(clue_index - 1, len(plan) - 1)]
+    earlier = [f for f, _ in plan[: min(clue_index - 1, len(plan))]]
+    if vector in ("signature_post", "anchor_post", "handle"):
+        first_post = post_phase_start(persona)
+        if vector == "handle":
+            return clue_index > first_post + len(RAMP_POSTS)
+        return clue_index > first_post
     return vector in earlier
 
 
 def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: list[str]) -> str:
     prior = "\n".join(f"- {c}" for c in prior_clues) if prior_clues else "(none — this is the first clue)"
-    vector = clue_vector_for(clue_index, persona)
+    vector, obliqueness = clue_slot_for(clue_index, persona)
     return (
         "The account's REAL attributes (point clues AT these; never write them verbatim):\n"
         f"- display name: {persona.display_name}\n"
@@ -300,18 +368,26 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"- banner (header image): {persona.banner_description}\n"
         f"- pinned locator post: {persona.findable_post}\n"
         + (
-            # The prep-window anchor posts are lethal search vectors: the
-            # generator only sees them once the post-clue phase begins
-            # (clue 7+), so earlier clues cannot leak them even by accident.
+            # The anchor posts are lethal search vectors: the generator only
+            # sees them once the post ladder begins, so earlier clues cannot
+            # leak them even by accident (need-to-know).
             "- the account's own posts (anchors for post-phase clues):\n"
             + "".join(f"    * {p}\n" for p in persona.anchor_posts)
-            if persona.anchor_posts and clue_index >= POST_CLUES_FROM else ""
+            if persona.anchor_posts and clue_index >= post_phase_start(persona) else ""
+        )
+        + (
+            # Same need-to-know for the operator's handle decomposition: it
+            # only enters the prompt in the handle phase itself.
+            f"- handle hint (operator's decomposition of the @, INTERNAL): "
+            + (persona.handle_hint or "(none — derive oblique hints from the handle itself)")
+            + "\n"
+            if vector == "handle" else ""
         )
         + "\n"
         f"Theme (FLAVOUR ONLY — do NOT make players guess this, do not write it): "
         f"{persona.backstory}\n"
         f"Terms to NEVER write: {persona.solution_terms}\n\n"
-        f"This is clue #{clue_index}. Target obliqueness: {obliqueness_for(clue_index)}.\n"
+        f"This is clue #{clue_index}. Target obliqueness: {obliqueness}.\n"
         f"FACET for this clue: {vector} — {guidance_for(vector, persona)}\n"
         + (
             "NOTE: this facet was already hinted at in an earlier clue — give a "
@@ -322,6 +398,20 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         + f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )
+
+
+def hint_terms(handle_hint: str) -> list[str]:
+    """The handle PARTS named in the operator's hint ('expresso = ...; tit =
+    ...; go = ...' -> ['expresso', 'tit']) — radioactive words no clue may
+    ever contain literally. Only the left-hand side of each '=' segment; parts
+    under 3 chars are skipped (same policy as the guardrail tokens: banning
+    2-letter English words like 'go' would strangle normal clue writing)."""
+    terms: list[str] = []
+    for seg in str(handle_hint or "").split(";"):
+        part = seg.split("=", 1)[0].strip().lower()
+        if len(part) >= 3 and re.fullmatch(r"[a-z0-9]+", part):
+            terms.append(part)
+    return terms
 
 
 def _parse_clue(text: str) -> ClueDraft:
@@ -356,7 +446,7 @@ class ClueEngine:
         `feedback` carries the previous attempt's guardrail rejection so the
         model knows exactly what to avoid on regeneration."""
         system = SYSTEM_PROMPT.format(
-            index=clue_index, obliqueness=obliqueness_for(clue_index)
+            index=clue_index, obliqueness=obliqueness_for(clue_index, persona)
         )
         user = _build_user_message(persona, clue_index, prior_clues)
         if feedback:
@@ -393,7 +483,11 @@ class ClueEngine:
                 persona_display_name=persona.display_name,
                 persona_handle=persona.handle,
                 persona_bio=persona.bio,
-                solution_terms=persona.solution_terms,
+                # Hint parts join the ban list for EVERY clue (not just the
+                # handle phase): the parts the operator named are radioactive
+                # anywhere ('tit' isn't visible in the camelCase split, so the
+                # guardrail alone can't see it).
+                solution_terms=[*persona.solution_terms, *hint_terms(persona.handle_hint)],
             )
             if result.ok:
                 return draft

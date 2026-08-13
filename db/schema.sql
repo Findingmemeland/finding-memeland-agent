@@ -305,3 +305,12 @@ alter table personas add column if not exists dressed_at timestamptz;        -- 
 -- 'dressed'. A flag marca hunts pré-vestidos: um crash em PREPARING devolve a
 -- persona à pool (sem undress) em vez de a reformar.
 alter table hunts add column if not exists predressed boolean not null default false;
+
+-- Migration 2026-08-13b — Fase 4: rampa de pistas + auditoria de facets.
+-- Post-mortem do Hunt #5: a distribuição de facets das pistas pareceu errada
+-- (3 de foto em 6) e não havia como provar que facet cada pista tinha como
+-- alvo — só o texto era guardado. A partir daqui cada pista publica com o
+-- facet PLANEADO e a obliqueness da rampa, para o próximo post-mortem ter
+-- ground truth.
+alter table clues_history add column if not exists facet text;
+alter table clues_history add column if not exists obliqueness numeric;
