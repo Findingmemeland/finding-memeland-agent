@@ -82,11 +82,17 @@ class TelegramAdmin:
     Wiring is I/O — confirm live before production.
     """
 
-    def __init__(self, *, bot_token: str, admin_chat_id: str, approval: ApprovalQueue, actions: dict):
+    def __init__(
+        self, *, bot_token: str, admin_chat_id: str, approval: ApprovalQueue,
+        actions: dict, on_text=None,
+    ):
         self._token = bot_token
         self._admin_chat_id = str(admin_chat_id)
         self._approval = approval
         self._actions = actions
+        # Optional plain-text handler (Fase 3: the sim/não launch confirmation).
+        # callable(text) -> reply string, or None/"" to stay silent.
+        self._on_text = on_text
 
     def _is_admin(self, chat_id) -> bool:
         return str(chat_id) == self._admin_chat_id
@@ -114,6 +120,20 @@ class TelegramAdmin:
              "tease", "approve", "reject"],
             _handle,
         ))
+
+        if self._on_text is not None:
+            from telegram.ext import MessageHandler, filters
+
+            async def _handle_text(update, context):  # noqa: ANN001
+                chat_id = update.effective_chat.id if update.effective_chat else None
+                if not self._is_admin(chat_id):
+                    return  # non-admin free text: total silence
+                text = update.message.text if update.message else ""
+                reply = self._on_text(text)
+                if reply:
+                    await update.message.reply_text(reply)
+
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
         return app
 
     def run(self) -> None:

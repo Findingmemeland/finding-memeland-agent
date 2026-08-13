@@ -75,6 +75,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .social.publisher import XPublisher
     from .social.x_client import XClient
     from .telegram.approval_queue import ApprovalQueue, TelegramAdmin
+    from .telegram.confirmation import LaunchConfirmation
 
     # Hunt events (LIVE, winner, errors) go to the admin's Telegram, not stdout —
     # an autonomous agent that moves money must never run blind.
@@ -145,10 +146,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
         control=control,
         heartbeat=heartbeat,
-        # P2: prepare/go-live split — /launch = T-prep_window_h; Clue 1 at T0.
-        persona_post_engine=PersonaPostEngine(anthropic, s.anthropic_model),
-        prep_window_h=s.prep_window_h or None,
-        prep_posts_n=s.prep_posts_n,
+        # Fase 3 (2026-08-13): the prep window is RETIRED from production —
+        # pre-dressed personas arrive indexed with their anchor posts already
+        # published at /dress time (the PersonaPostEngine now lives in the
+        # DressPipeline). The window's code remains for simulation/live-test.
         # Claim-by-post (2026-07-25): submissions are public replies on the
         # Clue 1 post, read via mentions (the DM API only reads virgin
         # conversations). claim_channel='dm' reverts to the legacy DM loop.
@@ -183,6 +184,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
     hunt_flag = {"active": False}
     hunt_lock = threading.Lock()
 
+    # Fase 3 (2026-08-13): /launch is INSTANT since Fase 2 (no prep window, no
+    # take-backs), so it now STAGES the hunt and asks for an explicit sim/não —
+    # the one protection that replaced the old 24h window of regret. Only the
+    # confirmation fires _do_launch.
+    launch_confirm = LaunchConfirmation()
+
     def _launch(arg: str) -> str:
         if not arg:
             return "usage: /launch <prize in $FIND>, e.g. /launch 500M or /launch 1B"
@@ -198,6 +205,59 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 f"minimum prize is {fmt_tokens(s.min_prize_fmml)} $FIND — "
                 "nobody plays for less."
             )
+        # Cheap early refusals BEFORE staging: an active hunt or an empty pool
+        # would only fail later — say it now, with nothing staged.
+        refusal = active_hunt_guard(repo)
+        if refusal:
+            return refusal
+        try:
+            pool = repo.dressed_personas()
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ could not read the dressed pool ({e!r}) — try again."
+        if not pool:
+            return "⛔ dressed pool VAZIA — corre /dress primeiro. Nada lançado."
+        nxt = pool[0]
+        name = str(nxt.get("applied_display_name") or "?")
+        age_line = ""
+        dressed_at = str(nxt.get("dressed_at") or "")
+        if dressed_at:
+            try:
+                from datetime import datetime, timezone
+
+                dt = datetime.fromisoformat(dressed_at.replace("Z", "+00:00"))
+                age_line = f", vestida há {(datetime.now(timezone.utc) - dt).days}d"
+            except ValueError:
+                pass
+        try:
+            number = repo.next_hunt_number()
+        except Exception:  # noqa: BLE001
+            number = "?"
+        # Eligibility floor no prompt (Opus, Fase 3): a última vista de olhos
+        # cobre a config TODA — o susto do floor do Hunt #4 não se repete.
+        floor = int(getattr(s, "holding_floor_fmml", 0) or 0)
+        if floor:
+            floor_line = (
+                f"floor: {floor:,} $FIND no claim para 100% — non-holders "
+                f"ganham {s.non_holder_prize_pct}%."
+            )
+        elif s.holding_floor_usd > 0:
+            floor_line = (
+                f"floor: fallback USD (${s.holding_floor_usd:g}, convertido no "
+                f"launch) — non-holders ganham {s.non_holder_prize_pct}%."
+            )
+        else:
+            floor_line = "🚨 floor ZERO — qualquer wallet ganha 100% do pote."
+        launch_confirm.stage(prize_fmml, str(nxt.get("handle") or ""))
+        return (
+            f"Hunt #{number}: {prize_fmml:,} $FIND com a persona "
+            f"{nxt.get('handle')} ('{name}'{age_line}).\n"
+            f"{floor_line}\n"
+            "⚠️ O launch é INSTANTÂNEO — Clue 1 sai em segundos, sem take-backs.\n"
+            "Confirmar? responde 'sim' ou 'não' (expira em 2 min)."
+        )
+
+    def _do_launch(prize_fmml: int) -> str:
+        """The confirmed launch — guards + preflight + the hunt thread."""
         with hunt_lock:
             if hunt_flag["active"]:
                 return "⛔ a hunt is already LIVE — one at a time. /status for details."
@@ -252,10 +312,36 @@ def build_agent(settings: Settings | None = None) -> Agent:
         # Pre-dressed launch (Fase 2): no prep window — the persona comes
         # dressed+indexed from the pool; R3 verifies; Clue 1 fires in seconds.
         return (
-            f"hunt launching with a {prize_fmml:,} $FIND prize 🏴 — persona do "
-            "pool (a mais antiga), verificação R3, Clue 1 em segundos. "
-            "Se a R3 falhar, recebes o alerta e nada é publicado."
+            f"confirmado — hunt launching with a {prize_fmml:,} $FIND prize 🏴 "
+            "— persona do pool (a mais antiga), verificação R3, Clue 1 em "
+            "segundos. Se a R3 falhar, recebes o alerta e nada é publicado."
         )
+
+    def _on_text(text: str) -> str | None:
+        """Plain-text admin messages: only the launch confirmation reads them.
+        Free text with nothing staged is ignored (None = no reply)."""
+        res = launch_confirm.resolve(text)
+        if res.outcome == "confirm":
+            # The persona shown in the prompt must still be the pool's oldest —
+            # never confirm one persona and launch another.
+            try:
+                pool = repo.dressed_personas()
+            except Exception as e:  # noqa: BLE001
+                return f"⚠️ pool unreadable at confirm ({e!r}) — corre /launch de novo."
+            current = str(pool[0].get("handle") or "") if pool else ""
+            if current != res.expected_handle:
+                return (
+                    f"⛔ a pool mudou desde o prompt (era {res.expected_handle}, "
+                    f"agora {current or 'vazia'}) — corre /launch de novo."
+                )
+            return _do_launch(res.prize_fmml)
+        if res.outcome == "cancel":
+            return "launch cancelado. Nada foi publicado."
+        if res.outcome == "expired":
+            return "a confirmação expirou (2 min) — corre /launch de novo."
+        if res.outcome == "noise":
+            return "responde 'sim' para lançar ou 'não' para cancelar."
+        return None  # outcome 'none': free text, stay silent
 
     # ------------------------------------------------------------------
     # /dress <ref> [handle hint...] — pre-dress a persona (design 2026-08-12).
@@ -435,50 +521,20 @@ def build_agent(settings: Settings | None = None) -> Agent:
         except Exception as e:  # noqa: BLE001
             return f"reject failed: {e!r}"
 
-    def _prepped_hunt():
-        """The hunt currently in its prep window, from the DB (source of truth)."""
-        rows = repo.active_hunts()
-        for r in rows:
-            if r.get("state") == "prepped":
-                return r
-        return None
+    # Fase 3: the prep window is dead in production (pre-dressed launches skip
+    # it), so its two operator commands are retired to honest stubs. The
+    # window's code stays in the orchestrator for simulation/live-test only.
+    _PREP_RETIRED = (
+        "comando reformado (Fase 3): já não há prep window — o /launch é "
+        "instantâneo com confirmação sim/não. Antes da Clue 1 não há nada para "
+        "abortar/adiar; depois dela o hunt está público."
+    )
 
     def _abort_prep(arg: str = "") -> str:
-        try:
-            row = _prepped_hunt()
-            if row is None:
-                return "no hunt in a prep window — nothing to abort."
-            repo.update_hunt(row["id"], abort_prep=True)
-        except Exception as e:  # noqa: BLE001
-            return f"⚠️ abort NOT applied (DB write failed: {e!r}) — try again."
-        return (
-            "🛑 prep ABORT requested (persisted). The prep loop will undress and "
-            "void the persona within ~1 min. Clue 1 will NOT fire."
-        )
+        return _PREP_RETIRED
 
     def _delay_golive(arg: str = "") -> str:
-        try:
-            hours = float(arg) if arg.strip() else 24.0
-        except ValueError:
-            return f"'{arg}' isn't a number of hours. usage: /delay_golive <h>"
-        if hours <= 0:
-            return "delay must be positive. usage: /delay_golive <h>"
-        try:
-            from datetime import datetime, timedelta, timezone
-
-            row = _prepped_hunt()
-            if row is None:
-                return "no hunt in a prep window — nothing to delay."
-            base = str(row.get("golive_due_at") or "")
-            due = (
-                datetime.fromisoformat(base.replace("Z", "+00:00"))
-                if base else datetime.now(timezone.utc)
-            )
-            new_due = due + timedelta(hours=hours)
-            repo.update_hunt(row["id"], golive_due_at=new_due)
-        except Exception as e:  # noqa: BLE001
-            return f"⚠️ delay NOT applied (DB write failed: {e!r}) — try again."
-        return f"⏳ go-live pushed +{hours:g}h → {new_due:%Y-%m-%d %H:%M} UTC (persisted)."
+        return _PREP_RETIRED
 
     def _silence(arg: str = "") -> str:
         try:
@@ -551,7 +607,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     }
     telegram = TelegramAdmin(
         bot_token=s.telegram_bot_token, admin_chat_id=s.telegram_admin_chat_id,
-        approval=approval_queue, actions=actions,
+        approval=approval_queue, actions=actions, on_text=_on_text,
     )
     return Agent(orchestrator=orchestrator, telegram=telegram, repo=repo)
 
