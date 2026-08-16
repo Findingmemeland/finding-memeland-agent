@@ -276,3 +276,110 @@ def test_hint_terms_extracts_the_left_hand_parts():
     assert hint_terms(hint) == ["expresso", "tit"]   # 'go' < 3 chars: fora
     assert hint_terms("") == []
     assert hint_terms("just prose without separators") == []
+
+
+# ---------------------------------------------------------------------------
+# Hard-clue calibration (Cassandra dry run, 16/08): the 0.9 clues came out as
+# synonym lists / story summaries. Hard slots get an explicit one-angle rule.
+# ---------------------------------------------------------------------------
+def test_hard_name_slots_carry_the_one_angle_rule_and_easy_ones_do_not():
+    from finding_memeland.content.clue_engine import (
+        HARD_CLUE_FLOOR, RAMP_NAME_HARD, RAMP_NAME_EASY, RAMP_AVATAR,
+        _build_user_message, clue_slot_for,
+    )
+
+    p = _persona("Cassandra Tired")
+    assert RAMP_NAME_HARD >= HARD_CLUE_FLOOR > RAMP_NAME_EASY > RAMP_AVATAR
+    seen_hard = seen_easy = 0
+    for i in range(1, 11):
+        _, ob = clue_slot_for(i, p)
+        msg = _build_user_message(p, i, [])
+        if ob >= HARD_CLUE_FLOOR:
+            seen_hard += 1
+            assert "HARD CLUE: one oblique angle only" in msg
+        else:
+            seen_easy += 1
+            assert "HARD CLUE" not in msg
+    # exactly the two hard name passes; the avatar/easy/post/handle slots are not
+    assert seen_hard == 2 and seen_easy == 8
+
+
+def test_system_prompt_formats_with_hard_floor_and_clue_count_for_taunts():
+    from finding_memeland.content.clue_engine import HARD_CLUE_FLOOR, SYSTEM_PROMPT
+
+    s = SYSTEM_PROMPT.format(index=7, obliqueness=0.3, hard_floor=HARD_CLUE_FLOOR)
+    assert "obliqueness 0.8 or higher" in s
+    assert "RECOGNITION vs INFERENCE" in s                # the Opus test
+    assert "she told them and they laughed" in s          # closed/dry example
+    assert "nobody would've aped" in s                    # crypto-native example
+    assert "the number is exactly 7" in s                  # taunt off-by-one guard
+    assert '{"clue": "...", "taunt": "..."}' in s          # JSON contract intact
+
+
+def test_clue_prompt_never_sends_players_to_dms_and_bans_lookups_in_hard_clues():
+    """Hunt 6 dry run (16/08): the clue prompt still said players win by 'DMing'
+    the persona — pre claim-by-post wording that surfaced as 'still not in their
+    DMs?' in a handle clue. The oracle never reads DMs: a clue that says DM sends
+    a player through the wrong door."""
+    from finding_memeland.content.clue_engine import HARD_CLUE_FLOOR, SYSTEM_PROMPT
+
+    s = SYSTEM_PROMPT.format(index=9, obliqueness=0.1, hard_floor=HARD_CLUE_FLOOR)
+    assert "DMing" not in s
+    assert "There are NO DMs in this game" in s
+    assert "REPLY to the Clue 1 post" in s
+    # hard clues: etymology / meaning is a lookup, not a hard clue
+    assert "NEVER an etymology" in s
+    # counts and jabs live in the taunt, never at the head of the clue text
+    assert "the clue text never opens with" in s
+
+
+# ---------------------------------------------------------------------------
+# Deterministic clean-up of leading clue counts / "final clue" tags
+# ---------------------------------------------------------------------------
+def test_leading_clue_count_is_stripped_from_the_clue_text_only():
+    from finding_memeland.content.clue_engine import _parse_clue
+
+    raw = ('{"clue": "five clues deep and you still need help with a single word? '
+           'how are you feeling right now? that is the second word.", '
+           '"taunt": "five clues out. FIVE."}')
+    d = _parse_clue(raw)
+    assert d.text.startswith("how are you feeling right now?")
+    assert "five clues" not in d.text
+    assert d.taunt == "five clues out. FIVE."          # the taunt keeps its count
+
+    # digits, other verbs, and a leading "ok"/"fine" are handled too
+    for lead in ("8 clues and you're basically being handed the W. ",
+                 "two clues in and still lurking? ",
+                 "ok 9 clues and you're still not typing? ",
+                 "Still here after 7 clues? "):
+        d = _parse_clue('{"clue": "' + lead + 'search the phrase.", "taunt": ""}')
+        assert d.text == "search the phrase.", (lead, d.text)
+
+
+def test_final_clue_tag_is_stripped_and_prompt_forbids_it():
+    from finding_memeland.content.clue_engine import (
+        HARD_CLUE_FLOOR, SYSTEM_PROMPT, _parse_clue,
+    )
+
+    for lead in ("final clue. ", "Final clue: ", "last one — ", "ok, final clue. ",
+                 "final answer time. "):
+        d = _parse_clue('{"clue": "' + lead + 'the @ has three parts.", "taunt": ""}')
+        assert d.text == "the @ has three parts.", (lead, d.text)
+    s = SYSTEM_PROMPT.format(index=9, obliqueness=0.1, hard_floor=HARD_CLUE_FLOOR)
+    assert 'Never call a clue "final" or "last"' in s
+
+
+def test_meta_stripping_never_empties_or_touches_real_clues():
+    from finding_memeland.content.clue_engine import _parse_clue
+
+    # a clue that IS only a count sentence stays (never return empty)
+    d = _parse_clue('{"clue": "two clues in and still lurking?", "taunt": "x"}')
+    assert d.text == "two clues in and still lurking?"
+    # numbers/'clue' mid-sentence, or 'last' as an ordinary word, are untouched
+    for clue in ("she told them and they laughed.",
+                 "the horse is hollow. I said it three times.",
+                 "the last thing anyone believed. one word.",
+                 "10 out of 10 would warn again.",
+                 "one clue away from glory: search the phrase."):
+        d = _parse_clue('{"clue": "' + clue.replace('"', '\\"') + '", "taunt": ""}')
+        assert d.text == clue, clue

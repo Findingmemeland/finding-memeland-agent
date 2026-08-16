@@ -45,6 +45,10 @@ RAMP_POSTS = (0.5, 0.3, 0.15)   # the post ladder: 6 harder, 7 clearer, 8 easies
 RAMP_HANDLE_START = 0.1          # clue 9+: the handle, near-explicit
 RAMP_HANDLE_FLOOR = 0.05
 _RAMP_HANDLE_STEP = 0.01         # each extra handle clue gets slightly clearer
+# Hard-clue calibration (Pedro, 2026-08-16, Cassandra dry run): at 0.9 the model
+# still wrote synonym lists and story summaries. At or above this obliqueness a
+# clue is ONE oblique angle — enforced in the system prompt and re-stated per call.
+HARD_CLUE_FLOOR = 0.8
 
 
 @dataclass
@@ -297,7 +301,9 @@ def next_clue_due_factory(min_gap_s: int, max_gap_s: int):
 SYSTEM_PROMPT = """You are the game master of "Finding Memeland", writing CLUES \
 for the current treasure hunt, posted on the main @FindingMemeland account. There \
 is a HIDDEN persona ACCOUNT on X. Players WIN by FINDING that account, reading the \
-claim code in its bio, and DMing it.
+claim code in its bio, and posting that code as a REPLY to the Clue 1 post \
+(claim-by-post). There are NO DMs in this game — never tell players to DM anyone \
+or mention DMs at all.
 
 Your clues must point at the persona's REAL, OBSERVABLE attributes — the words of \
 its display name, its profile picture, its distinctive posts, and (as the very \
@@ -322,6 +328,22 @@ out — that is the puzzle.
 (1.0 = maximally subtle; lower = clearer). The difficulty of EACH clue is set by \
 the game's ramp — obey the number, not the clue's position (an early clue can be \
 deliberately obvious). Never just write the name.
+- HARD clues (obliqueness {hard_floor} or higher) are ONE oblique angle: a single \
+sideways reference that rewards knowledge or lateral thinking. NEVER a list of \
+synonyms, NEVER a retelling of the figure's story, NEVER more than one identifying \
+fact (if your clue splits into two facts, delete one), and NEVER an etymology, \
+dictionary meaning or "the name means…" — a meaning is a lookup, save it for the \
+easy revisit. The test is RECOGNITION vs INFERENCE: if the clue DESCRIBES the thing and \
+the reader merely recognises it, that is a lookup — too easy, rewrite; a hard \
+clue gives a lateral angle the reader has to JUMP to. Two valid flavours — vary \
+between them: crypto-native lateral ("she'd have called every crash. nobody \
+would've aped. name's been shorthand for being right and ignored ever since."; \
+for a mood word: "the exact mood after warning everyone for the tenth time and \
+watching them scroll past. one word.") or closed and dry ("she told them and they \
+laughed."; "the original 'i told you so' — now just a girl's name."). Too easy: \
+"she saw everything coming and got zero credit — a girl with a gift nobody \
+wanted, cursed ever since" (three facts = a summary); "bone-weary, running on \
+empty, done with this timeline" (a synonym list).
 - Each clue must add a NEW angle, roughly 30% clearer than the previous one. Do \
 not repeat earlier clues.
 - NEVER build a clue on counting: do not state how many syllables, letters, \
@@ -337,7 +359,11 @@ naming the facet outright only when obviousness is high (obliqueness 0.4 or lowe
 
 For clue #1 only, set taunt to "". For clue #2 and later, also write a short, \
 varying jeer that pokes fun at players for not solving it yet (e.g. "c'mon you \
-lazy degens, money's on the line").
+lazy degens, money's on the line"). If the jeer mentions how many clues are out, \
+the number is exactly {index} — this one included. Clue counts and jeering belong \
+in the taunt ONLY: the clue text never opens with "N clues in…" or any jab — it \
+is the puzzle and nothing else. Never call a clue "final" or "last": the ramp \
+may continue past it.
 
 Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
 
@@ -388,7 +414,13 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         f"{persona.backstory}\n"
         f"Terms to NEVER write: {persona.solution_terms}\n\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness}.\n"
-        f"FACET for this clue: {vector} — {guidance_for(vector, persona)}\n"
+        + (
+            "HARD CLUE: one oblique angle only — no synonym lists, no story "
+            "summary, no etymology/meaning, exactly ONE identifying fact. If an "
+            "average reader gets it on first read, it is too easy.\n"
+            if obliqueness >= HARD_CLUE_FLOOR else ""
+        )
+        + f"FACET for this clue: {vector} — {guidance_for(vector, persona)}\n"
         + (
             "NOTE: this facet was already hinted at in an earlier clue — give a "
             "COMPLETELY NEW, noticeably CLEARER angle on the same target (do not "
@@ -414,12 +446,42 @@ def hint_terms(handle_hint: str) -> list[str]:
     return terms
 
 
+# Deterministic clean-up of two model habits the prompt only mostly fixes
+# (Hunt 6 dry runs, 16/08): opening the CLUE text with a clue count / jab
+# ("five clues deep and you still need help?") — that belongs in the taunt —
+# and calling a clue "final"/"last" when the ramp may continue past it.
+_NUM = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+# Up to four short lead-in words ("ok", "still here after") may precede the
+# count; the count must be PLURAL "clues" so "one clue away from glory" (a real
+# clue opening) is never touched.
+_LEADING_COUNT_RE = re.compile(
+    rf"^\s*(?:[a-z']+[,.]?\s+){{0,4}}?{_NUM}\s+clues\b[^.?!\n]*[.?!]\s*",
+    re.IGNORECASE,
+)
+_LEADING_FINAL_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?[,.]?\s*|fine[,.]?\s*)?"
+    r"(?:the\s+)?(?:final|last)\s+(?:clue|one|resort|answer)(?:\s+time)?\s*[:.,!—-]+\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_meta(clue: str) -> str:
+    """Drop a leading clue-count sentence and/or a leading 'final clue:' tag.
+    Never empties the clue: if the whole text was the preamble, keep it as is."""
+    out = clue
+    for rx in (_LEADING_COUNT_RE, _LEADING_FINAL_RE):
+        m = rx.match(out)
+        if m and m.end() < len(out):
+            out = out[m.end():]
+    return out.strip() or clue
+
+
 def _parse_clue(text: str) -> ClueDraft:
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1 or end < start:
         raise ValueError(f"no JSON object in clue response: {text[:200]!r}")
     data = json.loads(text[start : end + 1])
-    clue = str(data.get("clue", "")).strip()
+    clue = _strip_leading_meta(str(data.get("clue", "")).strip())
     taunt = str(data.get("taunt", "")).strip()
     if not clue:
         raise ValueError("empty clue text")
@@ -446,7 +508,8 @@ class ClueEngine:
         `feedback` carries the previous attempt's guardrail rejection so the
         model knows exactly what to avoid on regeneration."""
         system = SYSTEM_PROMPT.format(
-            index=clue_index, obliqueness=obliqueness_for(clue_index, persona)
+            index=clue_index, obliqueness=obliqueness_for(clue_index, persona),
+            hard_floor=HARD_CLUE_FLOOR,
         )
         user = _build_user_message(persona, clue_index, prior_clues)
         if feedback:
