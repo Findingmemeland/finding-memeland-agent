@@ -88,9 +88,9 @@ def main() -> int:
 
     if not ready:
         print(
-            f"\n⚠️  NOT findability-ready yet: needs phone-verified + age >= {s.min_warmup_days}d. "
-            "Saved as 'warmup'; the agent will NOT use it until it qualifies. Re-run later, "
-            "or update the row to state='ready' once it's old enough."
+            f"\n⏳ Not findability-ready yet (needs phone-verified + age >= {s.min_warmup_days}d). "
+            "Saved as 'warmup' — you CAN /dress it now (it will index dressed, by design); "
+            "only /launch waits for findability, automatically, no row edits needed."
         )
     print("\nPASS — persona authorized. Repeat for each persona with its own <ref>.")
     return 0

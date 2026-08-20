@@ -335,3 +335,57 @@ def test_every_recorded_clue_carries_facet_and_obliqueness():
     # Clue 1 comes from the ramp's shuffled head: a name word or the avatar.
     first = next(r for r in repo.clues if r["clue_index"] == 1)
     assert first["facet"] in {"name_word_1", "name_word_2", "avatar"}
+
+
+# ---------------------------------------------------------------------------
+# Findability gate moved to the LAUNCH (Pedro, 20/08): dress during warmup is
+# the design (the account indexes dressed); peek skips not-ready personas and
+# refuses — with each one's ready-at — when none qualifies.
+# ---------------------------------------------------------------------------
+def _source(repo, now=None):
+    return DBPersonaSource(
+        repo, lambda ref: (f"tok-{ref}", f"sec-{ref}"),
+        min_warmup_days=7, now_fn=(lambda: now or NOW),
+    )
+
+
+def test_peek_skips_warmup_dressed_and_picks_oldest_eligible():
+    young = _dressed_row("p1", "08", "@outcomesurfer", days_dressed=10)
+    young["account_created_at"] = NOW - timedelta(days=2)   # dressed FIRST but too young
+    ready = _dressed_row("p2", "09", "@readyone", days_dressed=1)
+    repo = FakeRepo()
+    repo.add_persona(**young)
+    repo.add_persona(**ready)
+    persona, row = _source(repo).peek_dressed()
+    assert persona.handle == "@readyone"                    # skipped, not blocked
+    assert repo.personas["p1"]["state"] == "dressed"        # untouched
+
+
+def test_peek_refuses_when_no_dressed_persona_is_findability_ready():
+    young = _dressed_row("p1", "08", "@outcomesurfer", days_dressed=3)
+    young["account_created_at"] = NOW - timedelta(days=2)
+    repo = FakeRepo()
+    repo.add_persona(**young)
+    with pytest.raises(RuntimeError, match="findability-ready") as e:
+        _source(repo).peek_dressed()
+    # the refusal says WHEN it unblocks (created + min_days = 06/08)
+    assert "@outcomesurfer" in str(e.value) and "06/08" in str(e.value)
+
+
+def test_peek_refusal_flags_unverified_phone_as_operator_action():
+    row = _dressed_row("p1", "08", "@outcomesurfer", days_dressed=3)
+    row["phone_verified"] = False
+    repo = FakeRepo()
+    repo.add_persona(**row)
+    with pytest.raises(RuntimeError, match="phone NOT verified"):
+        _source(repo).peek_dressed()
+
+
+def test_warmup_dressed_persona_becomes_launchable_by_time_alone():
+    young = _dressed_row("p1", "08", "@outcomesurfer", days_dressed=3)
+    young["account_created_at"] = NOW - timedelta(days=2)
+    repo = FakeRepo()
+    repo.add_persona(**young)
+    later = NOW + timedelta(days=6)                          # crosses the 7d line
+    persona, _ = _source(repo, now=later).peek_dressed()
+    assert persona.handle == "@outcomesurfer"                # no row edits needed

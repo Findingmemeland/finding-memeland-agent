@@ -220,20 +220,30 @@ def test_hint_on_the_row_is_enough():
     assert repo.rows["p1"]["handle_hint"] == "already stored hint"
 
 
-def test_refuses_underprepared_account():
+# 2026-08-20 (Pedro): dressing while under-prepared is ALLOWED by design — the
+# account indexes already dressed. Findability only gates the LAUNCH.
+def test_dresses_underprepared_account_and_flags_it_in_the_report():
     repo = FakeRepo([_row(phone_verified=False)])
     pipe, x = _pipeline(repo)
-    with pytest.raises(RuntimeError, match="findability-ready"):
-        pipe.dress("07", handle_hint="h")
-    assert x.calls == []
+    report = pipe.dress("07", handle_hint="h")
+    assert repo.rows["p1"]["state"] == "dressed"
+    assert "phone NOT verified" in report          # operator must fix the row
 
 
-def test_refuses_too_young_account():
-    repo = FakeRepo([_row(account_created_at=NOW - timedelta(days=2))])
+def test_dresses_too_young_account_with_launchable_from_date():
+    repo = FakeRepo([_row(account_created_at=NOW - timedelta(days=2), state="warmup")])
     pipe, x = _pipeline(repo)
-    with pytest.raises(RuntimeError, match="findability-ready"):
-        pipe.dress("07", handle_hint="h")
-    assert x.calls == []
+    report = pipe.dress("07", handle_hint="h")
+    assert repo.rows["p1"]["state"] == "dressed"
+    assert "lançável a partir de" in report        # created+min_days, dd/mm hh:mm
+    assert "warmup" in report.lower()
+
+
+def test_ready_persona_report_has_no_warmup_note():
+    repo = FakeRepo([_row()])
+    pipe, _ = _pipeline(repo)
+    report = pipe.dress("07", handle_hint="h")
+    assert "warmup" not in report.lower()
 
 
 def test_refuses_wrong_state():

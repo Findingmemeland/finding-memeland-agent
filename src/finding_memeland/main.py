@@ -55,7 +55,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .persona.dress_pipeline import DressPipeline
     from .persona.dresser import PersonaDresser
     from .persona.generator import PersonaGenerator
-    from .persona.source import DBPersonaSource
+    from .persona.source import (
+        DBPersonaSource,
+        _waiting_line,
+        split_dressed_by_findability,
+    )
     from .persona.verification import DressedProfileVerifier
     from .runtime import (
         DBHuntPause,
@@ -117,7 +121,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
         settings=s,
         clock=SystemClock(),
         repo=repo,
-        persona_source=DBPersonaSource(repo, env_token_resolver),
+        persona_source=DBPersonaSource(
+            repo, env_token_resolver, min_warmup_days=s.min_warmup_days
+        ),
         persona_generator=PersonaGenerator(anthropic, s.anthropic_model),
         avatar_generator=AvatarGenerator(
             openai, model=s.openai_image_model, size=s.openai_image_size
@@ -216,7 +222,18 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return f"⚠️ could not read the dressed pool ({e!r}) — try again."
         if not pool:
             return "⛔ dressed pool VAZIA — corre /dress primeiro. Nada lançado."
-        nxt = pool[0]
+        # Findability gate (2026-08-20): dressed-while-warmup personas sit in
+        # the pool indexing, but only findability-ready ones can carry a hunt.
+        eligible, waiting = split_dressed_by_findability(
+            pool, min_days=s.min_warmup_days
+        )
+        if not eligible:
+            return (
+                "⛔ pool vestida mas NENHUMA persona findability-ready — nada "
+                "lançado. A aquecer: "
+                + "; ".join(_waiting_line(r, at) for r, at in waiting)
+            )
+        nxt = eligible[0]
         name = str(nxt.get("applied_display_name") or "?")
         age_line = ""
         dressed_at = str(nxt.get("dressed_at") or "")
@@ -248,10 +265,16 @@ def build_agent(settings: Settings | None = None) -> Agent:
         else:
             floor_line = "🚨 floor ZERO — qualquer wallet ganha 100% do pote."
         launch_confirm.stage(prize_fmml, str(nxt.get("handle") or ""))
+        skipped_line = (
+            "(saltadas, ainda em warmup: "
+            + "; ".join(_waiting_line(r, at) for r, at in waiting) + ")\n"
+            if waiting else ""
+        )
         return (
             f"Hunt #{number}: {prize_fmml:,} $FIND com a persona "
             f"{nxt.get('handle')} ('{name}'{age_line}).\n"
-            f"{floor_line}\n"
+            + skipped_line
+            + f"{floor_line}\n"
             "⚠️ O launch é INSTANTÂNEO — Clue 1 sai em segundos, sem take-backs.\n"
             "Confirmar? responde 'sim' ou 'não' (expira em 2 min)."
         )
@@ -328,7 +351,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 pool = repo.dressed_personas()
             except Exception as e:  # noqa: BLE001
                 return f"⚠️ pool unreadable at confirm ({e!r}) — corre /launch de novo."
-            current = str(pool[0].get("handle") or "") if pool else ""
+            eligible, _w = split_dressed_by_findability(
+                pool, min_days=s.min_warmup_days
+            )
+            current = str(eligible[0].get("handle") or "") if eligible else ""
             if current != res.expected_handle:
                 return (
                     f"⛔ a pool mudou desde o prompt (era {res.expected_handle}, "
@@ -452,15 +478,26 @@ def build_agent(settings: Settings | None = None) -> Agent:
             if pool:
                 from datetime import datetime, timezone
 
-                oldest = pool[0]
+                eligible, waiting = split_dressed_by_findability(
+                    pool, min_days=s.min_warmup_days
+                )
+                oldest = eligible[0] if eligible else pool[0]
                 d = str(oldest.get("dressed_at") or "")
                 age = ""
                 if d:
                     dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
                     age = f", a mais antiga há {(datetime.now(timezone.utc) - dt).days}d"
+                nxt_line = (
+                    f"next: {oldest.get('handle')}"
+                    if eligible else "next: NENHUMA findability-ready"
+                )
+                wait_line = (
+                    " | a aquecer: "
+                    + "; ".join(_waiting_line(r, at) for r, at in waiting)
+                    if waiting else ""
+                )
                 lines.append(
-                    f"dressed pool: {len(pool)} persona(s){age} — next: "
-                    f"{oldest.get('handle')}"
+                    f"dressed pool: {len(pool)} persona(s){age} — {nxt_line}{wait_line}"
                 )
             else:
                 lines.append("dressed pool: VAZIA — /dress antes de /launch")

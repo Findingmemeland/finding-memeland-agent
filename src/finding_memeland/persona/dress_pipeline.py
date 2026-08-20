@@ -29,11 +29,34 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from ..content.integrity import generate_claim_code
-from .source import DEFAULT_MIN_WARMUP_DAYS, persona_findability_ready
+from .source import (
+    DEFAULT_MIN_WARMUP_DAYS,
+    findability_ready_at,
+    persona_findability_ready,
+)
 
 # States /dress accepts. 'ready' is the normal path; 'dressed' is the formal
 # re-dress (R4: corrections regenerate everything, never hand-edit).
-_DRESSABLE_STATES = frozenset({"ready", "dressed"})
+# 'warmup' is dressable by design (2026-08-20): dress early, index dressed.
+_DRESSABLE_STATES = frozenset({"warmup", "ready", "dressed"})
+
+
+def _warmup_note(row, min_days: int) -> str:
+    """Report suffix for a persona dressed while still in warmup: WHEN the
+    launch gate opens for it (or what the operator must fix)."""
+    at = findability_ready_at(
+        row.get("account_created_at"), row.get("phone_verified"), min_days=min_days
+    )
+    if at is None:
+        return (
+            " ⚠️ AINDA EM WARMUP e sem caminho para ready: phone NOT verified "
+            "(ou sem data de criação) — verifica o telefone e corrige a row, "
+            "senão o launch fica bloqueado para sempre."
+        )
+    return (
+        f" ⏳ Ainda em warmup: lançável a partir de {at.strftime('%d/%m %H:%M')} UTC "
+        "(o gate está no /launch, não no dress — ela indexa vestida entretanto)."
+    )
 
 # Anchor posts published right after dressing (they have weeks to index).
 # Spaced a few minutes apart so a fresh dress doesn't burst-post like a bot.
@@ -103,16 +126,15 @@ class DressPipeline:
             )
         redress = state == "dressed"
 
-        # Findability gate (same rule as the hunt path): an under-prepared
-        # account must never enter the dressed pool.
-        if not persona_findability_ready(
+        # NO findability gate here (Pedro, 2026-08-20): dressing DURING warmup
+        # is the design — the account indexes already dressed, instead of the
+        # old flow where dressing late reset indexing. Findability only ever
+        # blocks the LAUNCH (peek_dressed); the report below tells the operator
+        # when this persona becomes launchable.
+        findability_ok = persona_findability_ready(
             row.get("account_created_at"), row.get("phone_verified"),
             min_days=self._min_days, now=self._now(),
-        ):
-            raise RuntimeError(
-                f"persona {row.get('handle')} not findability-ready "
-                f"(needs phone_verified + age >= {self._min_days}d) — not dressing"
-            )
+        )
 
         # Handle hint (Pedro supplies it: the decomposable-handle failsafe the
         # clue engine uses as last resort). Fail-closed: no hint, no dress —
@@ -237,6 +259,11 @@ class DressPipeline:
             + f", {len(anchors)} anchor post(s)."
             + " A conta está agora IMUTÁVEL (R4): ninguém lhe toca — correções "
             "= novo /dress."
+            + (
+                ""
+                if findability_ok
+                else _warmup_note(row, self._min_days)
+            )
         )
         self._notify(report)
         return report

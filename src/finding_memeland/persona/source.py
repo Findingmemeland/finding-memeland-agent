@@ -50,6 +50,51 @@ def persona_findability_ready(
     return (now - created) >= timedelta(days=min_days)
 
 
+def findability_ready_at(
+    account_created_at, phone_verified, *, min_days: int
+) -> datetime | None:
+    """WHEN the account becomes findability-ready (created + min_days), or None
+    when it never will on its own (phone not verified / unknown creation date —
+    both need operator action, not waiting). Pure; feeds refusal messages."""
+    if not phone_verified:
+        return None
+    created = _as_dt(account_created_at)
+    if created is None:
+        return None
+    return created + timedelta(days=min_days)
+
+
+def split_dressed_by_findability(
+    rows, *, min_days: int, now: datetime | None = None
+):
+    """Split the dressed pool into (eligible, waiting) keeping dressed_at order.
+    `waiting` pairs each row with its ready-at datetime (None = needs operator:
+    phone unverified or no creation date). Pure — the launch gate (2026-08-20:
+    dressing while in warmup is the DESIGN — the account indexes already
+    dressed; findability only ever blocks the LAUNCH, never the dress)."""
+    now = now or _utcnow()
+    eligible, waiting = [], []
+    for row in rows:
+        if persona_findability_ready(
+            row.get("account_created_at"), row.get("phone_verified"),
+            min_days=min_days, now=now,
+        ):
+            eligible.append(row)
+        else:
+            waiting.append((row, findability_ready_at(
+                row.get("account_created_at"), row.get("phone_verified"),
+                min_days=min_days,
+            )))
+    return eligible, waiting
+
+
+def _waiting_line(row, ready_at) -> str:
+    handle = str(row.get("handle") or "?")
+    if ready_at is None:
+        return f"{handle} (phone NOT verified / sem data de criação — corrige a row)"
+    return f"{handle} (findability a {ready_at.strftime('%d/%m %H:%M')} UTC)"
+
+
 class DBPersonaSource:
     def __init__(self, repo, token_resolver, *, min_warmup_days: int = DEFAULT_MIN_WARMUP_DAYS, now_fn=_utcnow):
         self._repo = repo
@@ -93,6 +138,13 @@ class DBPersonaSource:
         silently substituted by the next one (a divergence can mean someone
         touched the account; the operator must know).
 
+        Findability gate (2026-08-20, moved here from /dress): personas may be
+        dressed while still in warmup — they index dressed, which is the whole
+        point of pre-dressing — but an under-prepared account must never carry
+        a hunt. Rows not findability-ready are SKIPPED (visible in the /launch
+        prompt and /status, so never silent); if none qualifies the launch is
+        refused with each persona's ready-at time.
+
         Returns (ReadyPersona with tokens, the full descriptor row)."""
         rows = self._repo.dressed_personas()
         if not rows:
@@ -100,7 +152,15 @@ class DBPersonaSource:
                 "no 'dressed' persona in the pool — run /dress first "
                 "(the old generate-at-launch flow is retired)"
             )
-        row = rows[0]  # repo orders by dressed_at asc — oldest = most indexed
+        eligible, waiting = split_dressed_by_findability(
+            rows, min_days=self._min_days, now=self._now()
+        )
+        if not eligible:
+            raise RuntimeError(
+                "dressed pool has no findability-ready persona — launch refused. "
+                "A aquecer: " + "; ".join(_waiting_line(r, at) for r, at in waiting)
+            )
+        row = eligible[0]  # repo orders by dressed_at asc — oldest = most indexed
         token, secret = self._resolve(row["oauth_ref"])
         persona = ReadyPersona(
             id=row["id"],
