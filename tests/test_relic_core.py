@@ -334,6 +334,34 @@ def test_pool_reveal_round_trips_identity():
     assert got.claim_code == ident.claim_code
 
 
+def test_spent_words_collects_names_only_across_the_pool():
+    """The hard uniqueness rule reads NAMES only. `avoid_recent` feeds the prompt
+    with themes too, but reserving solution terms would burn words no relic ever
+    actually spent."""
+    repo = FakeRelicRepo()
+    pool = RelicPool(repo, ReversibleCipher())
+    pool.add(Relic(id="r1"), new_identity(
+        name="Brackish Grimoire", description="d", image_prompt="p",
+        solution_terms=["Cassandra", "prophecy"]))
+    pool.add(Relic(id="r2"), new_identity(
+        name="flunking sensei", description="d", image_prompt="p",
+        solution_terms=["teacher"]))
+    spent = pool.spent_words()
+    assert spent == {"brackish", "grimoire", "flunking", "sensei"}
+    assert "cassandra" not in spent and "prophecy" not in spent
+
+
+def test_spent_words_skips_unreadable_rows_instead_of_blocking():
+    """A pool that cannot be fully decrypted must still allow a new relic: less
+    variety beats a stalled pipeline."""
+    repo = FakeRelicRepo()
+    pool = RelicPool(repo, ReversibleCipher())
+    pool.add(Relic(id="r1"), new_identity(
+        name="paper crane", description="d", image_prompt="p", solution_terms=["x"]))
+    repo.add_relic(relic=Relic(id="r2"), identity_ciphertext="not-decryptable")
+    assert pool.spent_words() == {"paper", "crane"}
+
+
 def test_peek_launchable_picks_oldest_and_refuses_when_empty():
     from datetime import datetime, timedelta, timezone
     repo = FakeRelicRepo()

@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from .relic import Relic, RelicIdentity, RelicState
+from .relic_generator import name_words
 
 # --------------------------------------------------------------------------- #
 # Cipher                                                                       #
@@ -237,6 +238,40 @@ class RelicPool:
             line = " / ".join(b for b in bits if b)
             if line:
                 out.append(line)
+        return out
+
+    def spent_words(self, limit: int = 200) -> set[str]:
+        """Every word ALREADY USED by a relic name, for the generator's
+        `avoid_words`.
+
+        Separate from `avoid_recent` on purpose: that one feeds the prompt with
+        names AND solution terms (themes), while this one is the hard rule and
+        must cover NAMES ONLY — reserving solution terms too would burn words
+        like "whale" or "prophecy" that no relic actually spent.
+
+        Why it exists (measured 2026-08-23): theme-level anti-repetition still let
+        the model reuse its favourite textures — "brackish" in three samples,
+        "sensei"/"hollow"/"stale"/"soggy"/"glitch" in two each. Two relics sharing
+        a word also make marketplace search ambiguous.
+
+        Same failure policy as `avoid_recent`: an unreadable row is skipped, never
+        raised — less variety beats a blocked pipeline. Uncapped by default in
+        practice (200) because unlike the prompt list this one costs nothing to
+        carry, and skipping rows here would silently free a word for reuse.
+        """
+        out: set[str] = set()
+        try:
+            rows = self._repo.all_relics()
+        except AttributeError:      # older repo: fall back to the minted pool
+            rows = self._repo.minted_relics()
+        except Exception:  # noqa: BLE001
+            return out
+        for relic in list(rows)[-limit:]:
+            try:
+                ident = self.reveal_identity(relic.id)
+            except Exception:  # noqa: BLE001 — unreadable row: skip, don't block
+                continue
+            out |= name_words(ident.name)
         return out
 
     def peek_launchable(self) -> tuple[Relic, RelicIdentity]:

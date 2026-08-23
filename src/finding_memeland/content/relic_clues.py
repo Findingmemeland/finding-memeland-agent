@@ -87,6 +87,19 @@ PUZZLE_ANGLES = (
     "halves that each mean something.",
     "RELATION: how this word sits against the OTHER word of the name — the "
     "contrast, the joke, or the image the pair makes together.",
+    # Pedro's angle (2026-08-23). Turns a riddle into a SEARCH: instead of
+    # circling what the word means, point at one specific place in the real world
+    # where the answer physically appears, and let players go and look. It cannot
+    # be a definition by construction, it is checkable, and it rewards persistence
+    # rather than vocabulary — which widens who can win.
+    "CONCRETE ANCHOR: name ONE specific real-world artefact where the answer "
+    "physically shows up — a scene in a named film, a line in a known book, a "
+    "moment in a documented event, an object in a museum, a lyric — and describe "
+    "the SPOT without naming the answer ('the colour of the sofa in the basement "
+    "scene of <film>'). Only use an anchor you are CERTAIN of: a wrong one makes "
+    "players eliminate the RIGHT answer, which is worse than a clue that is too "
+    "hard. It must be reachable in English, and durable — an encyclopedia entry "
+    "or a famous scene, never an ephemeral post that can be deleted.",
 )
 
 
@@ -110,6 +123,14 @@ class RelicClueContext:
     bio: str = ""
     handle_hint: str = ""
 
+    # Words in the name a player could ENUMERATE (kinship, colours, days, crypto
+    # jargon). Derived, never stored: the encrypted identity keeps no such field.
+    # This is the fix for mini hunt #1 (2026-08-23) — the failure was never the
+    # word "uncle", it was the clue "a title that skips a generation", which hands
+    # over the category and leaves ten candidates. The word stays legal; the clue
+    # is what has to change.
+    enumerable_words: tuple[str, ...] = ()
+
     clue_facet_plan: list = field(default_factory=list)
     # Rotates which ANGLE each piece uses, so two hunts don't attack their names
     # in the same order. Derived from the name, so it's stable within a hunt
@@ -126,9 +147,26 @@ class RelicClueContext:
             lore=identity.description,
             backstory=backstory or identity.description,
             solution_terms=list(identity.solution_terms),
+            enumerable_words=enumerable_words_in(identity.name),
             clue_facet_plan=relic_ramp_plan(identity.name),
             angle_offset=sum(ord(c) for c in identity.name) % len(PUZZLE_ANGLES),
         )
+
+
+def enumerable_words_in(name: str) -> tuple[str, ...]:
+    """Which words of the name belong to a set a player can list out loud.
+
+    Deliberately NOT a rejection anywhere (Pedro, 2026-08-23): knowing one of the
+    two words gets nobody closer, because marketplace search needs both. It is a
+    constraint handed to the clue writer instead."""
+    import re
+
+    from ..persona.relic_generator import CLOSED_CATEGORY_WORDS, CRYPTO_JARGON_WORDS
+
+    runs = re.findall(r"[a-z]+", str(name).lower())
+    return tuple(
+        sorted({r for r in runs if r in CLOSED_CATEGORY_WORDS or r in CRYPTO_JARGON_WORDS})
+    )
 
 
 def relic_ramp_plan(name: str) -> list:
@@ -374,6 +412,18 @@ def build_relic_user_message(ctx: RelicClueContext, clue_index: int, prior_clues
             "ALREADY SPENT on this word — do NOT repeat these angles: "
             + ", ".join(spent) + "\n"
             if spent else ""
+        )
+        + (
+            "ENUMERABLE WORD(S) IN THIS NAME: "
+            + ", ".join(ctx.enumerable_words)
+            + ". These belong to a set a player can list out loud (kinship terms, "
+            "colours, days, crypto jargon). NEVER let a clue gesture at the "
+            "CATEGORY — the moment you say 'a family title' or 'a colour', ten "
+            "candidates remain and the hunt is over. This exact mistake cost a "
+            "whole hunt: 'a title that skips a generation' is just 'uncle' with "
+            "extra steps. Attack these words ONLY by concrete anchor, cultural "
+            "use, sound, structure, or their relation to the other word.\n"
+            if clue_index <= PUZZLE_CLUES and ctx.enumerable_words else ""
         )
         + f"FACET for this clue: {vector} — {relic_guidance_for(vector, ctx)}\n"
         + (

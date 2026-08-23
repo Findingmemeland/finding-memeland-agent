@@ -9,8 +9,8 @@ import pytest
 from finding_memeland.content.relic_clues import (
     IMAGE_EASY_OBLIQUENESS, MIN_PIECES_PER_WORD, PUZZLE_ANGLES, PUZZLE_CLUES,
     PUZZLE_IMAGE_PIECES, PUZZLE_OBLIQUENESS, REVEAL_FLOOR, RelicClueContext,
-    RelicClueEngine, angle_for, build_relic_user_message, relic_ramp_plan,
-    relic_slot_for,
+    RelicClueEngine, angle_for, build_relic_user_message, enumerable_words_in,
+    relic_ramp_plan, relic_slot_for,
 )
 from finding_memeland.claims.relic_claim import (
     RelicClaimOutcome, name_present, verify_relic_claim,
@@ -317,3 +317,52 @@ def test_summary_marks_surprise_exemption():
                                                ladder_exempt=True,
                                                canonical_findability=canon)
     assert summary.ladder_exempt and "SURPRISE" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# enumerable words + concrete anchor (2026-08-23)                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_enumerable_words_are_detected_from_the_name():
+    assert enumerable_words_in("Uncle Pump") == ("pump", "uncle")
+    assert enumerable_words_in("tuesday's Gremlin") == ("tuesday",)
+    assert enumerable_words_in("goblin accountant") == ()
+
+
+def test_clue_prompt_forbids_gesturing_at_the_category():
+    """The failure that cost mini hunt #1 was never the word 'uncle' — it was
+    'a title that skips a generation', which hands over the category and leaves
+    ten candidates. The word stays legal; the clue is what must change."""
+    ident = new_identity(name="Uncle Pump", description="he calls the bottom",
+                         image_prompt="a man with a pump", solution_terms=["uncle", "pump"])
+    ctx = RelicClueContext.from_identity(ident)
+    assert ctx.enumerable_words == ("pump", "uncle")
+    msg = build_relic_user_message(ctx, 1, [])
+    assert "ENUMERABLE WORD" in msg
+    assert "gesture at the" in msg.lower() or "CATEGORY" in msg
+
+
+def test_no_enumerable_rule_when_the_name_is_open_field():
+    ident = new_identity(name="goblin accountant", description="d",
+                         image_prompt="p", solution_terms=["goblin"])
+    ctx = RelicClueContext.from_identity(ident)
+    assert "ENUMERABLE WORD" not in build_relic_user_message(ctx, 1, [])
+
+
+def test_enumerable_rule_is_puzzle_phase_only():
+    """The reveal phase exists to END the hunt — after clue PUZZLE_CLUES the
+    clues are meant to hand the word over."""
+    ident = new_identity(name="Uncle Pump", description="d",
+                         image_prompt="p", solution_terms=["uncle"])
+    ctx = RelicClueContext.from_identity(ident)
+    assert "ENUMERABLE WORD" not in build_relic_user_message(ctx, PUZZLE_CLUES + 2, [])
+
+
+def test_concrete_anchor_is_an_available_angle():
+    """Pedro's angle: point at one real-world artefact where the answer physically
+    shows up, instead of circling what the word means."""
+    anchor = [a for a in PUZZLE_ANGLES if a.startswith("CONCRETE ANCHOR")]
+    assert len(anchor) == 1
+    assert "CERTAIN" in anchor[0]          # hallucinated anchors are hunt-killers
+    assert "English" in anchor[0]          # must be reachable by the audience
