@@ -133,6 +133,11 @@ class PreparedHunt:
     # DRESSED pool (descriptor is the source of truth; prep window skipped;
     # a pre-live crash returns the persona to the pool instead of undressing).
     predressed: bool = False
+    # Relic hunts (2026-08-22): the target is an on-chain NFT instead of an
+    # X account. `relic_name` lives in memory ONLY — it is the hidden answer
+    # and must never reach an operator message (blind mode).
+    relic: object | None = None
+    relic_name: str | None = None
 
 
 def _theme_line(row: dict) -> str:
@@ -197,6 +202,15 @@ class Orchestrator:
         claim_sweep_every_n: int = 5,
         non_holder_prize_pct: int = 10,
         predressed_launch: bool = False,
+        # Relic mode (config flag `relic_launch`): when on, /launch consumes
+        # the RELIC pool instead of the dressed-persona pool. Off = today's
+        # behaviour, so one env var reverts to the persona model, no deploy.
+        relic_launch: bool = False,
+        relic_pool=None,
+        relic_findability=None,
+        relic_findability_secondary=(),
+        relic_clue_engine=None,
+        trophy_port=None,
         launch_verifier=None,
     ):
         self._settings = settings
@@ -266,6 +280,12 @@ class Orchestrator:
         # is unreachable in production (never a silent fallback: no dressed
         # persona = a clean refusal). launch_verifier implements R3.
         self._predressed_launch = predressed_launch
+        self._relic_launch = relic_launch
+        self._relic_pool = relic_pool
+        self._relic_findability = relic_findability
+        self._relic_findability_secondary = tuple(relic_findability_secondary or ())
+        self._relic_clue_engine = relic_clue_engine
+        self._trophy_port = trophy_port
         self._launch_verifier = launch_verifier
 
     # ------------------------------------------------------------------
@@ -336,6 +356,12 @@ class Orchestrator:
         # Pre-dressed launch (Fase 2): consume the dressed pool + descriptor.
         # The old generate-at-launch flow below stays ONLY for simulation and
         # the live test — production never falls back to it.
+        if self._relic_launch:
+            from ..persona.relic_integration import prepare_relic_hunt
+            return prepare_relic_hunt(
+                self, prize_fmml, min_balance_fmml,
+                ladder_exempt=getattr(self, "_next_launch_ladder_exempt", False),
+            )
         if self._predressed_launch:
             return self._prepare_predressed(prize_fmml, min_balance_fmml)
 
@@ -764,11 +790,16 @@ class Orchestrator:
             )
         except Exception as e:  # noqa: BLE001
             self._notify(f"undress of aborted persona failed: {e!r} — reset it manually.")
-        self._persona_source.mark_retired(hunt.persona.id)
+        if getattr(hunt, "relic", None) is not None:
+            from ..persona.relic_integration import retire_relic
+            retire_relic(self, hunt)   # relic -> 'revealed'; nada é destruído
+        else:
+            self._persona_source.mark_retired(hunt.persona.id)
         self._transition(hunt, HuntState.DONE)
 
     def _go_live(self, hunt: PreparedHunt) -> None:
-        draft = self._clue_engine.next_clue(hunt.ctx, 1, [])
+        from ..persona.relic_integration import engine_for
+        draft = engine_for(self, hunt).next_clue(hunt.ctx, 1, [])
         post = clue_one(
             hunt_n=hunt.number,
             clue_text=draft.text,
@@ -1142,7 +1173,8 @@ class Orchestrator:
             return clue_index, next_due
         clue_index += 1
         try:
-            draft = self._clue_engine.next_clue(hunt.ctx, clue_index, hunt.clues)
+            from ..persona.relic_integration import engine_for
+            draft = engine_for(self, hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
             tweet_id = self._publisher.post(
                 clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
             )
@@ -2173,7 +2205,11 @@ class Orchestrator:
             holder=winner.holder,
             non_holder_pct=self._non_holder_pct,
         )
-        text = winner_announcement(data)
+        from ..persona.relic_integration import deliver_trophy, reveal_extra_line
+
+        text = winner_announcement(data) + reveal_extra_line(hunt)
+        # The prize is already paid; the trophy is a bonus and never blocks.
+        deliver_trophy(self, hunt, winner)
         for attempt in range(3):
             try:
                 self._publisher.post(text, long_post=True)
@@ -2408,7 +2444,7 @@ class Orchestrator:
         reshare = row.get("reshare_post_id") or next(
             (c.get("tweet_id") for c in clue_rows if c.get("clue_index") == 1), None
         )
-        return PreparedHunt(
+        hunt = PreparedHunt(
             id=row["id"],
             persona=persona,
             identity=identity,
@@ -2429,6 +2465,10 @@ class Orchestrator:
             # fallback than a hardcoded 1 (at least it's unique and traceable).
             number=_as_int(row.get("hunt_number")) or int(row["id"]),
         )
+        if row.get("relic_id"):
+            from ..persona.relic_integration import resume_relic_hunt
+            hunt = resume_relic_hunt(self, row, hunt)
+        return hunt
 
     def _latest_claim_marker(self, hunt_id: int) -> str | None:
         """Resume marker for the claim channel. Sweep-discovered posts

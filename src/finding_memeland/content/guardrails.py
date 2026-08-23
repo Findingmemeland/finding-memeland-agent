@@ -69,7 +69,9 @@ def _forbidden_tokens(display_name: str, handle: str) -> set[str]:
             w = word.lower()
             if w not in STOPWORDS:
                 tokens.add(w)
-    tokens.add(handle.lstrip("@").lower())
+    h = (handle or "").lstrip("@").lower()
+    if h:
+        tokens.add(h)
     return tokens
 
 
@@ -104,6 +106,23 @@ def check_clue(
     )
     if answer_leaks:
         reasons.append(f"clue contains solution term(s): {answer_leaks}")
+
+    # 1c. Root variants: a term's stem is as good as the term itself to a
+    # player ("severe" gives away "Severus"). Only long, distinctive terms are
+    # checked, and only on a 5+ char shared prefix, so ordinary words don't trip.
+    root_leaks = sorted(
+        f"{term}~{word}"
+        for term in solution_terms
+        if term.strip() and len(term.strip()) >= 6
+        for word in set(re.findall(r"[a-z]{5,}", text_lower))
+        if word != term.strip().lower()
+        and word[:5] == term.strip().lower()[:5]
+    )
+    if root_leaks:
+        reasons.append(
+            f"clue leaks a ROOT VARIANT of a solution term: {root_leaks} — the "
+            "stem gives the answer away; point at it by inference instead"
+        )
 
     # 1c. Counting claims. Unverifiable units are banned; word counts must be
     # exactly right (checked against the display name).
