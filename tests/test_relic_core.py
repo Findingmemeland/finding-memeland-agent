@@ -20,7 +20,11 @@ from finding_memeland.persona.relic import (
     relic_canonical_id,
     verify_relic_commitment,
 )
-from finding_memeland.persona.relic_generator import RelicGenerator
+from finding_memeland.persona.relic_generator import (
+    NAME_DOMAINS,
+    RelicGenerator,
+    name_words,
+)
 from finding_memeland.persona.relic_pool import (
     FakeRelicRepo,
     NullPoolCipher,
@@ -44,10 +48,12 @@ class FakeAnthropic:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.last_kwargs = {}
 
         class _Messages:
             def create(inner, **kw):  # noqa: N805
                 self.calls += 1
+                self.last_kwargs = kw
                 return _Msg(self._responses.pop(0))
 
         self.messages = _Messages()
@@ -168,27 +174,113 @@ def test_generator_rejects_three_word_name_then_retries():
     assert fake.calls == 2
 
 
-def test_generator_rejects_closed_category_names_then_retries():
-    """A word from a small CLOSED set can be pointed at AND identified by the same
-    clue, so it collapses to a handful of candidates and the hunt dies early —
-    measured in mini hunt #1 (2026-08-23): "Uncle Pump" fell on clue 3 in 12
-    minutes. Enforced in code, not only in the prompt, so drift cannot revive it."""
+def test_enumerable_words_are_flagged_not_rejected():
+    """Pedro, 2026-08-23: knowing ONE of the two words gets a player nowhere —
+    marketplace search needs both (measured on OpenSea). So an enumerable word is
+    not a defect to ban, it is a constraint to hand to the CLUE writer: never
+    gesture at its category. The name that lost mini hunt #1 is legal again."""
+    fake = FakeAnthropic([_relic_json(name="Uncle Pump")])
+    gen = RelicGenerator(fake, "m", FakeNameCheck())
+    g = gen.generate(register="cerebral")
+    assert g.name == "Uncle Pump"
+    assert fake.calls == 1                       # accepted first time, no retry
+    assert set(g.enumerable_words) == {"uncle", "pump"}
+
+
+def test_enumerable_flag_catches_possessives_and_hyphens():
+    for name, expected in (
+        ("tuesday's Gremlin", {"tuesday"}),
+        ("Uncle-Pump Beast", {"uncle", "pump"}),
+        ("GREEN Ledger", {"green"}),
+    ):
+        gen = RelicGenerator(FakeAnthropic([_relic_json(name=name)]), "m", FakeNameCheck())
+        assert set(gen.generate(register="medium").enumerable_words) == expected
+
+
+def test_open_field_names_carry_no_enumerable_flag():
+    for name in ("Brackish Lemur", "Smudge Notary", "Sundancer Gremlin", "Redwood Sprite"):
+        gen = RelicGenerator(FakeAnthropic([_relic_json(name=name)]), "m", FakeNameCheck())
+        assert gen.generate(register="cerebral").enumerable_words == ()
+
+
+def test_request_never_uses_assistant_prefill():
+    """claude-sonnet-4-6 rejects assistant prefill outright (400, measured
+    2026-08-23 — 21 failures out of 21). The fake happily accepted it, which is
+    the lesson: a fake cannot validate an API contract."""
+    fake = FakeAnthropic([_relic_json()])
+    RelicGenerator(fake, "m", FakeNameCheck()).generate(register="medium")
+    messages = fake.last_kwargs["messages"]
+    assert messages[-1]["role"] == "user"
+    assert all(m["role"] != "assistant" for m in messages)
+
+
+def test_preamble_before_the_json_is_tolerated():
+    """The model sometimes thinks out loud first; the JSON still has to be found."""
+    noisy = "Let me work through this carefully.\n\n**Domain:** meme x history\n\n" + _relic_json()
+    fake = FakeAnthropic([noisy])
+    g = RelicGenerator(fake, "m", FakeNameCheck()).generate(register="medium")
+    assert g.name == "Rusted Ledgerkeep"
+
+
+def test_a_word_spent_by_an_earlier_relic_cannot_come_back():
+    """Measured 2026-08-23: theme-level anti-repetition let the model reuse its
+    favourite textures — "brackish" landed in three separate samples, "sensei",
+    "hollow", "stale", "soggy" and "glitch" in two each. Two relics sharing a word
+    also make marketplace search ambiguous."""
     fake = FakeAnthropic([
-        _relic_json(name="Uncle Pump"),      # kinship
-        _relic_json(name="Maroon Ledger"),   # colour
-        _relic_json(name="Rusted Ledger"),   # open field — accepted
+        _relic_json(name="Brackish Grimoire"),   # 'brackish' already spent
+        _relic_json(name="Trembling Sensei"),
     ])
     gen = RelicGenerator(fake, "m", FakeNameCheck())
-    g = gen.generate()
-    assert g.name == "Rusted Ledger"
-    assert fake.calls == 3
+    g = gen.generate(register="cerebral", avoid_words={"brackish", "hollow"})
+    assert g.name == "Trembling Sensei"
+    assert fake.calls == 2
 
 
-def test_closed_category_check_is_case_and_punctuation_insensitive():
-    fake = FakeAnthropic([_relic_json(name="tuesday's Gremlin")] * 3)
+def test_spent_words_are_listed_in_the_prompt():
+    fake = FakeAnthropic([_relic_json()])
     gen = RelicGenerator(fake, "m", FakeNameCheck())
-    with pytest.raises(RuntimeError, match="failed after"):
-        gen.generate()
+    gen.generate(register="medium", avoid_words={"brackish", "sensei"})
+    sent = fake.last_kwargs["messages"][0]["content"]
+    assert "brackish" in sent and "sensei" in sent
+
+
+def test_word_reservation_keeps_short_nouns_and_drops_function_words():
+    """'rat', 'owl', 'orb' are exactly what a meme name lives on, so 3 letters
+    still count; 'the'/'of' must not be reserved or the pool starves."""
+    assert name_words("The Ox of War") == {"war"}
+    assert name_words("Uncle-Pump's Beast") == {"uncle", "pump", "beast"}
+    assert name_words("chrome rat") == {"chrome", "rat"}
+
+
+def test_every_relic_is_meme_plus_one_rotating_world():
+    """MEME is mandatory in every name (Pedro) — the other domain rotates so a
+    full lap visits every world exactly once."""
+    gen = RelicGenerator(FakeAnthropic([]), "m", FakeNameCheck())
+    n = len(NAME_DOMAINS)
+    pairs = [gen._pick_domains(i) for i in range(n)]
+    assert all(a == "meme" for a, _ in pairs)
+    assert {b for _, b in pairs} == set(NAME_DOMAINS)
+
+
+def test_difficulty_roll_is_weighted_toward_hard():
+    gen = RelicGenerator(FakeAnthropic([]), "m", FakeNameCheck())
+    rolls = [gen._pick_register() for _ in range(4000)]
+    hard = rolls.count("cerebral") / len(rolls)
+    easy = rolls.count("accessible") / len(rolls)
+    assert 0.62 < hard < 0.78          # target 70%
+    assert 0.05 < easy < 0.16          # target 10%
+
+
+def test_generated_relic_theme_tag_feeds_theme_level_anti_repetition():
+    """avoid_recent must carry THEMES: the pool was repeating 'stoic animal that
+    never sells' while never repeating a name."""
+    fake = FakeAnthropic([_relic_json()])
+    gen = RelicGenerator(fake, "m", FakeNameCheck())
+    g = gen.generate(register="medium", sequence=0)
+    tag = g.theme_tag()
+    assert g.name in tag and g.tone in tag
+    assert g.domains and len(g.domains) == 2
 
 
 def test_generator_rejects_googlable_name_then_retries():
