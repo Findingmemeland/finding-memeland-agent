@@ -15,6 +15,10 @@ langgraph>=0.2.0
 # Database
 supabase>=2.6.0
 
+# Blind relic pool — Fernet encrypts every relic identity at rest.
+# The ONE new dependency of the whole relic package.
+cryptography>=42.0.0
+
 # On-chain (Base)
 web3>=6.20.0
 eth-utils>=4.1.0

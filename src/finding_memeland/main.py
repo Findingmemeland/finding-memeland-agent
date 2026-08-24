@@ -95,6 +95,38 @@ def build_agent(settings: Settings | None = None) -> Agent:
     # so it survives restarts and deploy overlaps. Post-mortem P3.7: the old
     # in-memory Event meant a paused hunt auto-resumed after a Railway restart.
     control = DBHuntPause(repo)
+
+    # --- Relic: blind identity pool -------------------------------------
+    # Built whenever a key exists, even with relic_launch=False: CREATING
+    # relics is independent of LAUNCHING hunts, and tying both to one switch
+    # would force relic mode on just to start filling the pool. Minting is
+    # what starts a relic's anonymity clock, so the pool wants a head start.
+    relic_pool = relic_generator = None
+    if s.relic_pool_key:
+        from .persona.relic_generator import RelicGenerator, name_words
+        from .persona.relic_pool import FernetPoolCipher, RelicPool
+        from .persona.relic_repo import SupabaseRelicRepo
+
+        relic_pool = RelicPool(
+            SupabaseRelicRepo(make_client(s.supabase_url, s.supabase_service_role_key)),
+            FernetPoolCipher(s.relic_pool_key),
+        )
+
+        class _PoolOnlyNameCheck:
+            """Until the OpenSea key lands there is no way to test whether a name
+            already exists in the world, so we only enforce pool uniqueness.
+            Deliberately permissive: a bad name is caught later by the launch
+            gate, whereas a blocked creation produces nothing at all."""
+
+            def __init__(self, pool):
+                self._pool = pool
+
+            def is_available(self, name: str) -> bool:
+                return not (name_words(name) & self._pool.spent_words())
+
+        relic_generator = RelicGenerator(
+            anthropic, s.anthropic_model, _PoolOnlyNameCheck(relic_pool)
+        )
     # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
     # below screams on Telegram if beats stop while a hunt is live (P0 pack).
     heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
@@ -630,8 +662,45 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
     threading.Thread(target=_watchdog_loop, daemon=True).start()
 
+    def _relic_new(arg: str = "") -> str:
+        """Create N relic identities (default 1), stored ENCRYPTED.
+
+        Mints nothing and spends no gas. NEVER returns a name: blind mode has to
+        hold in this message too, or the whole architecture is theatre."""
+        if relic_pool is None or relic_generator is None:
+            return "⛔ relic_pool_key not configured — no pool without it."
+        try:
+            n = max(1, min(10, int(arg or "1")))
+        except ValueError:
+            return "usage: /relic_new [1-10]"
+
+        from .persona.relic_mint import create_relic
+
+        created: list[str] = []
+        failures: list[str] = []
+        for _ in range(n):
+            try:
+                created.append(create_relic(pool=relic_pool, generator=relic_generator))
+            except Exception as e:  # noqa: BLE001 — one bad draw must not stop the rest
+                failures.append(repr(e)[:120])
+
+        lines = [f"✅ created {len(created)}/{n} (names NOT shown — blind mode)"]
+        lines += [f"  · {rid}" for rid in created]
+        if failures:
+            lines.append(f"⚠️ {len(failures)} failed:")
+            lines += [f"  · {f}" for f in failures]
+        try:
+            lines.append(
+                f"pool: {relic_pool.relic_count()} relics, "
+                f"{len(relic_pool.spent_words())} words spent"
+            )
+        except Exception:  # noqa: BLE001 — the tally is cosmetic
+            pass
+        return "\n".join(lines)
+
     actions = {
         "launch": _launch,
+        "relic_new": _relic_new,
         "dress": _dress,
         "status": _status,
         "silence": _silence,

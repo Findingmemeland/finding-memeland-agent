@@ -102,6 +102,33 @@ class Settings(BaseSettings):
     wallet_timeout_s: int = Field(default=600)    # 10 min from OUR public ask
     claim_sweep_every_n: int = Field(default=5)   # thread-search backstop cadence
 
+    # ------------------------------------------------------------------
+    # Relic hunts. relic_launch=False keeps today's behaviour exactly
+    # (X personas). Turning it on is an env var, not a deploy.
+    # ------------------------------------------------------------------
+    relic_launch: bool = Field(default=False)
+    # Fernet key (urlsafe base64, 32 bytes) for the blind pool. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # ⚠️ LOSING THIS KEY LOSES EVERY IDENTITY IN THE POOL. Identities are
+    # stored encrypted and there is NO plaintext column by design — that is
+    # what makes blind mode real, and the price is that there is no recovery
+    # path. Back it up BEFORE creating the first relic.
+    relic_pool_key: str = Field(default="")
+    # Mint wallet refs (e.g. "RW01,RW02"). Only needed to MINT.
+    # The KEYS live in Doppler as {REF}_ADDR / {REF}_PK — never here.
+    relic_wallet_refs: str = Field(default="")
+    # Findability gate (launch only). Without a key the gate refuses, which is
+    # the correct behaviour: never launch a hunt without confirming the relic
+    # can actually be found.
+    opensea_api_key: str = Field(default="")
+    # Trail clues. With no verifier wired they fall back to direct clues,
+    # silently — an unverified anchor is worse than a boring clue.
+    relic_trails_enabled: bool = Field(default=False)
+
+    @property
+    def relic_wallet_ref_list(self) -> list[str]:
+        return [r.strip() for r in (self.relic_wallet_refs or "").split(",") if r.strip()]
+
     @property
     def is_production(self) -> bool:
         return self.fmml_env == "production"
@@ -118,6 +145,13 @@ class Settings(BaseSettings):
             }.items()
             if not value
         ]
+        # Relic mode has its own prerequisites. Checked HERE so a missing key
+        # surfaces before a launch starts, not halfway through one.
+        if self.relic_launch:
+            if not self.relic_pool_key:
+                missing.append("relic_pool_key (relic_launch is on)")
+            if not self.opensea_api_key:
+                missing.append("opensea_api_key (the findability gate needs it)")
         if missing:
             raise RuntimeError(f"Cannot start hunt — missing config: {', '.join(missing)}")
 

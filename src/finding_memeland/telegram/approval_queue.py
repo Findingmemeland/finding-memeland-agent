@@ -117,7 +117,7 @@ class TelegramAdmin:
         app.add_handler(CommandHandler(
             ["launch", "dress", "silence", "resume", "status", "post",
              "abort_prep", "delay_golive",
-             "tease", "approve", "reject"],
+             "tease", "approve", "reject", "relic_new"],
             _handle,
         ))
 
