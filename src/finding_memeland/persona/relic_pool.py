@@ -240,6 +240,19 @@ class RelicPool:
                 out.append(line)
         return out
 
+    def unminted_relics(self) -> list[Relic]:
+        """Relics created but never minted, OLDEST FIRST.
+
+        Exposed on the pool rather than making callers reach into the repo: the
+        pool is the only thing that knows a relic is "un-minted" means no
+        contract, and a caller poking at `_repo` would couple the Telegram
+        command to the storage layer."""
+        try:
+            rows = list(self._repo.all_relics())
+        except Exception:  # noqa: BLE001 — unreadable pool == nothing to mint
+            return []
+        return [r for r in rows if not r.contract]
+
     def relic_count(self) -> int:
         """How many relics exist, in any state. Feeds the generator's `sequence`,
         which ROTATES the name domain — so seven consecutive relics visit seven

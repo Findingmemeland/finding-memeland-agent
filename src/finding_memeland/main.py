@@ -756,7 +756,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
         relic_id = arg.strip()
         if not relic_id:
-            unminted = [r for r in relic_pool.all_relics() if not r.contract]
+            unminted = relic_pool.unminted_relics()
             if not unminted:
                 return "⛔ no un-minted relic in the pool — /relic_new first."
             relic_id = unminted[0].id
