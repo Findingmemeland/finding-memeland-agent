@@ -296,13 +296,22 @@ def angle_for_unverifiable(clue_index: int, ctx: RelicClueContext) -> str | None
     return None
 
 
-def spent_angles(clue_index: int, ctx: RelicClueContext) -> list[str]:
-    """The angles already used on THIS word — listed in the prompt as forbidden."""
+def spent_angles(
+    clue_index: int, ctx: RelicClueContext, *, allow_anchor: bool = True
+) -> list[str]:
+    """The angles already used on THIS word — listed in the prompt as forbidden.
+
+    Must be computed under the SAME anchor rule as the clue being written, or the
+    list is wrong twice over: it would name CONCRETE ANCHOR as spent on a path
+    that never writes anchors (putting the idea in front of the model for no
+    reason) while hiding the angle that was actually substituted in its place —
+    so that one could be handed out a second time."""
     facet, _ = relic_slot_for(clue_index, ctx)
+    pick = angle_for if allow_anchor else angle_for_unverifiable
     out = []
     for i in range(1, clue_index):
         if relic_slot_for(i, ctx)[0] == facet:
-            a = angle_for(i, ctx)
+            a = pick(i, ctx)
             if a:
                 out.append(a.split(":")[0])
     return out
@@ -429,7 +438,7 @@ def build_relic_user_message(
     prior = "\n".join(f"- {c}" for c in prior_clues) if prior_clues else "(none — this is the first clue)"
     vector, obliqueness = relic_slot_for(clue_index, ctx)
     angle = angle_for(clue_index, ctx) if allow_anchor else angle_for_unverifiable(clue_index, ctx)
-    spent = spent_angles(clue_index, ctx)
+    spent = spent_angles(clue_index, ctx, allow_anchor=allow_anchor)
     return (
         "The relic's REAL attributes (point clues AT these; never write them verbatim):\n"
         f"- name: {ctx.display_name}\n"

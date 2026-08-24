@@ -161,6 +161,50 @@ class WebSearchTrailVerifier:
         return answer.startswith("VERIFIED")
 
 
+# The server-side web search tool. Dated string, so a future version bump is a
+# config change and not a code change — and getting it wrong is safe: the call
+# raises, the verifier returns False, the clue falls back to direct.
+WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
+
+
+class AnthropicWebSearch:
+    """`search_fn` for WebSearchTrailVerifier: asks a model that HAS web search.
+
+    Returns the LAST text block, not all of them concatenated: a searching model
+    emits tool-use and interim commentary before its conclusion, and gluing those
+    together would put stray words in front of the verdict and break the strict
+    'starts with VERIFIED' check — in the safe direction, but noisily.
+
+    Raises on any API failure; the verifier turns that into False. Never returns
+    a guess."""
+
+    def __init__(self, client, model: str, *, max_uses: int = 5, max_tokens: int = 400):
+        self._client = client
+        self._model = model
+        self._max_uses = max_uses
+        self._max_tokens = max_tokens
+
+    def __call__(self, prompt: str) -> str:
+        resp = self._client.messages.create(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[
+                {
+                    "type": WEB_SEARCH_TOOL_TYPE,
+                    "name": "web_search",
+                    "max_uses": self._max_uses,
+                }
+            ],
+        )
+        texts = [
+            b.text
+            for b in (resp.content or [])
+            if getattr(b, "type", "") == "text" and str(getattr(b, "text", "")).strip()
+        ]
+        return texts[-1] if texts else ""
+
+
 def generate_trail_clue(
     engine,
     ctx,

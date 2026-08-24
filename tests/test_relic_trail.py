@@ -73,14 +73,25 @@ DIRECT_JSON = '{"clue": "the colour of dried blood, kept in a book", "taunt": ""
 # --------------------------------------------------------------------------- #
 
 
-def test_policy_allows_only_the_opening_clues():
-    p = TrailPolicy(max_clue_index=3)
+def test_policy_window_still_caps_the_clue_index():
+    """The window rule is unchanged; only the extra anchor condition is new, so
+    the ceiling is checked with that condition switched off."""
+    p = TrailPolicy(max_clue_index=3, only_on_anchor_angle=False)
     assert p.allows(1) and p.allows(3)
     assert not p.allows(4) and not p.allows(9)
 
 
+def test_policy_defaults_to_anchor_angle_only():
+    """A trail IS the CONCRETE ANCHOR angle (2026-08-23) — binding them makes the
+    number of trails per hunt self-limiting instead of needing a quota."""
+    p = TrailPolicy()
+    assert p.allows(1, "CONCRETE ANCHOR: name ONE specific real-world artefact...")
+    assert not p.allows(1, "SOUND/RHYTHM: how the word sounds...")
+    assert not p.allows(1)          # no angle given == not an anchor == no trail
+
+
 def test_policy_disabled_allows_nothing():
-    assert not TrailPolicy(enabled=False).allows(1)
+    assert not TrailPolicy(enabled=False).allows(1, "CONCRETE ANCHOR: ...")
 
 
 # --------------------------------------------------------------------------- #
@@ -184,3 +195,77 @@ def test_late_clues_never_use_trails_even_when_enabled():
                           trail_policy=TrailPolicy(max_clue_index=3))
     draft = eng.next_clue(_ctx(), 5, ["a", "b", "c", "d"])
     assert "dried blood" in draft.text
+
+
+# --------------------------------------------------------------------------- #
+# real web-search adapter (2026-08-23)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _blk(kind, text="text"):
+    import types
+    return types.SimpleNamespace(type=kind, text=text)
+
+
+class _SearchClient:
+    def __init__(self, blocks, boom=False):
+        self._blocks = blocks
+        self.boom = boom
+        self.last_kwargs = None
+
+        class _Messages:
+            def create(inner, **kw):  # noqa: N805
+                self.last_kwargs = kw
+                if self.boom:
+                    raise RuntimeError("api down")
+                return type("R", (), {"content": self._blocks})()
+
+        self.messages = _Messages()
+
+
+def test_web_search_adapter_sends_the_server_side_tool():
+    from finding_memeland.content.relic_trail import (
+        WEB_SEARCH_TOOL_TYPE, AnthropicWebSearch,
+    )
+    client = _SearchClient([_blk("text", "VERIFIED")])
+    AnthropicWebSearch(client, "m")("check this")
+    tools = client.last_kwargs["tools"]
+    assert tools[0]["type"] == WEB_SEARCH_TOOL_TYPE
+    assert tools[0]["name"] == "web_search"
+
+
+def test_web_search_adapter_reads_the_last_text_block_only():
+    """A searching model emits interim commentary before its conclusion; gluing
+    the blocks together would put stray words in front of the verdict."""
+    from finding_memeland.content.relic_trail import AnthropicWebSearch
+    client = _SearchClient([
+        _blk("text", "Let me search for that."),
+        _blk("server_tool_use"),
+        _blk("web_search_tool_result"),
+        _blk("text", "VERIFIED"),
+    ])
+    assert AnthropicWebSearch(client, "m")("p") == "VERIFIED"
+
+
+def test_verifier_is_fail_closed_on_every_failure_mode():
+    """An unverifiable trail is treated exactly like a false one — a boring
+    direct clue always beats a broken hunt."""
+    from finding_memeland.content.relic_trail import (
+        AnthropicWebSearch, WebSearchTrailVerifier,
+    )
+    ok = _SearchClient([_blk("text", "VERIFIED")])
+    assert WebSearchTrailVerifier(AnthropicWebSearch(ok, "m")).verify("a", ["b"])
+
+    no = _SearchClient([_blk("text", "I searched."), _blk("text", "UNVERIFIED")])
+    assert not WebSearchTrailVerifier(AnthropicWebSearch(no, "m")).verify("a", ["b"])
+
+    down = _SearchClient([], boom=True)
+    assert not WebSearchTrailVerifier(AnthropicWebSearch(down, "m")).verify("a", ["b"])
+
+    empty = _SearchClient([])
+    assert not WebSearchTrailVerifier(AnthropicWebSearch(empty, "m")).verify("a", ["b"])
+
+    # No search terms: refuse without spending an API call at all.
+    unused = _SearchClient([_blk("text", "VERIFIED")])
+    assert not WebSearchTrailVerifier(AnthropicWebSearch(unused, "m")).verify("a", [])
+    assert unused.last_kwargs is None
