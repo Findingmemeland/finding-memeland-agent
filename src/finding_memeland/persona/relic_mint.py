@@ -119,14 +119,46 @@ def load_contract_artifact(path: str | None = None) -> tuple[list, str]:
     `data.bytecode.object` or `evm.bytecode.object`.
     """
     import json
+    import os
     from pathlib import Path
 
-    p = Path(path) if path else Path(__file__).resolve().parents[3] / "contracts" / "RelicNFT.json"
-    if not p.exists():
+    # Search instead of computing one path. A single relative guess breaks the
+    # moment the deployment layout changes — installed package vs run-from-repo
+    # put this module at different depths, and the failure only shows up in
+    # production (measured 2026-08-24: worked locally, "not configured" on
+    # Railway). Every candidate is reported on failure so the next surprise is
+    # diagnosable instead of mysterious.
+    tried: list[Path] = []
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    if os.environ.get("RELIC_CONTRACT_ARTIFACT"):
+        candidates.append(Path(os.environ["RELIC_CONTRACT_ARTIFACT"]))
+
+    here = Path(__file__).resolve()
+    # Walk up from this module: works whether the package sits in src/, in
+    # site-packages next to a copied contracts/, or anywhere else.
+    candidates += [parent / "contracts" / "RelicNFT.json" for parent in here.parents[:5]]
+    # Alongside the package itself, if the artifact is shipped as package data.
+    candidates.append(here.parent.parent / "contracts" / "RelicNFT.json")
+    # And relative to wherever the process was started.
+    candidates.append(Path.cwd() / "contracts" / "RelicNFT.json")
+
+    p = None
+    for candidate in candidates:
+        tried.append(candidate)
+        if candidate.exists():
+            p = candidate
+            break
+    if p is None:
+        listed = "\n  ".join(str(t) for t in tried)
         raise RuntimeError(
-            f"contract artifact not found at {p} — export the ABI + bytecode from "
-            "the SAME Remix compilation you deployed by hand, so the agent mints "
-            "with bytecode that is known to work."
+            "contract artifact RelicNFT.json not found. Looked in:\n  "
+            + listed
+            + "\nSet RELIC_CONTRACT_ARTIFACT to an absolute path, or place the file "
+            "in contracts/ at the repo root. It must be the ABI + bytecode from the "
+            "SAME compilation deployed by hand, so the agent mints with bytecode "
+            "that is known to work."
         )
     data = json.loads(p.read_text())
 

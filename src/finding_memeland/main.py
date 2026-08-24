@@ -158,7 +158,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 web3=web3, wallets=relic_wallets, abi=_abi, bytecode=_bytecode
             )
         except Exception as e:  # noqa: BLE001 — no artifact == no minting, not a crash
-            print(f"[relic] minting disabled: {e}")
+            # Printed in full: the message lists every path that was tried, and
+            # this is the only place that detail reaches the logs.
+            print(f"[relic] minting disabled — {e}")
     # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
     # below screams on Telegram if beats stop while a hunt is live (P0 pack).
     heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
