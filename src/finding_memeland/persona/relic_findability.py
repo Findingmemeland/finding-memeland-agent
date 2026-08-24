@@ -1,13 +1,25 @@
 """Findability gate — the relic MUST index by NAME before Clue 1, or the launch
 is REFUSED (fail-closed, R3 discipline).
 
-BaseScan is the CANONICAL surface: a neutral, deterministic index that returns the
-same result for everyone — this is the fairness upgrade over X (whose search is
-inconsistent per user). Marketplaces (OpenSea/Rarible) are INFORMATIONAL only:
-they personalise, cache and can hide new 1/1s, so they can never be the gate.
+⚠️ THE ORIGINAL DESIGN WAS WRONG, AND MEASURED WRONG (2026-08-23).
 
-The HTTP adapter needs a live Base connection (dry-run: mainnet). The gate LOGIC
-is testable with fakes.
+It made BaseScan canonical, on the theory that an explorer is neutral and
+deterministic while marketplaces personalise. The theory is fine; the fact is
+not: **BaseScan does not index NFT names at all**. Verified against a control
+NFT that had been live for 17 hours — searching its name returned nothing, so
+this is structural and not indexing lag. Left as-is, the gate would have refused
+EVERY launch, forever.
+
+What actually works, measured: OpenSea and Rarible index a fresh 1/1 by name in
+about three minutes.
+
+So the gate is now a QUORUM of marketplaces: two independent surfaces must both
+find the relic. That answers the original (correct) worry about personalisation
+and caching — one marketplace hiding a new 1/1 is plausible, two agreeing is
+evidence — while using the only surfaces that can answer the question at all.
+BaseScan stays as an informational check on the CONTRACT, which it does index.
+
+The HTTP adapters need a live connection. The gate LOGIC is testable with fakes.
 """
 
 from __future__ import annotations
@@ -71,16 +83,110 @@ def assert_findable_or_refuse(
     return report
 
 
+class QuorumFindability:
+    """N independent surfaces must agree the relic is findable by name.
+
+    Implements FindabilityCheck, so it drops straight into `canonical=` and the
+    fail-closed logic above is untouched.
+
+    A surface that ERRORS counts as a NO, never as a pass: the whole point of the
+    gate is that we do not launch on hope. And with `required=2` a single
+    marketplace caching or hiding a new 1/1 — the original, valid objection to
+    using marketplaces — cannot by itself let a launch through OR block it, since
+    the other surface still has to agree either way."""
+
+    def __init__(self, checks: tuple, *, required: int = 2, name: str = "marketplaces"):
+        if required > len(checks):
+            raise ValueError(
+                f"quorum needs {required} surfaces but only {len(checks)} were given "
+                "— a quorum that can never be met would refuse every launch"
+            )
+        self.name = name
+        self._checks = tuple(checks)
+        self._required = required
+
+    def is_indexed_by_name(self, name: str, *, contract: str | None = None) -> bool:
+        return self.results(name, contract=contract)[0]
+
+    def results(self, name: str, *, contract: str | None = None) -> tuple[bool, dict]:
+        """(quorum_met, per-surface detail) — the detail goes in the operator's
+        launch report so a refusal says WHICH surface was missing."""
+        detail: dict = {}
+        for chk in self._checks:
+            try:
+                detail[chk.name] = bool(chk.is_indexed_by_name(name, contract=contract))
+            except Exception:  # noqa: BLE001 — unreachable == not findable
+                detail[chk.name] = None
+        return sum(1 for v in detail.values() if v) >= self._required, detail
+
+
 # --------------------------------------------------------------------------- #
 # Real adapter — needs a live connection (NOT sandbox-testable)                #
 # --------------------------------------------------------------------------- #
 
 
+class OpenSeaFindability:
+    """Name search via OpenSea's documented v2 search endpoint.
+
+    GET /api/v2/search?query=…&chains=base&asset_types=nft, with the key in an
+    X-API-KEY header.
+
+    The response is scanned RECURSIVELY for the contract (or the name) rather
+    than read at a fixed path. That is deliberate: this code has to keep working
+    when a marketplace reshapes its JSON, and a false NEGATIVE here only delays a
+    launch while a crash would break the pipeline. Same reason a missing key or
+    any HTTP error returns False instead of raising — the gate is fail-closed by
+    design and the caller already treats "not findable" as "do not launch"."""
+
+    name = "opensea"
+
+    def __init__(self, *, http_get, api_key: str = "",
+                 base_url: str = "https://api.opensea.io", chain: str = "base"):
+        self._get = http_get      # callable(url, headers: dict) -> text
+        self._key = api_key
+        self._base = base_url.rstrip("/")
+        self._chain = chain
+
+    def is_indexed_by_name(self, name: str, *, contract: str | None = None) -> bool:
+        import json as _json
+        from urllib.parse import quote
+
+        if not self._key:
+            return False
+        url = (
+            f"{self._base}/api/v2/search?query={quote(name)}"
+            f"&chains={self._chain}&asset_types=nft&limit=20"
+        )
+        try:
+            raw = self._get(url, {"X-API-KEY": self._key, "Accept": "application/json"})
+            payload = _json.loads(raw or "{}")
+        except Exception:  # noqa: BLE001 — unreachable/garbled == not findable
+            return False
+        needle = (contract or name).lower()
+        return _contains_value(payload, needle)
+
+
+def _contains_value(node, needle: str) -> bool:
+    """Does `needle` appear as (part of) any string anywhere in the payload?
+
+    Schema-agnostic on purpose — see OpenSeaFindability. Only strings are
+    compared, so a numeric token id can never accidentally match a name."""
+    if isinstance(node, str):
+        return needle in node.lower()
+    if isinstance(node, dict):
+        return any(_contains_value(v, needle) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_contains_value(v, needle) for v in node)
+    return False
+
+
 class BaseScanFindability:
-    """Canonical check via BaseScan's search. `_fetch` (the HTTP call) is
-    overridden in tests; the parsing/decision is pure. We require the relic's
-    NAME to resolve to a token/collection AND (when given) the contract to match,
-    so a namesake never passes the gate."""
+    """⚠️ NOT USABLE AS THE NAME GATE — kept for CONTRACT checks only.
+
+    Measured 2026-08-23: BaseScan's search does not index NFT names, verified
+    against a 17-hour-old control NFT. Passing this as `canonical=` refuses every
+    launch. Use it in `secondary=` to confirm the contract exists, and let
+    QuorumFindability over marketplaces decide findability by name."""
 
     name = "basescan"
 

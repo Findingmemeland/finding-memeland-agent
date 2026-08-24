@@ -166,3 +166,84 @@ def test_decoys_jitter_is_injectable():
     d = plan_decoys(cfg=_cfg(min_gap_s=10, max_gap_s=999), pool_size=5, free_wallets=1,
                     now=now, gap_fn=lambda c: 42)
     assert d.next_check_at == now + timedelta(seconds=42)
+
+
+# --------------------------------------------------------------------------- #
+# findability: quorum of marketplaces (2026-08-23 rework)                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_quorum_needs_two_surfaces_to_agree():
+    """BaseScan cannot be the name gate — it does not index NFT names at all
+    (verified against a 17-hour-old control NFT), so as canonical it refused
+    every launch. Two marketplaces agreeing answers the original worry about
+    caching without using a surface that cannot answer at all."""
+    from finding_memeland.persona.relic_findability import QuorumFindability
+    found = FakeFindability("opensea", indexed={"goblin accountant"})
+    also = FakeFindability("rarible", indexed={"goblin accountant"})
+    missing = FakeFindability("rarible", indexed=set())
+
+    assert QuorumFindability((found, also)).is_indexed_by_name("goblin accountant")
+    assert not QuorumFindability((found, missing)).is_indexed_by_name("goblin accountant")
+
+
+def test_quorum_counts_an_unreachable_surface_as_a_no():
+    """The gate exists so we never launch on hope."""
+    from finding_memeland.persona.relic_findability import QuorumFindability
+    found = FakeFindability("opensea", indexed={"x"})
+    down = FakeFindability("rarible", raises=True)
+    quorum = QuorumFindability((found, down))
+    ok, detail = quorum.results("x")
+    assert not ok
+    assert detail == {"opensea": True, "rarible": None}
+
+
+def test_quorum_refuses_to_be_built_when_it_could_never_be_met():
+    from finding_memeland.persona.relic_findability import QuorumFindability
+    with pytest.raises(ValueError, match="quorum"):
+        QuorumFindability((FakeFindability("opensea"),), required=2)
+
+
+def test_opensea_adapter_hits_the_documented_search_endpoint():
+    import json as _json
+
+    from finding_memeland.persona.relic_findability import OpenSeaFindability
+    seen = {}
+
+    def _get(url, headers):
+        seen["url"], seen["headers"] = url, headers
+        return _json.dumps({"nfts": [{"contract": "0xABC", "name": "goblin accountant"}]})
+
+    check = OpenSeaFindability(http_get=_get, api_key="k")
+    assert check.is_indexed_by_name("goblin accountant", contract="0xabc")
+    assert "/api/v2/search?query=" in seen["url"] and "chains=base" in seen["url"]
+    assert seen["headers"]["X-API-KEY"] == "k"
+
+
+def test_opensea_adapter_is_schema_agnostic_and_fail_closed():
+    """A marketplace reshaping its JSON must not crash the pipeline, and every
+    failure mode must read as 'not findable' rather than 'assume yes'."""
+    import json as _json
+
+    from finding_memeland.persona.relic_findability import OpenSeaFindability
+
+    def reshaped(url, headers):
+        return _json.dumps({"results": {"items": [{"meta": {"token": {"address": "0xABC"}}}]}})
+
+    assert OpenSeaFindability(http_get=reshaped, api_key="k").is_indexed_by_name(
+        "anything", contract="0xabc"
+    )
+
+    for broken in (lambda u, h: "not json", lambda u, h: _json.dumps({"nfts": []})):
+        assert not OpenSeaFindability(http_get=broken, api_key="k").is_indexed_by_name("x")
+
+    def boom(url, headers):
+        raise RuntimeError("502")
+
+    assert not OpenSeaFindability(http_get=boom, api_key="k").is_indexed_by_name("x")
+
+    # No key configured: refuse without spending a request.
+    calls = []
+    no_key = OpenSeaFindability(http_get=lambda u, h: calls.append(1), api_key="")
+    assert not no_key.is_indexed_by_name("x")
+    assert not calls
