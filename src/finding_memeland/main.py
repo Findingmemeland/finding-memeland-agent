@@ -128,6 +128,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
             anthropic, s.anthropic_model, _PoolOnlyNameCheck(relic_pool)
         )
 
+    # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
+    # below screams on Telegram if beats stop while a hunt is live (P0 pack).
+    heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
+    web3 = Web3(Web3.HTTPProvider(s.base_rpc_url))
+
     # --- Relic: minting ---------------------------------------------------
     # Separate from the pool on purpose: creating identities needs only a key,
     # while minting needs wallets, a pinning service and a compiled contract.
@@ -161,10 +166,6 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # Printed in full: the message lists every path that was tried, and
             # this is the only place that detail reaches the logs.
             print(f"[relic] minting disabled — {e}")
-    # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
-    # below screams on Telegram if beats stop while a hunt is live (P0 pack).
-    heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
-    web3 = Web3(Web3.HTTPProvider(s.base_rpc_url))
     x = XClient(
         api_key=s.x_api_key, api_secret=s.x_api_secret, bearer_token=s.x_bearer_token,
         main_access_token=s.x_main_access_token, main_access_secret=s.x_main_access_secret,
