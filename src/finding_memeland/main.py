@@ -127,6 +127,38 @@ def build_agent(settings: Settings | None = None) -> Agent:
         relic_generator = RelicGenerator(
             anthropic, s.anthropic_model, _PoolOnlyNameCheck(relic_pool)
         )
+
+    # --- Relic: minting ---------------------------------------------------
+    # Separate from the pool on purpose: creating identities needs only a key,
+    # while minting needs wallets, a pinning service and a compiled contract.
+    # Each piece missing disables minting alone, and says which one is missing —
+    # a half-configured mint must never half-run.
+    relic_minter = relic_artwork = relic_wallets = None
+    if relic_pool is not None and s.relic_wallet_ref_list and s.pinata_jwt:
+        from .persona.relic_image import OpenAIRelicImage, PinataPinner, RelicArtwork
+        from .persona.relic_repo import ConfigWalletDirectory, DopplerKeyResolver
+        from .persona.relic_wallets import WalletPool
+
+        relic_wallets = WalletPool(
+            ConfigWalletDirectory(
+                s.relic_wallet_ref_list,
+                SupabaseRelicRepo(make_client(s.supabase_url, s.supabase_service_role_key)),
+            ),
+            DopplerKeyResolver(),
+        )
+        relic_artwork = RelicArtwork(
+            OpenAIRelicImage(openai, model=s.openai_image_model, size=s.openai_image_size),
+            PinataPinner(s.pinata_jwt),
+        )
+        try:
+            from .persona.relic_mint import Web3Minter, load_contract_artifact
+
+            _abi, _bytecode = load_contract_artifact()
+            relic_minter = Web3Minter(
+                web3=web3, wallets=relic_wallets, abi=_abi, bytecode=_bytecode
+            )
+        except Exception as e:  # noqa: BLE001 — no artifact == no minting, not a crash
+            print(f"[relic] minting disabled: {e}")
     # Watchdog sensor: the hunt loop beats every cycle; a supervisor thread
     # below screams on Telegram if beats stop while a hunt is live (P0 pack).
     heartbeat = PollHeartbeat(stall_after_s=s.watchdog_stall_s)
@@ -698,9 +730,59 @@ def build_agent(settings: Settings | None = None) -> Agent:
             pass
         return "\n".join(lines)
 
+    def _relic_mint(arg: str = "") -> str:
+        """Mint the oldest un-minted relic in the pool (or a specific id).
+
+        One relic per call, deliberately: a mint spends real gas and burns a
+        wallet forever, so a mistyped argument must never start a batch. It also
+        keeps the minting cadence IRREGULAR by hand — a regular pattern is the
+        one thing revealed relics teach an observer about future ones."""
+        if relic_pool is None:
+            return "⛔ relic_pool_key not configured."
+        missing = [
+            label for label, ok in (
+                ("RELIC_WALLET_REFS", bool(s.relic_wallet_ref_list)),
+                ("PINATA_JWT", bool(s.pinata_jwt)),
+                ("contracts/RelicNFT.json", relic_minter is not None),
+            ) if not ok
+        ]
+        if missing:
+            return "⛔ minting not configured — missing: " + ", ".join(missing)
+
+        from .persona.relic_mint import mint_relic
+
+        relic_id = arg.strip()
+        if not relic_id:
+            unminted = [r for r in relic_pool.all_relics() if not r.contract]
+            if not unminted:
+                return "⛔ no un-minted relic in the pool — /relic_new first."
+            relic_id = unminted[0].id
+
+        try:
+            free = len(relic_wallets.free_refs())
+        except Exception:  # noqa: BLE001
+            free = -1
+        try:
+            result = mint_relic(
+                relic_id=relic_id, pool=relic_pool, wallets=relic_wallets,
+                image_gen=relic_artwork, minter=relic_minter,
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"⛔ mint FAILED for {relic_id}: {e!r}"
+
+        return (
+            f"✅ minted (name NOT shown — blind mode)\n"
+            f"  relic:    {relic_id}\n"
+            f"  contract: {result.contract}\n"
+            f"  token:    {result.token_id}\n"
+            f"  tx:       {result.tx_hash}\n"
+            f"  wallets left: {free - 1 if free >= 0 else '?'}"
+        )
+
     actions = {
         "launch": _launch,
         "relic_new": _relic_new,
+        "relic_mint": _relic_mint,
         "dress": _dress,
         "status": _status,
         "silence": _silence,

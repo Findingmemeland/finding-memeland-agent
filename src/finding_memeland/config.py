@@ -117,6 +117,8 @@ class Settings(BaseSettings):
     # Mint wallet refs (e.g. "RW01,RW02"). Only needed to MINT.
     # The KEYS live in Doppler as {REF}_ADDR / {REF}_PK — never here.
     relic_wallet_refs: str = Field(default="")
+    # Pinata JWT — pins relic artwork to IPFS. Only needed to MINT.
+    pinata_jwt: str = Field(default="")
     # Findability gate (launch only). Without a key the gate refuses, which is
     # the correct behaviour: never launch a hunt without confirming the relic
     # can actually be found.

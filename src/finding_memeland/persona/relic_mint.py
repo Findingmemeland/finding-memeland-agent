@@ -103,6 +103,48 @@ class Minter(Protocol):
     ) -> MintResult: ...
 
 
+def load_contract_artifact(path: str | None = None) -> tuple[list, str]:
+    """(abi, bytecode) for RelicNFT.sol, read from a compiled artifact JSON.
+
+    Kept as a data file rather than compiled at runtime: solc + OpenZeppelin is a
+    heavy toolchain to carry into a Railway container for a contract that never
+    changes, and — more importantly — the bytecode that mints real relics should
+    be the SAME artifact that was compiled, deployed and verified by hand. A
+    build step that silently produces different bytecode is exactly the kind of
+    drift you find out about on-chain.
+
+    Expected shape (what Remix's "Compilation Details" gives):
+        {"abi": [...], "bytecode": "0x60806040..."}
+    Also accepts Remix's raw export where bytecode sits under
+    `data.bytecode.object` or `evm.bytecode.object`.
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(path) if path else Path(__file__).resolve().parents[3] / "contracts" / "RelicNFT.json"
+    if not p.exists():
+        raise RuntimeError(
+            f"contract artifact not found at {p} — export the ABI + bytecode from "
+            "the SAME Remix compilation you deployed by hand, so the agent mints "
+            "with bytecode that is known to work."
+        )
+    data = json.loads(p.read_text())
+
+    abi = data.get("abi")
+    bytecode = data.get("bytecode")
+    if isinstance(bytecode, dict):                      # Remix nests it
+        bytecode = bytecode.get("object")
+    if bytecode is None:
+        for branch in ("data", "evm"):
+            node = (data.get(branch) or {}).get("bytecode") or {}
+            bytecode = node.get("object") or bytecode
+    if not abi or not bytecode:
+        raise RuntimeError(f"artifact at {p} has no usable abi/bytecode")
+    if not str(bytecode).startswith("0x"):
+        bytecode = "0x" + str(bytecode)
+    return abi, str(bytecode)
+
+
 def create_relic(
     *,
     pool,              # relic_pool.RelicPool
