@@ -366,3 +366,67 @@ def test_concrete_anchor_is_an_available_angle():
     assert len(anchor) == 1
     assert "CERTAIN" in anchor[0]          # hallucinated anchors are hunt-killers
     assert "English" in anchor[0]          # must be reachable by the audience
+
+
+def test_anchor_angle_never_reaches_the_direct_path():
+    """An artefact nobody checked is worse than a clue that is merely hard: a
+    wrong anchor makes players eliminate the RIGHT answer. So anchors only ever
+    reach players through the verified trail path."""
+    from finding_memeland.content.relic_clues import (
+        angle_for_unverifiable, is_anchor_angle,
+    )
+    for name in ("pickled Ptolemy", "goblin accountant", "Uncle Pump", "clone brunch"):
+        ident = new_identity(name=name, description="d", image_prompt="p",
+                             solution_terms=["x"])
+        ctx = RelicClueContext.from_identity(ident)
+        for i in range(1, PUZZLE_CLUES + 1):
+            assert not is_anchor_angle(angle_for_unverifiable(i, ctx))
+            assert "CONCRETE ANCHOR" not in build_relic_user_message(
+                ctx, i, [], allow_anchor=False
+            )
+
+
+def test_anchor_substitute_never_collides_with_another_piece():
+    """Regression: a word's pieces take CONSECUTIVE angles, so substituting the
+    anchor with the NEXT one hands this piece the next piece's angle and rebuilds
+    the 2026-08-22 failure (nine clues, three angles). Measured: the naive +1
+    shift collided on 7 of 10 sample names."""
+    from collections import Counter
+
+    from finding_memeland.content.relic_clues import angle_for_unverifiable
+    for name in ("pickled Ptolemy", "goblin accountant", "Uncle Pump",
+                 "leaky astronaut", "soggy firewall", "burnt oracle"):
+        for _ in range(40):
+            ident = new_identity(name=name, description="d", image_prompt="p",
+                                 solution_terms=["x"])
+            ctx = RelicClueContext.from_identity(ident)
+            per_word = {}
+            for i in range(1, PUZZLE_CLUES + 1):
+                facet, _ = relic_slot_for(i, ctx)
+                angle = angle_for_unverifiable(i, ctx)
+                if facet != "image" and angle:
+                    per_word.setdefault(facet, []).append(angle)
+            for facet, angles in per_word.items():
+                assert len(angles) == len(set(angles)), (name, facet, Counter(angles))
+
+
+def test_trail_policy_binds_trails_to_the_anchor_angle():
+    """A trail IS the concrete-anchor angle: both mean 'point at something real'.
+    Binding them makes the count self-limiting (~1-2 per hunt) instead of needing
+    a separate quota."""
+    from finding_memeland.content.relic_trail import TrailPolicy
+    policy = TrailPolicy()
+    assert policy.allows(1, "CONCRETE ANCHOR: name ONE specific...")
+    assert not policy.allows(1, "SOUND/RHYTHM: how the word sounds...")
+    assert not policy.allows(1, None)
+    # The reveal phase must hand the word over — never send players researching.
+    assert not policy.allows(PUZZLE_CLUES + 1, "CONCRETE ANCHOR: ...")
+
+
+def test_engine_without_a_verifier_stays_on_the_direct_path():
+    """Fail-safe: no verifier wired == no anchors published, silently."""
+    engine = RelicClueEngine(object(), "m")
+    ident = new_identity(name="Uncle Pump", description="d", image_prompt="p",
+                         solution_terms=["x"])
+    ctx = RelicClueContext.from_identity(ident)
+    assert engine._try_trail(ctx, 1, []) is None

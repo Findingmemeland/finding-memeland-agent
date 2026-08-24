@@ -260,6 +260,42 @@ def angle_for(clue_index: int, ctx: RelicClueContext) -> str | None:
     return PUZZLE_ANGLES[(seen + offset) % len(PUZZLE_ANGLES)]
 
 
+def is_anchor_angle(angle: str | None) -> bool:
+    return bool(angle) and angle.startswith("CONCRETE ANCHOR")
+
+
+def angle_for_unverifiable(clue_index: int, ctx: RelicClueContext) -> str | None:
+    """The angle to use when the CONCRETE ANCHOR one cannot be verified.
+
+    An anchor nobody checked is the worst clue we can publish: a wrong artefact
+    makes players eliminate the RIGHT answer after hours of work, which is far
+    worse than a clue that is merely hard. So when no verifier is wired — or the
+    model could not produce an artefact that checks out — we do NOT fall back to
+    'write the anchor clue anyway'; we shift to the next angle that needs no
+    external fact."""
+    angle = angle_for(clue_index, ctx)
+    if not is_anchor_angle(angle):
+        return angle
+    facet, _ = relic_slot_for(clue_index, ctx)
+    if facet == "image" or clue_index > PUZZLE_CLUES:
+        return None
+    # A word's pieces take CONSECUTIVE angles: offset+0, offset+1, ... offset+m-1.
+    # So the substitute must come from BEYOND that run — stepping by +1 would hand
+    # this piece the next piece's angle and rebuild the very failure measured on
+    # 2026-08-22 (nine clues, three angles). Verified: the naive +1 shift collided
+    # on 7 of 10 sample names.
+    n = len(PUZZLE_ANGLES)
+    offset = getattr(ctx, "angle_offset", 0)
+    total = sum(
+        1 for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, ctx)[0] == facet
+    )
+    for step in range(total, n):
+        candidate = PUZZLE_ANGLES[(offset + step) % n]
+        if not is_anchor_angle(candidate):
+            return candidate
+    return None
+
+
 def spent_angles(clue_index: int, ctx: RelicClueContext) -> list[str]:
     """The angles already used on THIS word — listed in the prompt as forbidden."""
     facet, _ = relic_slot_for(clue_index, ctx)
@@ -381,10 +417,18 @@ clues in…" or any jab. Never call a clue "final" or "last": the ramp may conti
 Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
 
 
-def build_relic_user_message(ctx: RelicClueContext, clue_index: int, prior_clues: list[str]) -> str:
+def build_relic_user_message(
+    ctx: RelicClueContext,
+    clue_index: int,
+    prior_clues: list[str],
+    *,
+    allow_anchor: bool = True,
+) -> str:
+    """`allow_anchor=False` swaps the CONCRETE ANCHOR angle for one that needs no
+    external fact — used whenever the anchor cannot be verified."""
     prior = "\n".join(f"- {c}" for c in prior_clues) if prior_clues else "(none — this is the first clue)"
     vector, obliqueness = relic_slot_for(clue_index, ctx)
-    angle = angle_for(clue_index, ctx)
+    angle = angle_for(clue_index, ctx) if allow_anchor else angle_for_unverifiable(clue_index, ctx)
     spent = spent_angles(clue_index, ctx)
     return (
         "The relic's REAL attributes (point clues AT these; never write them verbatim):\n"
@@ -475,7 +519,7 @@ class RelicClueEngine(ClueEngine):
             from .guardrails import check_clue
             from .relic_trail import generate_trail_clue
 
-            if not self._trail_policy.allows(clue_index):
+            if not self._trail_policy.allows(clue_index, angle_for(clue_index, persona)):
                 return None
             draft = generate_trail_clue(
                 self, persona, clue_index, prior_clues,
@@ -501,7 +545,12 @@ class RelicClueEngine(ClueEngine):
         system = RELIC_SYSTEM_PROMPT.format(
             index=clue_index, obliqueness=obliqueness, hard_floor=HARD_CLUE_FLOOR
         )
-        user = build_relic_user_message(persona, clue_index, prior_clues)
+        # The DIRECT path never writes an anchor clue: an artefact nobody checked
+        # is the one failure worse than a clue that is too hard. Anchors only
+        # reach players through the verified trail path.
+        user = build_relic_user_message(
+            persona, clue_index, prior_clues, allow_anchor=False
+        )
         if feedback:
             user += "\n\n" + feedback
         resp = self._client.messages.create(

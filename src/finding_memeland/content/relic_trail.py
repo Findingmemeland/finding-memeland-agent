@@ -37,11 +37,23 @@ class TrailPolicy:
     """When trails are allowed. Defaults are deliberately conservative."""
 
     enabled: bool = True
-    max_clue_index: int = 3      # trails only in the opening clues; 4+ always direct
+    # The whole PUZZLE phase (clues 1..7). From clue 8 the reveal phase must hand
+    # the word over, so a research trail there would slow the ending instead of
+    # producing it. Kept as a plain int to avoid importing relic_clues here.
+    max_clue_index: int = 7
     max_attempts: int = 2        # regeneration tries before falling back to direct
+    # A trail IS the CONCRETE ANCHOR angle (2026-08-23): both mean "point at
+    # something real instead of describing the word". Binding them makes the count
+    # self-limiting — the angle rotation gives a hunt at most one anchor per name
+    # word, which lands on Pedro's "2-3 trail clues out of 9, never all of them".
+    only_on_anchor_angle: bool = True
 
-    def allows(self, clue_index: int) -> bool:
-        return self.enabled and clue_index <= self.max_clue_index
+    def allows(self, clue_index: int, angle: str | None = None) -> bool:
+        if not (self.enabled and clue_index <= self.max_clue_index):
+            return False
+        if self.only_on_anchor_angle:
+            return bool(angle) and angle.startswith("CONCRETE ANCHOR")
+        return True
 
 
 @dataclass
@@ -164,11 +176,13 @@ def generate_trail_clue(
     trails aren't allowed here, when generation/parsing fails, or when
     verification fails within the attempt budget — the caller then falls back to
     an ordinary direct clue."""
-    if not policy.allows(clue_index):
-        return None
-
-    from .relic_clues import RELIC_SYSTEM_PROMPT, build_relic_user_message, relic_slot_for
+    from .relic_clues import (
+        RELIC_SYSTEM_PROMPT, angle_for, build_relic_user_message, relic_slot_for,
+    )
     from .clue_engine import HARD_CLUE_FLOOR
+
+    if not policy.allows(clue_index, angle_for(clue_index, ctx)):
+        return None
 
     obliqueness = relic_slot_for(clue_index, ctx)[1]
     system = RELIC_SYSTEM_PROMPT.format(
