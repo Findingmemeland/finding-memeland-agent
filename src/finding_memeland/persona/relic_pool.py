@@ -240,6 +240,18 @@ class RelicPool:
                 out.append(line)
         return out
 
+    def relic_count(self) -> int:
+        """How many relics exist, in any state. Feeds the generator's `sequence`,
+        which ROTATES the name domain — so seven consecutive relics visit seven
+        different worlds instead of clustering. Unreadable pool == 0, which only
+        costs rotation, never a blocked creation."""
+        try:
+            return len(list(self._repo.all_relics()))
+        except AttributeError:
+            return len(list(self._repo.minted_relics()))
+        except Exception:  # noqa: BLE001
+            return 0
+
     def spent_words(self, limit: int = 200) -> set[str]:
         """Every word ALREADY USED by a relic name, for the generator's
         `avoid_words`.

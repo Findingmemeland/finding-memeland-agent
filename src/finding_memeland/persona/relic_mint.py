@@ -103,6 +103,46 @@ class Minter(Protocol):
     ) -> MintResult: ...
 
 
+def create_relic(
+    *,
+    pool,              # relic_pool.RelicPool
+    generator,         # relic_generator.RelicGenerator
+    register: str | None = None,
+    relic_id: str | None = None,
+) -> str:
+    """Invent ONE relic identity and store it ENCRYPTED in the pool. Returns its id.
+
+    Deliberately separate from `mint_relic`: creating is cheap and offline, minting
+    costs gas and can fail on its own. Keeping them apart means a failed mint never
+    burns an identity, and the pool can be filled long before anything is launched
+    — which matters, because a relic's anonymity comes from having sat in Base's
+    normal traffic for weeks.
+
+    Everything the generator needs to avoid repeating itself is read from the pool
+    here, so the caller cannot forget it:
+      - `sequence`     rotates the name domain (7 relics => 7 different worlds)
+      - `avoid_recent` themes, so the pool stops reinventing the same character
+      - `avoid_words`  hard rule: a word spent by one relic is never reused
+
+    The identity is never returned or logged — only the id. Blind mode holds."""
+    import uuid
+
+    from .relic import Relic
+
+    generated = generator.generate(
+        register=register,
+        sequence=pool.relic_count(),
+        avoid_recent=pool.avoid_recent(),
+        avoid_words=pool.spent_words(),
+    )
+    # The id is minted HERE, not left to the database: `pool.add` returns nothing,
+    # so a server-generated id would be written and immediately lost — and the
+    # caller needs it to mint. A uuid4 is as unique as the column's own default.
+    relic = Relic(id=relic_id or str(uuid.uuid4()))
+    pool.add(relic, generated.to_identity())
+    return relic.id
+
+
 def mint_relic(
     *,
     relic_id: str,

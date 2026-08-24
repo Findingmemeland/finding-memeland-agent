@@ -247,3 +247,92 @@ def test_opensea_adapter_is_schema_agnostic_and_fail_closed():
     no_key = OpenSeaFindability(http_get=lambda u, h: calls.append(1), api_key="")
     assert not no_key.is_indexed_by_name("x")
     assert not calls
+
+
+# --------------------------------------------------------------------------- #
+# create_relic — the missing step: invent an identity and store it blind        #
+# --------------------------------------------------------------------------- #
+
+
+class _Rev:
+    """Visible, reversible transform — lets a test assert the stored blob is NOT
+    the plaintext while still round-tripping. NullPoolCipher stores in the clear,
+    so it cannot prove the blind property."""
+
+    def encrypt(self, s):
+        return "ENC::" + s[::-1]
+
+    def decrypt(self, t):
+        assert t.startswith("ENC::")
+        return t[len("ENC::"):][::-1]
+
+
+class _FakeGen:
+    """Records what create_relic passed in, so the test can prove the
+    anti-repetition inputs are read from the pool and not left to the caller."""
+
+    def __init__(self, names):
+        self._names = list(names)
+        self.calls = []
+
+    def generate(self, *, register=None, sequence=None, avoid_recent=None, avoid_words=None):
+        self.calls.append({
+            "register": register, "sequence": sequence,
+            "avoid_recent": list(avoid_recent or []), "avoid_words": set(avoid_words or ()),
+        })
+        name = self._names.pop(0)
+
+        class _G:
+            def to_identity(_self):
+                return new_identity(name=name, description="lore",
+                                    image_prompt="p", solution_terms=["zzz"])
+        return _G()
+
+
+def test_create_relic_stores_encrypted_and_returns_a_usable_id():
+    from finding_memeland.persona.relic_mint import create_relic
+
+    repo = FakeRelicRepo()
+    pool = RelicPool(repo, _Rev())
+    gen = _FakeGen(["goblin accountant"])
+
+    relic_id = create_relic(pool=pool, generator=gen)
+
+    assert relic_id                                   # the DB never gets to invent it
+    assert pool.reveal_identity(relic_id).name == "goblin accountant"
+    assert "goblin accountant" not in repo.get_identity_ciphertext(relic_id)
+
+
+def test_create_relic_feeds_the_generator_from_the_pool():
+    """Rotation, themes and spent words are read HERE so a caller cannot forget
+    them — that forgetting is what produced the monoculture and the repeated
+    vocabulary in the 2026-08-23 samples."""
+    from finding_memeland.persona.relic_mint import create_relic
+
+    pool = RelicPool(FakeRelicRepo(), _Rev())
+    gen = _FakeGen(["goblin accountant", "pickled Ptolemy", "leaky astronaut"])
+
+    ids = [create_relic(pool=pool, generator=gen) for _ in range(3)]
+
+    assert len(set(ids)) == 3
+    assert [c["sequence"] for c in gen.calls] == [0, 1, 2]      # domain rotation
+    assert gen.calls[0]["avoid_words"] == set()
+    assert {"goblin", "accountant"} <= gen.calls[1]["avoid_words"]
+    assert {"pickled", "ptolemy"} <= gen.calls[2]["avoid_words"]
+    assert gen.calls[2]["avoid_recent"], "themes must be passed too"
+
+
+def test_create_relic_is_independent_of_minting():
+    """Creating is offline and cheap; minting costs gas and can fail. A relic
+    exists in the pool before any chain call, so a failed mint never burns an
+    identity."""
+    from finding_memeland.persona.relic_mint import create_relic
+
+    repo = FakeRelicRepo()
+    pool = RelicPool(repo, _Rev())
+    relic_id = create_relic(pool=pool, generator=_FakeGen(["clone brunch"]))
+
+    stored = repo.get_relic(relic_id)
+    assert stored is not None
+    assert stored.contract is None and stored.token_id is None
+    assert not stored.is_launchable()          # not minted, not committed
