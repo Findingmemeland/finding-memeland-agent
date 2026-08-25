@@ -166,6 +166,61 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # Printed in full: the message lists every path that was tried, and
             # this is the only place that detail reaches the logs.
             print(f"[relic] minting disabled — {e}")
+    # --- Relic: launching (block 3) ---------------------------------------
+    # Only assembled with relic_launch on. The findability gate is FAIL-CLOSED
+    # by design: no key, no launch. That is the correct failure — a relic that
+    # cannot be found makes an unwinnable hunt, which is worse than no hunt.
+    relic_findability = relic_findability_secondary = None
+    relic_clue_engine = trophy_port = None
+    if s.relic_launch and relic_pool is not None:
+        from .chain.relic_trophy import Web3NFTTransfer
+        from .content.relic_clues import RelicClueEngine
+        from .persona.relic_findability import BaseScanFindability, OpenSeaFindability
+
+        def _http_get(url: str, headers: dict | None = None) -> str:
+            import urllib.request
+
+            req = urllib.request.Request(url, headers={
+                # Marketplace APIs sit behind Cloudflare, which answers the
+                # default urllib signature with a bare 403 (measured twice on
+                # 2026-08-24/25). A browser UA is the whole fix.
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                ),
+                **(headers or {}),
+            })
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return r.read().decode("utf-8", "ignore")
+
+        relic_findability = OpenSeaFindability(
+            http_get=_http_get, api_key=s.opensea_api_key
+        )
+        # BaseScan does NOT index NFT names (measured against a 17h-old control),
+        # so it can only ever confirm the CONTRACT exists. Informational, never
+        # a gate.
+        relic_findability_secondary = (
+            BaseScanFindability(http_get=lambda u: _http_get(u)),
+        )
+
+        trail_verifier = trail_policy = None
+        if s.relic_trails_enabled:
+            from .content.relic_trail import (
+                AnthropicWebSearch, TrailPolicy, WebSearchTrailVerifier,
+            )
+
+            trail_verifier = WebSearchTrailVerifier(
+                AnthropicWebSearch(anthropic, s.anthropic_model)
+            )
+            trail_policy = TrailPolicy(enabled=True)
+
+        relic_clue_engine = RelicClueEngine(
+            anthropic, s.anthropic_model,
+            trail_verifier=trail_verifier, trail_policy=trail_policy,
+        )
+        if relic_wallets is not None:
+            trophy_port = Web3NFTTransfer(web3=web3, wallets=relic_wallets)
+
     x = XClient(
         api_key=s.x_api_key, api_secret=s.x_api_secret, bearer_token=s.x_bearer_token,
         main_access_token=s.x_main_access_token, main_access_secret=s.x_main_access_secret,
@@ -219,6 +274,14 @@ def build_agent(settings: Settings | None = None) -> Agent:
         clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
         control=control,
         heartbeat=heartbeat,
+        # Relic mode. All None with relic_launch=false, which is exactly today's
+        # persona behaviour — one env var reverts, no deploy.
+        relic_launch=s.relic_launch,
+        relic_pool=relic_pool,
+        relic_findability=relic_findability,
+        relic_findability_secondary=relic_findability_secondary or (),
+        relic_clue_engine=relic_clue_engine,
+        trophy_port=trophy_port,
         # Fase 3 (2026-08-13): the prep window is RETIRED from production —
         # pre-dressed personas arrive indexed with their anchor posts already
         # published at /dress time (the PersonaPostEngine now lives in the
@@ -283,6 +346,35 @@ def build_agent(settings: Settings | None = None) -> Agent:
         refusal = active_hunt_guard(repo)
         if refusal:
             return refusal
+
+        # Relic mode branches BEFORE the persona pool is read: there are no
+        # dressed personas in this world, so the checks below would refuse a
+        # perfectly launchable hunt.
+        if s.relic_launch:
+            if relic_pool is None or relic_findability is None:
+                return (
+                    "⛔ relic_launch está ON mas falta configuração "
+                    "(relic_pool_key / opensea_api_key). Nada lançado."
+                )
+            from .telegram.relic_launch import stage_relic_launch
+
+            try:
+                summary, prompt, relic, _identity = stage_relic_launch(
+                    pool=relic_pool,
+                    prize_fmml=prize_fmml,
+                    ladder_exempt=False,
+                    canonical_findability=relic_findability,
+                    secondary_findability=relic_findability_secondary or (),
+                    hunt_number=repo.next_hunt_number(),
+                )
+            except Exception as e:  # noqa: BLE001 — a refusal is the safe outcome
+                return f"⛔ launch relic RECUSADO: {e}"
+            # The confirmation is bound to the RELIC ID, not a handle — the
+            # operator must never be shown the name, so there is nothing else
+            # to bind to. `_identity` stays in memory and goes no further.
+            launch_confirm.stage(prize_fmml, summary.relic_id)
+            return prompt
+
         try:
             pool = repo.dressed_personas()
         except Exception as e:  # noqa: BLE001
