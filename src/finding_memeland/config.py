@@ -153,8 +153,27 @@ class Settings(BaseSettings):
         if self.relic_launch:
             if not self.relic_pool_key:
                 missing.append("relic_pool_key (relic_launch is on)")
-            if not self.opensea_api_key:
-                missing.append("opensea_api_key (the findability gate needs it)")
+            # AT LEAST ONE marketplace key, not a specific one.
+            #
+            # This used to demand `opensea_api_key` by name, which contradicted
+            # the composition in main.py: that builds a two-surface QUORUM when
+            # both keys exist and falls back to the single surface that does.
+            # So a Rarible-only setup staged a launch fine and then died HERE,
+            # inside run_hunt — i.e. AFTER the operator confirmed, which is the
+            # worst possible moment.
+            #
+            # It would also have detonated on its own schedule: OpenSea's free
+            # key expires after 7 days, so the same crash was waiting for the
+            # renewal to be forgotten once.
+            #
+            # A single verified surface is a weaker gate than two, and main.py
+            # says so. But weaker-and-honest beats a launch that passes staging
+            # and fails on confirm.
+            if not (self.opensea_api_key or self.rarible_api_key):
+                missing.append(
+                    "opensea_api_key or rarible_api_key "
+                    "(the findability gate needs at least one marketplace)"
+                )
         if missing:
             raise RuntimeError(f"Cannot start hunt — missing config: {', '.join(missing)}")
 

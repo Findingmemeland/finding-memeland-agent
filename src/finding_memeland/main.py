@@ -383,7 +383,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             if relic_pool is None or relic_findability is None:
                 return (
                     "⛔ relic_launch está ON mas falta configuração "
-                    "(relic_pool_key / opensea_api_key). Nada lançado."
+                    "(relic_pool_key / uma chave de marketplace). Nada lançado."
                 )
             from .telegram.relic_launch import stage_relic_launch
 
