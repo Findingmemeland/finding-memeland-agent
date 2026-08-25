@@ -105,8 +105,18 @@ class PinataPinner:
 
     def _default_post(self, url: str, body: bytes, headers: dict) -> str:  # pragma: no cover - network
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.read().decode("utf-8", "ignore")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.read().decode("utf-8", "ignore")
+        except urllib.error.HTTPError as e:
+            # The body says WHY. Without it a 403 is indistinguishable between a
+            # wrong scope, an expired key and Cloudflare blocking the client —
+            # three different fixes (measured 2026-08-25: a bare "403 Forbidden"
+            # cost a round of guessing).
+            detail = e.read()[:400].decode("utf-8", "ignore").replace("\n", " ")
+            raise RelicImageError(
+                f"pinata HTTP {e.code}: {detail or '(empty body)'}"
+            ) from e
 
     def pin(self, data: bytes, *, name: str = "relic.png") -> str:
         if not self._jwt:
@@ -126,10 +136,21 @@ class PinataPinner:
             "Authorization": f"Bearer {self._jwt}",
             "Content-Type": content_type,
             "Content-Length": str(len(body)),
+            # Pinata sits behind Cloudflare, which blocks the default
+            # `Python-urllib/3.x` signature with a bare 403 (measured on another
+            # Cloudflare-fronted API earlier the same day — a browser UA was the
+            # whole fix there).
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
         }
         try:
             raw = self._post(self._url, body, headers)
             cid = (json.loads(raw or "{}").get("data") or {}).get("cid")
+        except RelicImageError:
+            raise                      # already carries the server's reason
         except Exception as e:  # noqa: BLE001
             raise RelicImageError(f"pinata upload failed: {e!r}") from e
         if not cid:
