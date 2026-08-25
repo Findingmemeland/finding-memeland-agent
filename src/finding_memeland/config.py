@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     # the correct behaviour: never launch a hunt without confirming the relic
     # can actually be found.
     opensea_api_key: str = Field(default="")
+    rarible_api_key: str = Field(default="")
     # Trail clues. With no verifier wired they fall back to direct clues,
     # silently — an unverified anchor is worse than a boring clue.
     relic_trails_enabled: bool = Field(default=False)

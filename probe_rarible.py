@@ -21,6 +21,7 @@ import json
 import ssl
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 # O Python do macOS não traz cadeia de certificados utilizável, e o urllib rebenta
 # com CERTIFICATE_VERIFY_FAILED. O certifi já está no venv (vem com o SDK), por
@@ -68,7 +69,22 @@ BROWSER_HEADERS = {
 import os  # noqa: E402
 import sys  # noqa: E402
 
-API_KEY = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("RARIBLE_API_KEY", "")).strip()
+def _from_env_file(name: str) -> str:
+    """Ler o .env directamente: o Settings não tem campo para esta chave (ainda
+    não é de produção) e o os.environ só a teria se fosse exportada à mão."""
+    try:
+        for line in Path(__file__).with_name(".env").read_text().splitlines():
+            if line.strip().startswith(f"{name}="):
+                return line.split("=", 1)[1].strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+API_KEY = (
+    sys.argv[1] if len(sys.argv) > 1
+    else os.environ.get("RARIBLE_API_KEY") or _from_env_file("RARIBLE_API_KEY")
+).strip()
 # O nome do header não está na doc que li; testamos os dois formatos usuais e
 # ficamos com o que responder 200. Medir, não adivinhar.
 KEY_HEADERS = {

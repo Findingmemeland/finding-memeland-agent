@@ -166,6 +166,64 @@ class OpenSeaFindability:
         return _contains_value(payload, needle)
 
 
+class RaribleFindability:
+    """Name search via Rarible's items/search endpoint.
+
+    Every detail here was MEASURED against a relic known to be indexed
+    (2026-08-25), because the docs show the endpoint but not the filter:
+
+      · header is `X-API-KEY` — `Authorization: Bearer` returns 403
+      · the text filter is `fullText`, not `text`: `text` returned 20 unrelated
+        items and missed the target
+      · the API rate-limits with 429, so a single burst can refuse a launch that
+        should have passed — hence the retry below
+
+    `http_post(url, body: bytes, headers: dict) -> str` is injected so tests run
+    offline. Fail-closed like every other surface: unreachable == not findable.
+    """
+
+    name = "rarible"
+
+    def __init__(self, *, http_post, api_key: str = "",
+                 base_url: str = "https://api.rarible.org/v0.1", chain: str = "BASE",
+                 retries: int = 2, sleep_s: float = 2.0):
+        self._post = http_post
+        self._key = api_key
+        self._base = base_url.rstrip("/")
+        self._chain = chain
+        self._retries = retries
+        self._sleep = sleep_s
+
+    def is_indexed_by_name(self, name: str, *, contract: str | None = None) -> bool:
+        import json as _json
+        import time
+
+        if not self._key:
+            return False
+        body = _json.dumps({
+            "size": 20,
+            "filter": {"fullText": {"text": name}, "blockchains": [self._chain]},
+        }).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-KEY": self._key,
+        }
+        needle = (contract or name).lower()
+        for attempt in range(self._retries + 1):
+            try:
+                raw = self._post(f"{self._base}/items/search", body, headers)
+                return _contains_value(_json.loads(raw or "{}"), needle)
+            except Exception as e:  # noqa: BLE001
+                # A 429 is temporary and must not be read as "not findable" —
+                # that would refuse a launch for a relic that IS indexed.
+                if "429" in str(e) and attempt < self._retries:
+                    time.sleep(self._sleep * (attempt + 1))
+                    continue
+                return False
+        return False
+
+
 def _contains_value(node, needle: str) -> bool:
     """Does `needle` appear as (part of) any string anywhere in the payload?
 

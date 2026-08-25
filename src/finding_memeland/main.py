@@ -175,7 +175,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
     if s.relic_launch and relic_pool is not None:
         from .chain.relic_trophy import Web3NFTTransfer
         from .content.relic_clues import RelicClueEngine
-        from .persona.relic_findability import BaseScanFindability, OpenSeaFindability
+        from .persona.relic_findability import (
+            BaseScanFindability, OpenSeaFindability, QuorumFindability,
+            RaribleFindability,
+        )
 
         def _http_get(url: str, headers: dict | None = None) -> str:
             import urllib.request
@@ -193,8 +196,34 @@ def build_agent(settings: Settings | None = None) -> Agent:
             with urllib.request.urlopen(req, timeout=25) as r:
                 return r.read().decode("utf-8", "ignore")
 
-        relic_findability = OpenSeaFindability(
-            http_get=_http_get, api_key=s.opensea_api_key
+        def _http_post(url: str, body: bytes, headers: dict) -> str:
+            import urllib.request
+
+            req = urllib.request.Request(url, data=body, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                ),
+                **headers,
+            }, method="POST")
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return r.read().decode("utf-8", "ignore")
+
+        # Quorum: two INDEPENDENT marketplaces must agree the relic is findable.
+        # One marketplace hiding a fresh 1/1 is plausible; two agreeing is
+        # evidence. Falls back to a single surface when only one key exists —
+        # weaker, but a launch gated on one verified surface still beats no gate.
+        _surfaces = [
+            c for c in (
+                OpenSeaFindability(http_get=_http_get, api_key=s.opensea_api_key)
+                if s.opensea_api_key else None,
+                RaribleFindability(http_post=_http_post, api_key=s.rarible_api_key)
+                if s.rarible_api_key else None,
+            ) if c is not None
+        ]
+        relic_findability = (
+            QuorumFindability(tuple(_surfaces), required=2) if len(_surfaces) >= 2
+            else (_surfaces[0] if _surfaces else None)
         )
         # BaseScan does NOT index NFT names (measured against a 17h-old control),
         # so it can only ever confirm the CONTRACT exists. Informational, never
