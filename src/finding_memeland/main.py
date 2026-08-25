@@ -533,6 +533,23 @@ def build_agent(settings: Settings | None = None) -> Agent:
         Free text with nothing staged is ignored (None = no reply)."""
         res = launch_confirm.resolve(text)
         if res.outcome == "confirm":
+            # Relic mode binds the prompt to a RELIC ID, not a handle. The check
+            # is the same one — never confirm one target and launch another —
+            # but against the relic pool; reading the persona pool here would
+            # always disagree (it is empty in this mode) and refuse every launch.
+            if s.relic_launch:
+                if relic_pool is None:
+                    return "⛔ relic_pool indisponível — corre /launch de novo."
+                try:
+                    relic, _identity = relic_pool.peek_launchable()
+                except Exception as e:  # noqa: BLE001
+                    return f"⚠️ pool de relics ilegível ({e!r}) — corre /launch de novo."
+                if str(relic.id) != str(res.expected_handle):
+                    return (
+                        f"⛔ o relic mais antigo mudou desde o prompt "
+                        f"(era {res.expected_handle}) — corre /launch de novo."
+                    )
+                return _do_launch(res.prize_fmml)
             # The persona shown in the prompt must still be the pool's oldest —
             # never confirm one persona and launch another.
             try:
