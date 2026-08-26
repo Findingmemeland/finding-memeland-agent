@@ -28,6 +28,12 @@ class WinnerData:
     # Holder reward split (2026-07-31): non-holder winners get pct% of the pot.
     holder: bool = True
     non_holder_pct: int = 10
+    # Hunt relic: o nome da relíquia (público a partir daqui) e o link on-chain.
+    # Com isto o reveal deixa de falar de "persona" e de "profile", que numa
+    # hunt relic é linguagem do jogo antigo publicada no post mais lido de todos
+    # (auditoria v3).
+    relic_name: str | None = None
+    relic_link: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -146,9 +152,19 @@ def winner_announcement(d: WinnerData) -> str:
         # Truth in the reveal (post-mortem P3.1): production never undresses the
         # persona (undress_on_retire=False) — saying "dormant in 1 hour" was
         # false, three lines above the block asking people to VERIFY our honesty.
-        + f"The hidden persona was @{persona} — the profile stays up as a trophy. "
-        f"It played once, and never again.\n\n"
-        f"Integrity check — recompute SHA-256 of:\n"
+        + (
+            # Hunt relic: o troféu é o próprio NFT e já mudou de dono.
+            (
+                f"The relic was {d.relic_name} — it's yours now, transferred "
+                f"onchain."
+                + (f" {d.relic_link}" if d.relic_link else "")
+                + "\nOne of a kind. There is no second one.\n\n"
+            )
+            if d.relic_name else
+            f"The hidden persona was @{persona} — the profile stays up as a "
+            f"trophy. It played once, and never again.\n\n"
+        )
+        + f"Integrity check — recompute SHA-256 of:\n"
         f"  user_id: {d.persona_user_id}\n"
         f"  claim_code: {d.claim_code}\n"
         f"  salt: {d.salt}\n"

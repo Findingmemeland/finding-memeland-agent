@@ -2080,17 +2080,36 @@ class Orchestrator:
         The persona IS undressed here (unlike a completed hunt) — leaving a live
         claim code in the bio of a dead hunt would mislead players."""
         hours = self._hunt_timeout_h
+        is_relic = getattr(hunt, "relic", None) is not None
         self._notify(f"hunt #{hunt.number} expired unclaimed after {hours}h — voiding.")
         self._transition(hunt, HuntState.VOIDED)
         try:
             self._publisher.post(
-                f"Hunt #{hunt.number} ends unclaimed. The persona keeps its "
-                "secret and the prize returns to the treasury. Sharpen up — the "
-                "next hunt won't wait for you. 🏴"
+                # "The persona keeps its secret" é linguagem do jogo antigo: numa
+                # hunt relic não há persona nenhuma, e o texto seria publicado
+                # (auditoria v3).
+                (
+                    f"Hunt #{hunt.number} ends unclaimed. The relic stays hidden "
+                    "and the prize returns to the vault. Sharpen up — the next "
+                    "hunt won't wait for you. 🏴"
+                ) if is_relic else (
+                    f"Hunt #{hunt.number} ends unclaimed. The persona keeps its "
+                    "secret and the prize returns to the treasury. Sharpen up — "
+                    "the next hunt won't wait for you. 🏴"
+                )
             )
         except Exception as e:  # noqa: BLE001
             self._notify(f"void notice post failed (non-fatal): {e!r}")
         self._transition(hunt, HuntState.RETIRING)
+        if is_relic:
+            # Não há conta para despir nem linha na tabela de personas: o
+            # `mark_retired` rebentava aqui e deixava o relic `in_play` para
+            # sempre, bloqueando-o para futuras hunts (auditoria v3).
+            from ..persona.relic_integration import retire_relic
+
+            retire_relic(self, hunt)
+            self._transition(hunt, HuntState.DONE)
+            return
         try:
             self._dresser.retire(
                 access_token=hunt.persona.access_token,
@@ -2217,10 +2236,21 @@ class Orchestrator:
             salt=hunt.salt,
             holder=winner.holder,
             non_holder_pct=self._non_holder_pct,
+            # Hunt relic: o nome e o link vão DENTRO do reveal, no lugar da
+            # frase da persona. Antes eram colados no fim por
+            # `reveal_extra_line`, o que deixava o post a dizer as duas coisas —
+            # "the hidden persona was @relic:abc… — the profile stays up" E "the
+            # relic: <nome>" (auditoria v3).
+            relic_name=getattr(hunt, "relic_name", None),
+            relic_link=(
+                f"basescan.org/token/{hunt.relic.contract}?a={hunt.relic.token_id}"
+                if getattr(hunt, "relic", None) is not None
+                and getattr(hunt, "relic_name", None) else None
+            ),
         )
-        from ..persona.relic_integration import deliver_trophy, reveal_extra_line
+        from ..persona.relic_integration import deliver_trophy
 
-        text = winner_announcement(data) + reveal_extra_line(hunt)
+        text = winner_announcement(data)
         # The prize is already paid; the trophy is a bonus and never blocks.
         deliver_trophy(self, hunt, winner)
         for attempt in range(3):

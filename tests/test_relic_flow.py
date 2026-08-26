@@ -460,3 +460,40 @@ def test_launch_prompt_never_shows_the_contract_address():
     text = build_launch_prompt(_summary(contract="0xdeadbeef"))
     assert "0xdeadbeef" not in text
     assert "commitment" in text        # o que identifica o relic sem o abrir
+
+
+# --------------------------------------------------------------------------- #
+# Auditoria v3 · texto público de uma hunt relic não fala de personas          #
+# --------------------------------------------------------------------------- #
+
+
+def _winner_data(**kw):
+    from finding_memeland.content.templates import WinnerData
+
+    base = dict(
+        hunt_n=8, winner_handle="@x", time_to_win="12m",
+        prize_amount="100,000,000", tx_link="0xtx",
+        persona_handle="relic:abc12345", persona_user_id="base:0xa:1",
+        claim_code="ABCD2345", salt="s",
+    )
+    base.update(kw)
+    return WinnerData(**base)
+
+
+def test_relic_reveal_talks_about_the_relic_not_a_persona():
+    """O post mais lido da hunt dizia "The hidden persona was @relic:abc… — the
+    profile stays up as a trophy", num jogo onde não há perfil nenhum."""
+    from finding_memeland.content.templates import winner_announcement
+
+    text = winner_announcement(
+        _winner_data(relic_name="Maroon Ledger", relic_link="basescan.org/x")
+    ).lower()
+    assert "persona" not in text and "profile" not in text
+    assert "maroon ledger" in text and "there is no second one" in text
+    assert "integrity check" in text          # a prova continua lá
+
+
+def test_persona_reveal_is_untouched():
+    from finding_memeland.content.templates import winner_announcement
+
+    assert "The hidden persona was" in winner_announcement(_winner_data())

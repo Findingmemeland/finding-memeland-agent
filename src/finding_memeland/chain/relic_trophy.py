@@ -166,7 +166,15 @@ class Web3NFTTransfer:
         )
         signed = w3.eth.account.sign_transaction(tx, private_key=key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        w3.eth.wait_for_transaction_receipt(tx_hash)
+        # O status do recibo NÃO era verificado: numa reversão devolvíamos um
+        # hash com ar de sucesso e anunciávamos "troféu entregue" a um vencedor
+        # que não recebeu nada (auditoria v3). Timeout explícito pela mesma
+        # razão do mint — um RPC lento não pode pendurar o fluxo do reveal.
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        if getattr(receipt, "status", 1) != 1:
+            raise RuntimeError(
+                f"trophy transfer reverted (tx {tx_hash.hex()}) — nada transferido"
+            )
         return tx_hash.hex()
 
 
