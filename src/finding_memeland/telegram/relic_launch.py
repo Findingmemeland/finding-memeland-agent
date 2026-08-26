@@ -69,6 +69,12 @@ class RelicLaunchSummary:
     findability_ok: bool
     findability_surface: str
     hunt_number: int | str = "?"
+    # Eligibility floor (auditoria 2026-08-26, P1-7). O caminho das personas
+    # mostra isto ao operador desde o susto do Hunt #4; o do relic não mostrava
+    # nada — e é na hunt de 1B que um floor mal configurado custa mais caro.
+    # Não revelam nada sobre o relic.
+    holding_floor_fmml: int = 0
+    non_holder_prize_pct: int = 100
 
     def age_days(self, now: datetime | None = None) -> int | None:
         if not self.minted_at:
@@ -94,6 +100,16 @@ def build_launch_prompt(summary: RelicLaunchSummary, identity=None) -> str:
         if summary.findability_ok
         else f"findability: ⛔ NOT indexed on {summary.findability_surface}\n"
     )
+    floor = int(summary.holding_floor_fmml or 0)
+    if floor:
+        floor_line = (
+            f"floor: {floor:,} $FIND no claim para 100% — non-holders ganham "
+            f"{summary.non_holder_prize_pct}%.\n"
+        )
+    else:
+        floor_line = (
+            "🚨 floor ZERO — qualquer wallet ganha 100% do pote.\n"
+        )
     text = (
         f"Hunt #{summary.hunt_number}: {summary.prize_fmml:,} $FIND on a RELIC.\n"
         f"relic {summary.relic_id} (blind — the name is not shown, by design)"
@@ -101,6 +117,7 @@ def build_launch_prompt(summary: RelicLaunchSummary, identity=None) -> str:
         f"commitment: {summary.commitment[:16]}…\n"
         + (f"contract: {summary.contract}\n" if summary.contract else "")
         + find_line
+        + floor_line
         + exempt_line
         + "⚠️ The launch is INSTANT — Clue 1 goes out in seconds, no take-backs.\n"
         "Confirm? reply 'sim' or 'não' (expires in 2 min)."
@@ -118,6 +135,8 @@ def stage_relic_launch(
     canonical_findability,   # relic_findability.FindabilityCheck (BaseScan)
     secondary_findability: tuple = (),
     hunt_number: int | str = "?",
+    holding_floor_fmml: int = 0,
+    non_holder_prize_pct: int = 100,
 ):
     """Pick the oldest launchable relic, run the FAIL-CLOSED findability gate, and
     build the (identity-free) confirmation prompt.
@@ -148,6 +167,8 @@ def stage_relic_launch(
         findability_ok=report.canonical_ok,
         findability_surface=report.canonical_surface,
         hunt_number=hunt_number,
+        holding_floor_fmml=holding_floor_fmml,
+        non_holder_prize_pct=non_holder_prize_pct,
     )
     prompt = build_launch_prompt(summary, identity)  # backstop runs here
     return summary, prompt, relic, identity

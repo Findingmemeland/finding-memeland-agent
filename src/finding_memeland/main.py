@@ -354,16 +354,31 @@ def build_agent(settings: Settings | None = None) -> Agent:
     # the one protection that replaced the old 24h window of regret. Only the
     # confirmation fires _do_launch.
     launch_confirm = LaunchConfirmation()
+    # Extras da confirmação em curso. O LaunchConfirmation só transporta prize +
+    # alvo; a isenção da escada precisa de sobreviver do /launch até ao "sim"
+    # (auditoria 2026-08-26, P1-1).
+    pending_launch = {"ladder_exempt": False}
 
     def _launch(arg: str) -> str:
         if not arg:
-            return "usage: /launch <prize in $FIND>, e.g. /launch 500M or /launch 1B"
+            return (
+                "usage: /launch <prize in $FIND> [surpresa]\n"
+                "e.g. /launch 500M · /launch 1B · /launch 100M surpresa\n"
+                "'surpresa' = fora da escada do jackpot (não a sobe nem a faz reset)."
+            )
+        # 'surpresa' torna a flag ALCANÇÁVEL. Existia em Relic/hunts, tinha
+        # filtro e testes, e nenhum caminho a ligava: `/launch` passava sempre
+        # False e a hunt-surpresa entrava na escada como uma normal.
+        parts = str(arg).split()
+        ladder_exempt = bool(parts) and parts[-1].lower() in {"surpresa", "surprise"}
+        if ladder_exempt:
+            parts = parts[:-1]
         try:
-            prize_fmml = parse_token_amount(arg)
+            prize_fmml = parse_token_amount(" ".join(parts))
         except ValueError:
             return (
                 f"'{arg}' isn't a token amount. usage: /launch <prize in $FIND> "
-                "— e.g. /launch 500M, /launch 1B, /launch 500000000"
+                "[surpresa] — e.g. /launch 500M, /launch 1B, /launch 100M surpresa"
             )
         if prize_fmml < s.min_prize_fmml:
             return (
@@ -392,10 +407,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 summary, prompt, relic, _identity = stage_relic_launch(
                     pool=relic_pool,
                     prize_fmml=prize_fmml,
-                    ladder_exempt=False,
+                    ladder_exempt=ladder_exempt,
                     canonical_findability=relic_findability,
                     secondary_findability=relic_findability_secondary or (),
                     hunt_number=repo.next_hunt_number(),
+                    holding_floor_fmml=int(getattr(s, "holding_floor_fmml", 0) or 0),
+                    non_holder_prize_pct=int(s.non_holder_prize_pct),
                 )
             except FindabilityRefused as e:
                 # Its own message is written to be leak-free (see
@@ -420,6 +437,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # The confirmation is bound to the RELIC ID, not a handle — the
             # operator must never be shown the name, so there is nothing else
             # to bind to. `_identity` stays in memory and goes no further.
+            pending_launch["ladder_exempt"] = ladder_exempt
             launch_confirm.stage(prize_fmml, summary.relic_id)
             return prompt
 
@@ -471,6 +489,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             )
         else:
             floor_line = "🚨 floor ZERO — qualquer wallet ganha 100% do pote."
+        pending_launch["ladder_exempt"] = ladder_exempt
         launch_confirm.stage(prize_fmml, str(nxt.get("handle") or ""))
         skipped_line = (
             "(saltadas, ainda em warmup: "
@@ -486,8 +505,13 @@ def build_agent(settings: Settings | None = None) -> Agent:
             "Confirmar? responde 'sim' ou 'não' (expira em 2 min)."
         )
 
-    def _do_launch(prize_fmml: int) -> str:
-        """The confirmed launch — guards + preflight + the hunt thread."""
+    def _do_launch(prize_fmml: int, *, ladder_exempt: bool = False,
+                   expected_relic_id: str | None = None) -> str:
+        """The confirmed launch — guards + preflight + the hunt thread.
+
+        `expected_relic_id` viaja até ao `prepare_relic_hunt`, que recusa se o
+        pool tiver mudado desde o prompt (auditoria P1-2). A verificação em
+        `_on_text` continua a existir: esta fecha a janela entre as duas."""
         with hunt_lock:
             if hunt_flag["active"]:
                 return "⛔ a hunt is already LIVE — one at a time. /status for details."
@@ -525,7 +549,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # but if anything DOES escape (bug, unrecoverable failure), the
             # operator must hear about it on Telegram — never a silent death.
             try:
-                orchestrator.run_hunt(prize_fmml=prize_fmml)
+                orchestrator.run_hunt(
+                    prize_fmml=prize_fmml,
+                    ladder_exempt=ladder_exempt,
+                    expected_relic_id=expected_relic_id,
+                )
             except Exception as e:  # noqa: BLE001
                 import traceback
 
@@ -568,7 +596,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
                         f"⛔ o relic mais antigo mudou desde o prompt "
                         f"(era {res.expected_handle}) — corre /launch de novo."
                     )
-                return _do_launch(res.prize_fmml)
+                return _do_launch(
+                    res.prize_fmml,
+                    ladder_exempt=bool(pending_launch["ladder_exempt"]),
+                    expected_relic_id=str(relic.id),
+                )
             # The persona shown in the prompt must still be the pool's oldest —
             # never confirm one persona and launch another.
             try:
@@ -584,7 +616,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     f"⛔ a pool mudou desde o prompt (era {res.expected_handle}, "
                     f"agora {current or 'vazia'}) — corre /launch de novo."
                 )
-            return _do_launch(res.prize_fmml)
+            return _do_launch(
+                res.prize_fmml, ladder_exempt=bool(pending_launch["ladder_exempt"])
+            )
         if res.outcome == "cancel":
             return "launch cancelado. Nada foi publicado."
         if res.outcome == "expired":

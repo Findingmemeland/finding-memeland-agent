@@ -194,6 +194,29 @@ class RelicPool:
         relic.state = RelicState.MINTED
         self._repo.set_relic(relic)
 
+    def reserve_wallet(self, relic_id: str, wallet_ref: str) -> None:
+        """Marca a carteira como GASTA antes de se assinar seja o que for.
+
+        `used_wallet_refs()` deriva o conjunto de `mint_wallet_ref` na tabela
+        relics, seja qual for o estado — e esse campo só era escrito no
+        `mark_minted`, DEPOIS de o deploy ter corrido bem. Janela real
+        (auditoria 2026-08-26, P1-3): se a transacção é transmitida e o processo
+        morre antes de gravar (timeout do recibo, restart do Railway, erro de
+        RPC), a carteira já mintou on-chain mas continua a contar como livre — e
+        o mint seguinte usa a MESMA carteira. Duas relics com o mesmo minter é
+        exactamente a ligação que "uma carteira, uma relic" existe para impedir,
+        e não se desfaz depois.
+
+        Escrever antes fecha a janela pelo lado seguro: no pior caso perde-se
+        uma carteira sem relic, que custa cêntimos. O docstring do
+        WalletDirectory já descrevia esta reserva; faltava existir.
+        """
+        relic = self._repo.get_relic(relic_id)
+        if relic is None:
+            raise RuntimeError(f"relic {relic_id!r} not found")
+        relic.mint_wallet_ref = wallet_ref
+        self._repo.set_relic(relic)
+
     def set_state(self, relic_id: str, state: RelicState) -> None:
         relic = self._repo.get_relic(relic_id)
         if relic is None:

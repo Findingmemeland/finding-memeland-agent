@@ -384,3 +384,43 @@ def test_engine_without_a_verifier_stays_on_the_direct_path():
                          solution_terms=["x"])
     ctx = RelicClueContext.from_identity(ident)
     assert engine._try_trail(ctx, 1, []) is None
+
+
+# --------------------------------------------------------------------------- #
+# P1-4 · a rampa é a MESMA depois de um crash-resume                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_ramp_plan_is_deterministic_for_a_given_name():
+    """O plano é reconstruído no resume. Sem semente, uma hunt retomada publicava
+    a primeira metade de um plano e a segunda de outro — e 11,3% dessas misturas
+    deixavam uma palavra do nome com uma só pista de puzzle."""
+    plans = [relic_ramp_plan("Maroon Ledger") for _ in range(30)]
+    assert all(p == plans[0] for p in plans)
+    assert relic_ramp_plan("Uncle Pump") != plans[0]   # continua a variar por hunt
+
+
+# --------------------------------------------------------------------------- #
+# P1-7 · o floor de elegibilidade volta ao prompt do relic                     #
+# --------------------------------------------------------------------------- #
+
+
+def _summary(**kw):
+    base = dict(
+        relic_id="r1", commitment="c" * 64, minted_at=None, contract="0xabc",
+        prize_fmml=1_000_000_000, ladder_exempt=False, findability_ok=True,
+        findability_surface="rarible", hunt_number=9,
+    )
+    base.update(kw)
+    return RelicLaunchSummary(**base)
+
+
+def test_launch_prompt_shows_the_eligibility_floor():
+    text = build_launch_prompt(_summary(holding_floor_fmml=10_000_000,
+                                       non_holder_prize_pct=10))
+    assert "10,000,000 $FIND" in text and "10%" in text
+
+
+def test_launch_prompt_screams_when_the_floor_is_zero():
+    """Um floor a zero numa hunt de 1B é a diferença entre pagar 100M e 1B."""
+    assert "floor ZERO" in build_launch_prompt(_summary(holding_floor_fmml=0))

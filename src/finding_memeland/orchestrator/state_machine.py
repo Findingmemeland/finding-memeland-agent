@@ -299,13 +299,22 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def run_hunt(
-        self, prize_fmml: int | None = None, *, prize_usd: float | None = None
+        self, prize_fmml: int | None = None, *, prize_usd: float | None = None,
+        ladder_exempt: bool = False, expected_relic_id: str | None = None,
     ) -> PreparedHunt:
         """Token-denominated prizes (Pedro, 2026-07-31): production launches
         with an exact $FIND amount (/launch 500M) — no USD conversion, no
         FMML_USD_PRICE required. The prize_usd keyword remains for the
-        live-test harness and simulations (converted via the price feed)."""
+        live-test harness and simulations (converted via the price feed).
+
+        `ladder_exempt` and `expected_relic_id` arrive as arguments, not as
+        attributes set from outside (auditoria 2026-08-26, P1-1 e P1-2).
+        `_next_launch_ladder_exempt` era LIDO em `_prepare` e nunca ATRIBUÍDO em
+        lado nenhum, portanto a hunt-surpresa entrava na escada do jackpot como
+        uma hunt normal — a flag existia, estava testada, e era inalcançável."""
         self._settings.assert_ready_for_hunt()
+        self._next_launch_ladder_exempt = bool(ladder_exempt)
+        self._next_launch_relic_id = expected_relic_id
         if prize_fmml is None:
             usd = prize_usd if prize_usd is not None else self._settings.prize_usd_max
             prize_fmml = self._price_feed.usd_to_fmml(usd)
@@ -361,6 +370,7 @@ class Orchestrator:
             return prepare_relic_hunt(
                 self, prize_fmml, min_balance_fmml,
                 ladder_exempt=getattr(self, "_next_launch_ladder_exempt", False),
+                expected_relic_id=getattr(self, "_next_launch_relic_id", None),
             )
         if self._predressed_launch:
             return self._prepare_predressed(prize_fmml, min_balance_fmml)

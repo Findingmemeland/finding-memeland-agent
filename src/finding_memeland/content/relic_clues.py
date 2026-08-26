@@ -187,7 +187,17 @@ def relic_ramp_plan(name: str) -> list:
     # hunt unwinnable no matter how good the other clues are.
     art_at: list[int] = []
     spots = list(range(1, PUZZLE_CLUES))
-    random.shuffle(spots)
+    # SEEDED com o nome (auditoria 2026-08-26, P1-4). Era `random.shuffle`, sem
+    # semente, e o plano é reconstruído no crash-resume (relic_integration) — o
+    # que significa que uma hunt retomada publicava a primeira metade de um plano
+    # e a segunda metade de outro. Simulação de 200 mil casos: 11,3% dessas
+    # concatenações deixavam uma palavra do nome com UMA só pista de puzzle, que
+    # é exactamente a condição que MIN_PIECES_PER_WORD existe para impedir.
+    #
+    # A invariante está correcta dentro de um plano; o que faltava era o plano
+    # ser o MESMO antes e depois do resume. O `angle_offset` ao lado já era
+    # derivado do nome por esta mesma razão.
+    random.Random(name).shuffle(spots)
     for pos in spots:
         if len(art_at) >= max(0, PUZZLE_IMAGE_PIECES):
             break

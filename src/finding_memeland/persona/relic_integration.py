@@ -35,6 +35,7 @@ def prepare_relic_hunt(
     min_balance_fmml: int,
     *,
     ladder_exempt: bool = False,
+    expected_relic_id: str | None = None,
 ):
     """The relic twin of `_prepare_predressed`. Returns a PreparedHunt.
 
@@ -58,6 +59,19 @@ def prepare_relic_hunt(
         canonical_findability=orch._relic_findability,
         secondary_findability=getattr(orch, "_relic_findability_secondary", ()),
     )
+
+    # O relic confirmado TEM de ser o relic lançado (auditoria 2026-08-26, P1-2).
+    # O staging escolhe `peek_launchable()` para o prompt e ESTA função volta a
+    # chamar `peek_launchable()` depois do "sim" — entre os dois cabem dois
+    # minutos, e um mint a terminar ou uma escrita manual muda o candidato. É a
+    # repetição exacta do bug já corrigido no caminho das personas, onde o
+    # confirm podia divergir do prompt.
+    if expected_relic_id and str(relic.id) != str(expected_relic_id):
+        raise RuntimeError(
+            "o pool mudou entre a confirmação e o launch "
+            f"(confirmaste {expected_relic_id}, sairia {relic.id}) — nada lançado, "
+            "corre /launch de novo."
+        )
 
     canonical_id = relic.canonical_id()
     if not canonical_id or not relic.commitment:
@@ -165,7 +179,24 @@ def deliver_trophy(orch, hunt, winner) -> None:
 
     relic = getattr(hunt, "relic", None)
     port = getattr(orch, "_trophy_port", None)
-    if relic is None or port is None:
+    if relic is None:
+        return
+    if port is None:
+        # RUIDOSO, não silencioso (auditoria 2026-08-26, P1-5). Num deploy que
+        # lança hunts mas não minta, `_trophy_port` é None e isto devolvia sem
+        # dizer nada: o vencedor recebia o $FIND e nunca o NFT, e o operador não
+        # ficava a saber. Todo o resto deste caminho grita quando falha, e é
+        # precisamente por isso que o silêncio aqui era perigoso — parecia que
+        # tinha corrido bem.
+        try:
+            orch._notify(
+                "⚠️ TROFÉU NÃO ENTREGUE: a transferência não está configurada "
+                "neste deploy. Envia à mão — contrato "
+                f"{relic.contract} token {relic.token_id} para "
+                f"{getattr(winner, 'wallet', '?')}."
+            )
+        except Exception:  # noqa: BLE001 — o dinheiro já saiu; nunca partir o fluxo
+            pass
         return
     try:
         res = transfer_trophy(

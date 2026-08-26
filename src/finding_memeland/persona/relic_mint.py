@@ -292,6 +292,9 @@ def mint_relic(
     that contract+token exist."""
     identity = pool.reveal_identity(relic_id)          # decrypt (bot-only)
     wallet = wallets.pick_free()                       # fresh, non-linkable
+    # RESERVA a carteira antes de qualquer assinatura (auditoria 2026-08-26,
+    # P1-3). A partir daqui ela conta como gasta mesmo que tudo o resto falhe.
+    pool.reserve_wallet(relic_id, wallet.ref)
     image_uri = image_gen.generate(identity.image_prompt)
     description = compose_onchain_description(identity.description, identity.claim_code)
 
@@ -385,7 +388,22 @@ class Web3Minter:
         )
         signed = w3.eth.account.sign_transaction(tx, private_key=key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+        # timeout explícito: sem ele o default pode pendurar o worker do mint
+        # indefinidamente num RPC lento (auditoria 2026-08-26, P1-8).
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        # O status NÃO era verificado. Numa reversão, `contractAddress` vem None
+        # e o mint gravava um relic com contract=None marcado como MINTED —
+        # identidade gasta, carteira gasta, e contabilidade confusa. Melhor
+        # rebentar aqui: quem chama aborta o mint e a identidade fica no pool.
+        if getattr(receipt, "status", 1) != 1:
+            raise RuntimeError(
+                f"mint transaction reverted (tx {tx_hash.hex()}) — nada gravado"
+            )
+        if not receipt.contractAddress:
+            raise RuntimeError(
+                f"mint sem contractAddress no recibo (tx {tx_hash.hex()}) — "
+                "recibo inesperado, nada gravado"
+            )
         return receipt.contractAddress, 1, tx_hash.hex()
 
 

@@ -375,3 +375,33 @@ def test_create_relic_is_independent_of_minting():
     assert stored is not None
     assert stored.contract is None and stored.token_id is None
     assert not stored.is_launchable()          # not minted, not committed
+
+
+# --------------------------------------------------------------------------- #
+# P1-3 · a carteira é reservada ANTES de assinar                               #
+# --------------------------------------------------------------------------- #
+
+
+class _ExplodingMinter(FakeMinter):
+    """Minta on-chain e morre antes de o resultado ser gravado — o cenário exacto
+    do P1-3 (timeout do recibo, restart do Railway, erro de RPC)."""
+
+    def deploy_and_mint(self, **kw):
+        super().deploy_and_mint(**kw)
+        raise RuntimeError("processo morreu depois de transmitir a transacção")
+
+
+def test_wallet_is_reserved_before_signing_so_a_crash_never_frees_it():
+    repo = FakeRelicRepo(); pool = RelicPool(repo, NullPoolCipher())
+    ident = new_identity(name="Maroon Ledger", description="kept the books",
+                         image_prompt="p", solution_terms=["x"])
+    pool.add(Relic(id="r1"), ident)
+    wallets = WalletPool(FakeWalletDirectory(["W1", "W2"]), FakeKeyResolver())
+
+    with pytest.raises(RuntimeError):
+        mint_relic(relic_id="r1", pool=pool, wallets=wallets,
+                   image_gen=FakeImageGen(), minter=_ExplodingMinter())
+
+    # A carteira ficou gasta apesar de o mint nunca ter sido gravado. Sem a
+    # reserva, o mint seguinte reutilizava-a e ligava duas relics on-chain.
+    assert repo.get_relic("r1").mint_wallet_ref == "W1"
