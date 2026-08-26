@@ -75,10 +75,23 @@ def assert_findable_or_refuse(
         canonical_ok=canonical_ok, canonical_surface=canonical.name, secondary=sec
     )
     if not canonical_ok:
+        # NEVER interpolate the relic name (or the contract, which resolves to
+        # the name in one tokenURI call) into this message. It is raised out of
+        # stage_relic_launch and rendered straight into the operator's Telegram
+        # by main.py — a path the identity-leak backstop never sees, because the
+        # backstop guards build_launch_prompt, which a refusal never reaches
+        # (audit 2026-08-26, P0-3).
+        #
+        # "not even the game master knows" is the claim the whole announcement
+        # rests on, and a findability refusal is the MOST LIKELY failure path we
+        # have (the free OpenSea key expires every 7 days). Leaking here would
+        # burn that claim on the most routine error in the system, and there is
+        # no unseeing it. The operator does not need the name to act: the
+        # remedy is always wait-and-retry or investigate the mint.
         raise FindabilityRefused(
-            f"relic {relic_name!r} not indexed on the canonical surface "
+            f"the next relic is not indexed on the canonical surface "
             f"({canonical.name}) — launch REFUSED (fail-closed). Give it more "
-            f"time to index, or investigate the mint."
+            f"time to index, or investigate the mint. Name withheld by design."
         )
     return report
 

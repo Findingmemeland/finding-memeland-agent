@@ -12,9 +12,6 @@ from finding_memeland.content.relic_clues import (
     RelicClueEngine, angle_for, build_relic_user_message, enumerable_words_in,
     relic_ramp_plan, relic_slot_for,
 )
-from finding_memeland.claims.relic_claim import (
-    RelicClaimOutcome, name_present, verify_relic_claim,
-)
 from finding_memeland.persona.relic import (
     Relic, RelicState, new_identity, relic_canonical_id,
 )
@@ -207,53 +204,10 @@ def test_engine_inherits_guardrail_loop_and_regenerates(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def _claim_fixture():
-    ident = new_identity(name="Maroon Ledger", description="d", image_prompt="p",
-                         solution_terms=["x"])
-    cid = relic_canonical_id("base", "0xaa", "1")
-    return ident, cid, ident.commitment_for(cid)
-
-
-def test_claim_wins_with_name_and_code():
-    ident, cid, commit = _claim_fixture()
-    out = verify_relic_claim(f"found it! Maroon Ledger {ident.claim_code}",
-                             relic_name=ident.name, canonical_id=cid, salt=ident.salt,
-                             commitment=commit)
-    assert out.won and out.submitted_code == ident.claim_code
-
-
-def test_code_alone_does_not_win_and_reports_missing_name():
-    ident, cid, commit = _claim_fixture()
-    out = verify_relic_claim(ident.claim_code, relic_name=ident.name, canonical_id=cid,
-                             salt=ident.salt, commitment=commit)
-    assert not out.won and out.code_ok and out.partial == "missing_name"
-
-
-def test_name_alone_does_not_win():
-    ident, cid, commit = _claim_fixture()
-    out = verify_relic_claim("it's Maroon Ledger obviously", relic_name=ident.name,
-                             canonical_id=cid, salt=ident.salt, commitment=commit)
-    assert not out.won and out.name_ok and not out.code_ok
-
-
-def test_wrong_code_with_right_name_is_rejected():
-    ident, cid, commit = _claim_fixture()
-    out = verify_relic_claim("Maroon Ledger ZZZZ2345", relic_name=ident.name,
-                             canonical_id=cid, salt=ident.salt, commitment=commit)
-    assert not out.won and out.code_like and out.partial == "wrong_code"
-
-
-def test_claim_is_case_and_punctuation_tolerant():
-    ident, cid, commit = _claim_fixture()
-    out = verify_relic_claim(f"maroon-ledger! {ident.claim_code.lower()}",
-                             relic_name=ident.name, canonical_id=cid, salt=ident.salt,
-                             commitment=commit)
-    assert out.won
-
-
-def test_name_present_requires_all_words():
-    assert name_present("Maroon Ledger", "Maroon Ledger")
-    assert not name_present("just Maroon", "Maroon Ledger")
+# Os testes do claim nome+código viviam aqui. Foram removidos com
+# claims/relic_claim.py (auditoria 2026-08-26, P0-2): exercitavam um módulo
+# que nenhum caminho vivo chamava, e por isso davam confiança numa regra que
+# o jogo não tinha. A regra publicada — e a implementada — é só o código.
 
 
 # --------------------------------------------------------------------------- #

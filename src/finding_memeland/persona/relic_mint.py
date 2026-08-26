@@ -69,11 +69,69 @@ def generate_artist() -> str:
     # single word + short number
     return secrets.choice(_ART_FRAGS_A).capitalize() + str(secrets.randbelow(90) + 10)
 
-# The exact on-chain description format. The code line is appended to the lore so
-# a finder reads "<lore>\n\ncode: XXXXXXXX" off the relic. Kept in one place so
-# the mint and any future parser agree.
+def generate_attributes(artist: str | None = None) -> str:
+    """The FULL `attributes` JSON array for the on-chain metadata.
+
+    Was a hardcoded single `{"trait_type":"artist", ...}` inside RelicNFT.sol.
+    That made the trait shape a shared signature: even with distinct contract
+    code, a scraper filtering recent Base ERC-721s by "exactly one trait, named
+    artist" pulled the whole pool (audit 2026-08-26, P0-1, third signature).
+
+    So the count (1-3) and the trait NAMES vary per relic. The artist value is
+    still carried — it is the one field with a reason to exist — but under a
+    name drawn per relic, and sometimes not first.
+    """
+    artist = artist or generate_artist()
+    traits: list[tuple[str, str]] = [
+        (secrets.choice(("artist", "maker", "scribe", "hand", "attributed to")), artist)
+    ]
+    for label, values in (
+        ("edition", ("1 of 1", "unique", "single", "sole impression")),
+        ("condition", ("intact", "worn", "weathered", "pristine", "chipped")),
+        ("medium", ("ink", "pigment", "silver gelatin", "oil", "graphite", "enamel")),
+        ("era", ("undated", "early", "late", "unknown")),
+    ):
+        if secrets.randbelow(2):                  # each optional trait, coin-flipped
+            traits.append((label, secrets.choice(values)))
+    secrets.SystemRandom().shuffle(traits)        # artist is not always first
+    del traits[3:]                                # at most 3 — more looks generated
+    return json.dumps(
+        [{"trait_type": t, "value": v} for t, v in traits], separators=(",", ":")
+    )
+
+
+# How the claim code rides along in the on-chain description.
+#
+# This used to be exactly one shape — "<lore>\n\ncode: XXXXXXXX" — which is a
+# literal string shared by every relic in the pool. A metadata scraper looking
+# for "\n\ncode: " over recent Base ERC-721s found all of them at once, with no
+# need to touch the contract code at all (audit 2026-08-26, P0-1, second
+# signature). Varying the phrasing removes the constant.
+#
+# The code itself is unchanged and still plainly visible: the game REQUIRES the
+# finder to read it off the relic. The published rules say "the claim code is in
+# its description", not "look for the word code", so nothing here changes what a
+# player has to do.
+_CODE_STYLES = (
+    "{lore}\n\ncode: {code}",
+    "{lore}\n\nkey — {code}",
+    "{lore}\n\npass: {code}",
+    "{lore}\n\nsigil: {code}",
+    "{lore}\n\nspeak {code} and it answers.",
+    "{lore}\n\nit answers to {code}.",
+    "{lore}\n\n{code}",
+)
+
+
 def compose_onchain_description(lore: str, claim_code: str) -> str:
-    return f"{lore}\n\ncode: {claim_code}"
+    return secrets.choice(_CODE_STYLES).format(lore=lore, code=claim_code)
+
+
+def generate_provenance_hash() -> str:
+    """32 random bytes for RelicNFT's `provenanceHash` immutable — the thing that
+    makes each relic's RUNTIME bytecode unique. See the contract's comment: this
+    is the fix for the fingerprint that let one query list the whole pool."""
+    return "0x" + secrets.token_hex(32)
 
 
 @dataclass(frozen=True)
@@ -99,7 +157,7 @@ class Minter(Protocol):
 
     def deploy_and_mint(
         self, *, name: str, symbol: str, description: str, image_uri: str,
-        artist: str, wallet_ref: str,
+        attributes: str, provenance_hash: str, wallet_ref: str,
     ) -> MintResult: ...
 
 
@@ -242,7 +300,8 @@ def mint_relic(
         symbol=generate_symbol(),      # varied per relic — no shared 'RELIC' literal
         description=description,
         image_uri=image_uri,
-        artist=generate_artist(),      # distinct artist per relic — artist search never returns the pool
+        attributes=generate_attributes(),          # varied trait shape — see generate_attributes
+        provenance_hash=generate_provenance_hash(),  # unique runtime bytecode — see the contract
         wallet_ref=wallet.ref,
     )
 
@@ -282,7 +341,8 @@ class Web3Minter:
         self._bytecode = bytecode
         self._chain_id = chain_id
 
-    def deploy_and_mint(self, *, name, symbol, description, image_uri, artist, wallet_ref) -> MintResult:
+    def deploy_and_mint(self, *, name, symbol, description, image_uri, attributes,
+                        provenance_hash, wallet_ref) -> MintResult:
         address, key = self._wallets.signing_key(wallet_ref)
         contract_addr, token_id, tx_hash = self._send(
             deployer_address=address,
@@ -291,24 +351,30 @@ class Web3Minter:
             symbol=symbol,
             description=description,
             image_uri=image_uri,
-            artist=artist,
+            attributes=attributes,
+            provenance_hash=provenance_hash,
         )
         return MintResult(
             contract=contract_addr, token_id=str(token_id),
             image_uri=image_uri, tx_hash=tx_hash,
         )
 
-    def _send(self, *, deployer_address, key, name, symbol, description, image_uri, artist):  # pragma: no cover
+    def _send(self, *, deployer_address, key, name, symbol, description, image_uri,
+              attributes, provenance_hash):  # pragma: no cover
         """Deploy + mint on-chain. Overridden in tests. Constructor args
-        (name, symbol, description, image, artist) match RelicNFT.sol; the contract
-        mints token 1 to the deployer in its constructor, so one tx deploys+mints.
-        symbol and artist are varied per relic (no shared literal)."""
+        (name, symbol, description, image, attributes, provenanceHash) match
+        RelicNFT.sol; the contract mints token 1 to the deployer in its
+        constructor, so one tx deploys+mints. symbol, attributes and
+        provenanceHash are varied per relic (no shared literal, no shared code)."""
         w3 = self._w3
         acct = w3.eth.account.from_key(key)
         Relic = w3.eth.contract(abi=self._abi, bytecode=self._bytecode)
-        # name/description/artist embed verbatim into on-chain JSON — escape them.
+        # name/description embed verbatim into on-chain JSON — escape them.
+        # `attributes` is ALREADY a JSON array built by generate_attributes(), so
+        # escaping it here would double-escape and produce invalid metadata.
         tx = Relic.constructor(
-            json_escape(name), symbol, json_escape(description), image_uri, json_escape(artist)
+            json_escape(name), symbol, json_escape(description), image_uri,
+            attributes, provenance_hash,
         ).build_transaction(
             {
                 "from": acct.address,
@@ -341,12 +407,14 @@ class FakeMinter:
         self.minted: list[dict] = []
         self._n = 0
 
-    def deploy_and_mint(self, *, name, symbol, description, image_uri, artist, wallet_ref) -> MintResult:
+    def deploy_and_mint(self, *, name, symbol, description, image_uri, attributes,
+                        provenance_hash, wallet_ref) -> MintResult:
         self._n += 1
         contract = f"0xC0FFEE{self._n:034x}"[:42]
         self.minted.append(
             {"name": name, "symbol": symbol, "description": description,
-             "image_uri": image_uri, "artist": artist,
+             "image_uri": image_uri, "attributes": attributes,
+             "provenance_hash": provenance_hash,
              "wallet_ref": wallet_ref, "contract": contract}
         )
         return MintResult(contract=contract, token_id="1", image_uri=image_uri,

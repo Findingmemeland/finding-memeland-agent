@@ -385,6 +385,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     "⛔ relic_launch está ON mas falta configuração "
                     "(relic_pool_key / uma chave de marketplace). Nada lançado."
                 )
+            from .persona.relic_findability import FindabilityRefused
             from .telegram.relic_launch import stage_relic_launch
 
             try:
@@ -396,8 +397,26 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     secondary_findability=relic_findability_secondary or (),
                     hunt_number=repo.next_hunt_number(),
                 )
-            except Exception as e:  # noqa: BLE001 — a refusal is the safe outcome
+            except FindabilityRefused as e:
+                # Its own message is written to be leak-free (see
+                # relic_findability). Interpolated deliberately, and ONLY for
+                # this type.
                 return f"⛔ launch relic RECUSADO: {e}"
+            except Exception as e:  # noqa: BLE001 — a refusal is the safe outcome
+                # Belt and braces for every OTHER failure: an arbitrary
+                # exception raised anywhere inside staging may carry the relic
+                # NAME in its message, and this line renders straight into the
+                # operator's Telegram — a path the identity-leak backstop never
+                # runs on (audit 2026-08-26, P0-3). So the type is reported and
+                # the text is not. The full exception still reaches the logs.
+                import logging
+
+                logging.getLogger(__name__).exception("relic launch staging failed")
+                return (
+                    f"⛔ launch relic RECUSADO ({type(e).__name__}). "
+                    "Detalhe nos logs — a mensagem é omitida aqui porque pode "
+                    "conter o nome do relic."
+                )
             # The confirmation is bound to the RELIC ID, not a handle — the
             # operator must never be shown the name, so there is nothing else
             # to bind to. `_identity` stays in memory and goes no further.

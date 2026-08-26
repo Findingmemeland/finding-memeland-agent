@@ -15,7 +15,8 @@ from finding_memeland.persona.relic_wallets import (
 )
 from finding_memeland.persona.relic_mint import (
     mint_relic, FakeMinter, FakeImageGen, compose_onchain_description, json_escape,
-    generate_symbol, generate_artist,
+    generate_symbol, generate_artist, generate_attributes,
+    generate_provenance_hash,
 )
 from finding_memeland.persona.relic_findability import (
     assert_findable_or_refuse, FindabilityRefused, FakeFindability, BaseScanFindability,
@@ -64,8 +65,11 @@ def _mint_one():
 
 
 def test_mint_puts_code_in_the_onchain_description():
+    """O código TEM de ir na descrição on-chain — é o que o vencedor lê.
+    Já não se afirma o prefixo: "code: " era uma constante partilhada por todo o
+    pool e um scraper de metadata apanhava-o inteiro (auditoria P0-1)."""
     _, _, ident, minter, _ = _mint_one()
-    assert f"code: {ident.claim_code}" in minter.minted[0]["description"]
+    assert ident.claim_code in minter.minted[0]["description"]
 
 
 def test_mint_contract_name_is_the_relic_name_not_a_shared_cluster():
@@ -85,16 +89,51 @@ def test_mint_uses_varied_symbol_and_artist_no_shared_literal():
     _, _, _, minter, _ = _mint_one()
     rec = minter.minted[0]
     assert re.fullmatch(r"[A-Z]{3,5}", rec["symbol"]) and rec["symbol"] != "RELIC"
-    assert rec["artist"] and rec["artist"].strip()
+    assert rec["attributes"] and rec["attributes"].strip()
     # variation across relics: no single symbol/artist an observer could filter on
     syms = {generate_symbol() for _ in range(40)}
     arts = {generate_artist() for _ in range(40)}
     assert len(syms) > 1 and len(arts) > 1  # not a shared literal
 
 
+# --------------------------------------------------------------------------- #
+# Anti-fingerprint (auditoria 2026-08-26, P0-1). As três assinaturas partilhadas
+# que permitiam listar o pool inteiro com uma query. Cada teste falha se alguma
+# delas voltar a ser constante.
+# --------------------------------------------------------------------------- #
+
+
+def test_provenance_hash_is_unique_per_relic():
+    """Sem isto o runtime bytecode é idêntico em todas as relics — e um match
+    exacto de código num indexador devolve o pool completo."""
+    seeds = {generate_provenance_hash() for _ in range(50)}
+    assert len(seeds) == 50
+    for s in seeds:
+        assert s.startswith("0x") and len(s) == 66
+
+
+def test_code_prefix_is_not_a_shared_literal():
+    """'\n\ncode: ' era uma constante em todas as descrições on-chain: um
+    scraper de metadata apanhava o pool sem tocar no bytecode."""
+    ds = {compose_onchain_description("lore", "ABCD2345") for _ in range(60)}
+    assert len(ds) > 1
+    assert all("ABCD2345" in d and d.startswith("lore") for d in ds)
+
+
+def test_attributes_shape_varies_and_stays_valid_json():
+    import json as _json
+    shapes = set()
+    for _ in range(60):
+        attrs = _json.loads(generate_attributes())
+        assert 1 <= len(attrs) <= 3
+        assert all(set(a) == {"trait_type", "value"} and a["value"] for a in attrs)
+        shapes.add((len(attrs), tuple(sorted(a["trait_type"] for a in attrs))))
+    assert len(shapes) > 1  # nem a contagem nem os nomes dos traits são fixos
+
+
 def test_compose_and_json_escape():
     d = compose_onchain_description('she said "no"', "ABCD2345")
-    assert "code: ABCD2345" in d
+    assert "ABCD2345" in d
     esc = json_escape(d)
     assert '\\"no\\"' in esc  # quotes escaped for on-chain JSON safety
 
