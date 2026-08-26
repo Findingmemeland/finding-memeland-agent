@@ -405,3 +405,25 @@ def test_wallet_is_reserved_before_signing_so_a_crash_never_frees_it():
     # A carteira ficou gasta apesar de o mint nunca ter sido gravado. Sem a
     # reserva, o mint seguinte reutilizava-a e ligava duas relics on-chain.
     assert repo.get_relic("r1").mint_wallet_ref == "W1"
+
+
+def test_mint_retry_reuses_the_reserved_wallet_instead_of_burning_another():
+    """A reserva do P1-3 era desfeita pelo próprio retry: pedia carteira nova e
+    sobrescrevia o mint_wallet_ref, devolvendo a primeira ao conjunto livre."""
+    repo = FakeRelicRepo(); pool = RelicPool(repo, NullPoolCipher())
+    ident = new_identity(name="Maroon Ledger", description="d", image_prompt="p",
+                         solution_terms=["x"])
+    pool.add(Relic(id="r1"), ident)
+    wallets = WalletPool(FakeWalletDirectory(["W1", "W2"]), FakeKeyResolver())
+
+    with pytest.raises(RuntimeError):
+        mint_relic(relic_id="r1", pool=pool, wallets=wallets,
+                   image_gen=FakeImageGen(), minter=_ExplodingMinter())
+    assert repo.get_relic("r1").mint_wallet_ref == "W1"
+
+    # segunda tentativa: a MESMA carteira, e a W2 fica intacta
+    minter = FakeMinter()
+    mint_relic(relic_id="r1", pool=pool, wallets=wallets,
+               image_gen=FakeImageGen(), minter=minter)
+    assert minter.minted[0]["wallet_ref"] == "W1"
+    assert repo.get_relic("r1").mint_wallet_ref == "W1"

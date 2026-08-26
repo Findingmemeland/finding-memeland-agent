@@ -115,7 +115,11 @@ def build_launch_prompt(summary: RelicLaunchSummary, identity=None) -> str:
         f"relic {summary.relic_id} (blind — the name is not shown, by design)"
         f"{age_line}.\n"
         f"commitment: {summary.commitment[:16]}…\n"
-        + (f"contract: {summary.contract}\n" if summary.contract else "")
+        # O ENDEREÇO DO CONTRATO NÃO ENTRA AQUI. Estava, com o comentário ao
+        # lado a prometer blind mode — e um clique no endereço dá o nome e o
+        # código do `tokenURI` (auditoria v3, P0-C). O commitment acima já
+        # identifica de forma única QUAL o relic, que é a única coisa que o
+        # operador precisa de saber para confirmar.
         + find_line
         + floor_line
         + exempt_line

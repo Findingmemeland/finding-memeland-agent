@@ -424,3 +424,39 @@ def test_launch_prompt_shows_the_eligibility_floor():
 def test_launch_prompt_screams_when_the_floor_is_zero():
     """Um floor a zero numa hunt de 1B é a diferença entre pagar 100M e 1B."""
     assert "floor ZERO" in build_launch_prompt(_summary(holding_floor_fmml=0))
+
+
+# --------------------------------------------------------------------------- #
+# P0-A · a Clue 1 de uma hunt relic não pode publicar o explainer das personas #
+# --------------------------------------------------------------------------- #
+
+
+def test_relic_clue_one_never_tells_players_to_search_x():
+    """O explainer antigo dizia "hide their account somewhere on X … the code in
+    its bio". Numa hunt relic isso é instrução ERRADA, publicada, na primeira
+    coisa que um estranho lê."""
+    from finding_memeland.content.templates import clue_one
+
+    post = clue_one(hunt_n=8, clue_text="c", prize="1", integrity_hash="h", relic=True)
+    low = post.lower()
+    assert "somewhere on x" not in low and "in its bio" not in low
+    assert "marketplace" in low and "onchain on base" in low
+
+
+def test_persona_clue_one_is_untouched():
+    from finding_memeland.content.templates import clue_one
+
+    assert "somewhere on X" in clue_one(
+        hunt_n=8, clue_text="c", prize="1", integrity_hash="h"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# P0-C · blind mode a sério: o contrato é o nome e o código a um clique        #
+# --------------------------------------------------------------------------- #
+
+
+def test_launch_prompt_never_shows_the_contract_address():
+    text = build_launch_prompt(_summary(contract="0xdeadbeef"))
+    assert "0xdeadbeef" not in text
+    assert "commitment" in text        # o que identifica o relic sem o abrir

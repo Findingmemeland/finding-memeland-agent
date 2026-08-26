@@ -964,12 +964,13 @@ def build_agent(settings: Settings | None = None) -> Agent:
         except Exception as e:  # noqa: BLE001
             return f"⛔ mint FAILED for {relic_id}: {e!r}"
 
+        # NEM o contrato NEM a tx: ambos resolvem para o nome e o código num
+        # clique, e esta mensagem dizia "blind mode" mesmo por cima deles
+        # (auditoria v3, P0-C). O id do relic chega para o operador falar do
+        # relic sem nunca o poder abrir.
         return (
-            f"✅ minted (name NOT shown — blind mode)\n"
+            f"✅ minted (blind — nada aqui identifica o relic)\n"
             f"  relic:    {relic_id}\n"
-            f"  contract: {result.contract}\n"
-            f"  token:    {result.token_id}\n"
-            f"  tx:       {result.tx_hash}\n"
             f"  wallets left: {free - 1 if free >= 0 else '?'}"
         )
 

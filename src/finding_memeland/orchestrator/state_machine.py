@@ -821,6 +821,9 @@ class Orchestrator:
             non_holder_pct=(
                 self._non_holder_pct if hunt.min_balance_fmml > 0 else None
             ),
+            # Numa hunt relic o explainer das personas é instrução ERRADA
+            # publicada (auditoria v3, P0-A).
+            relic=getattr(hunt, "relic", None) is not None,
         )
         tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id
@@ -2418,7 +2421,25 @@ class Orchestrator:
             return
 
     def _rebuild_hunt(self, row: dict, state: HuntState) -> PreparedHunt:
-        persona = self._persona_source.acquire_by_id(row["persona_id"])
+        # Uma hunt relic NÃO tem linha na tabela de personas: a persona é
+        # sintética, construída a partir do relic. `acquire_by_id(None)`
+        # rebentava aqui, antes de o ramo relic lá em baixo alguma vez correr —
+        # ou seja, um restart do Railway a meio de uma hunt relic deixava-a
+        # `live` sem ninguém a servi-la, e a bloquear lançamentos até alguém ir
+        # ao SQL à mão (auditoria v3, P0-B). Um `git push` durante a hunt
+        # bastava. O placeholder abaixo é substituído pela persona sintética
+        # real dentro de `resume_relic_hunt`.
+        if row.get("relic_id"):
+            from ..persona.relic_integration import relic_label
+            from .ports import ReadyPersona
+
+            rid = str(row["relic_id"])
+            persona = ReadyPersona(
+                id=rid, handle=relic_label(rid), x_user_id="",
+                access_token="", access_secret="",
+            )
+        else:
+            persona = self._persona_source.acquire_by_id(row["persona_id"])
 
         identity = None
         ctx = None

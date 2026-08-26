@@ -563,8 +563,21 @@ class ClueEngine:
                 "purely by inference (imagery, etymology, association, wordplay). "
                 "The player must deduce the word; you must never write it."
             )
+        # As razões CITAM as palavras sinalizadas — ou seja, a resposta da hunt.
+        # Esta excepção sobe até ao Telegram do operador, portanto o texto fica
+        # nos logs e a mensagem não o repete (auditoria v3, P0-C). Vale para
+        # personas e para relics: em ambos os casos a palavra sinalizada é o que
+        # o jogador tem de descobrir.
+        import logging
+
+        logging.getLogger(__name__).error(
+            "clue #%s failed guardrails after %s attempts: %s",
+            clue_index, max_attempts, last_reasons,
+        )
         raise RuntimeError(
-            f"clue #{clue_index} failed guardrails after {max_attempts} attempts: {last_reasons}"
+            f"clue #{clue_index} failed guardrails after {max_attempts} attempts "
+            f"({len(last_reasons)} razões — omitidas aqui porque nomeiam a "
+            "resposta; estão nos logs)"
         )
 
     def generate_taunt(self) -> str:

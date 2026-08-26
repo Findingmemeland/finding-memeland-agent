@@ -194,6 +194,11 @@ class RelicPool:
         relic.state = RelicState.MINTED
         self._repo.set_relic(relic)
 
+    def reserved_wallet_ref(self, relic_id: str) -> str | None:
+        """A carteira já reservada para este relic, se houver."""
+        relic = self._repo.get_relic(relic_id)
+        return getattr(relic, "mint_wallet_ref", None) if relic else None
+
     def reserve_wallet(self, relic_id: str, wallet_ref: str) -> None:
         """Marca a carteira como GASTA antes de se assinar seja o que for.
 

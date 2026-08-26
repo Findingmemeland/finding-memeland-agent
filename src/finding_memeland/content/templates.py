@@ -54,6 +54,18 @@ CLUE_ONE_EXPLAINER = (
 )
 
 
+# O explainer acima descreve o jogo ANTIGO: esconder uma conta no X e ler o
+# código da bio. Numa hunt relic isso é instrução ERRADA publicada na Clue 1 —
+# manda toda a gente procurar contas que não existem (auditoria v3, P0-A).
+RELIC_CLUE_ONE_EXPLAINER = (
+    "every hunt i invent someone who doesn't exist, "
+    "and hide them onchain on Base. \U0001F438\n"
+    "decode the clues, work out the two-word name, find it on a marketplace — "
+    "reply to this post with the code in its description. first one wins the "
+    "prize AND keeps the relic."
+)
+
+
 def explainer_pending() -> bool:
     """True while the cold-traffic explainer is still the placeholder.
     Checked by preflight_check so a hunt can't launch with placeholder text."""
@@ -62,7 +74,7 @@ def explainer_pending() -> bool:
 
 def clue_one(
     hunt_n: int, clue_text: str, prize: str, integrity_hash: str,
-    non_holder_pct: int | None = 10,
+    non_holder_pct: int | None = 10, relic: bool = False,
 ) -> str:
     """Opening post: cold-traffic explainer + announcement + clue 1 + reshare
     gate + integrity hash.
@@ -74,9 +86,10 @@ def clue_one(
     # Order (Pedro, 2026-07-20): the announcement leads, the explainer follows
     # — regulars get the signal first, strangers get the context immediately
     # after, and "1st clue:" stays glued to the clue itself.
+    explainer = RELIC_CLUE_ONE_EXPLAINER if relic else CLUE_ONE_EXPLAINER
     return (
         f"Hunt #{hunt_n} is live.\n\n"
-        f"{CLUE_ONE_EXPLAINER}\n\n"
+        f"{explainer}\n\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
         f"The first to find me wins {prize} $FIND.\n"

@@ -69,6 +69,12 @@ class WalletPool:
         address, _key = self._resolve.resolve(ref)  # _key intentionally dropped
         return WalletHandle(ref=ref, address=address)
 
+    def handle_for(self, wallet_ref: str) -> WalletHandle:
+        """O handle de uma ref ESPECÍFICA (retomar um mint que falhou). Como
+        `pick_free`, resolve só para ler o endereço e deita a chave fora."""
+        address, _key = self._resolve.resolve(wallet_ref)
+        return WalletHandle(ref=wallet_ref, address=address)
+
     def signing_key(self, wallet_ref: str) -> tuple[str, str]:
         """(address, private_key) to sign ONE mint. The caller uses it inline and
         must not persist it. Kept separate from pick_free so the key is fetched

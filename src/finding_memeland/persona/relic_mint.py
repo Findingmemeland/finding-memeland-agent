@@ -291,10 +291,20 @@ def mint_relic(
     commitment binds the SPECIFIC minted NFT (canonical_id), computable only now
     that contract+token exist."""
     identity = pool.reveal_identity(relic_id)          # decrypt (bot-only)
-    wallet = wallets.pick_free()                       # fresh, non-linkable
-    # RESERVA a carteira antes de qualquer assinatura (auditoria 2026-08-26,
-    # P1-3). A partir daqui ela conta como gasta mesmo que tudo o resto falhe.
-    pool.reserve_wallet(relic_id, wallet.ref)
+    # RETOMAR, não re-sortear (auditoria v3). A reserva do P1-3 era desfeita
+    # pelo próprio retry: um segundo /relic_mint pedia uma carteira NOVA e
+    # sobrescrevia o `mint_wallet_ref`, devolvendo a primeira ao conjunto livre
+    # — precisamente a reutilização que a reserva existe para impedir. Se este
+    # relic já tem carteira reservada, é essa que se usa: ela já está queimada
+    # para ele e para mais ninguém.
+    reserved = pool.reserved_wallet_ref(relic_id)
+    if reserved:
+        wallet = wallets.handle_for(reserved)
+    else:
+        wallet = wallets.pick_free()                   # fresh, non-linkable
+        # RESERVA antes de qualquer assinatura: a partir daqui a carteira conta
+        # como gasta mesmo que tudo o resto falhe.
+        pool.reserve_wallet(relic_id, wallet.ref)
     image_uri = image_gen.generate(identity.image_prompt)
     description = compose_onchain_description(identity.description, identity.claim_code)
 
