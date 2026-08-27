@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     # artifact was built). Set it only after checking a fresh Manifold Studio
     # deployment on Base points somewhere else.
     manifold_implementation: str = Field(default="")
+    # The override above is refused unless this is true: pointing a relic at any
+    # address other than the one the Manifold crowd uses (even our own copy of
+    # their code) would make the pool a bytecode class of one again.
+    manifold_implementation_override_ok: bool = Field(default=False)
 
     @property
     def relic_wallet_ref_list(self) -> list[str]:

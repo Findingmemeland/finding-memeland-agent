@@ -61,8 +61,10 @@ def test_manifold_three_step_mint_on_a_real_evm(chain):
     impl = w3.eth.wait_for_transaction_receipt(deploy.transact({"from": wallet})).contractAddress
 
     art = load_manifold_artifact()
+    # The stand-in lives at a local address, so the override is explicit here.
     minter = ManifoldMinter(
-        web3=w3, wallets=_Wallets(wallet, key), pinner=_Pinner(), artifact=art, implementation=impl,
+        web3=w3, wallets=_Wallets(wallet, key), pinner=_Pinner(), artifact=art,
+        implementation=impl, allow_implementation_override=True,
     )
     res = minter.deploy_and_mint(
         name="Maroon Ledger", symbol="MLDG", description="kept the books\n\ncode: ABCDEFGH",
@@ -70,8 +72,11 @@ def test_manifold_three_step_mint_on_a_real_evm(chain):
         provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
     )
 
-    # 1. the deployed code IS the Manifold proxy runtime, verbatim
+    # 1. the deployed code IS the Manifold proxy runtime, verbatim, and the
+    #    EIP-1967 slot holds the implementation address (not our own copy)
     assert w3.eth.get_code(res.contract) == bytes.fromhex(art["manifold_runtime"][2:])
+    slot = w3.eth.get_storage_at(res.contract, ManifoldMinter.IMPLEMENTATION_SLOT)
+    assert "0x" + bytes(slot).hex()[-40:] == impl.lower()
     # 2. the token exists, on the relic wallet, with the pinned URI
     proxy = w3.eth.contract(address=res.contract, abi=fake["abi"])
     assert res.token_id == "1"
@@ -96,7 +101,7 @@ def test_manifold_minter_refuses_an_implementation_without_code(chain):
     art = load_manifold_artifact()
     minter = ManifoldMinter(
         web3=w3, wallets=_Wallets(wallet, key), pinner=_Pinner(), artifact=art,
-        implementation="0x" + "11" * 20,
+        implementation="0x" + "11" * 20, allow_implementation_override=True,
     )
     with pytest.raises(RuntimeError, match="has no code"):
         minter.deploy_and_mint(

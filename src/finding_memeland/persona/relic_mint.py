@@ -524,15 +524,35 @@ class ManifoldMinter:
     Same discipline as Web3Minter: web3 injected, `_send` overridden in tests,
     the key resolved only at the instant of signing."""
 
+    # keccak256("eip1967.proxy.implementation") - 1 — where the Manifold proxy
+    # runtime reads its implementation from. The address is NOT in the 298 bytes
+    # of code; it is in this storage slot, and the camouflage is that thousands
+    # of proxies hold the SAME value there.
+    IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+
     def __init__(self, *, web3, wallets, pinner, artifact: dict,
-                 implementation: str | None = None, chain_id: int | None = None):
+                 implementation: str | None = None, chain_id: int | None = None,
+                 allow_implementation_override: bool = False):
         self._w3 = web3
         self._wallets = wallets
         self._pinner = pinner                     # relic_image.PinataPinner (or a fake)
         self._abi = artifact["abi"]
         self._bytecode = artifact["bytecode"]
         self._runtime = artifact["manifold_runtime"]
-        self._impl = implementation or artifact["manifold_implementation"]
+        known = str(artifact["manifold_implementation"])
+        chosen = str(implementation or known)
+        # The whole point is pointing at the implementation THOUSANDS of Manifold
+        # proxies point at. A different address — even a byte-identical copy of
+        # their code deployed by us — makes the pool a class of one again, worse
+        # than RelicNFT.sol. So an override must be deliberate, never a typo.
+        if chosen.lower() != known.lower() and not allow_implementation_override:
+            raise RuntimeError(
+                f"manifold implementation override {chosen} differs from the artifact's "
+                f"{known}; refusing. A relic must point at the implementation the Manifold "
+                "crowd uses. If Manifold rotated versions, verify the new address on a fresh "
+                "Studio deployment and pass allow_implementation_override=True."
+            )
+        self._impl = chosen
         self._chain_id = chain_id
 
     @property
@@ -600,6 +620,13 @@ class ManifoldMinter:
             raise RuntimeError(
                 f"proxy {proxy_addr} runtime differs from the Manifold runtime — "
                 "NOT minting on it; investigate before retrying"
+            )
+        slot = w3.eth.get_storage_at(proxy_addr, self.IMPLEMENTATION_SLOT)
+        slot_addr = "0x" + bytes(slot).hex()[-40:]
+        if slot_addr.lower() != impl.lower():
+            raise RuntimeError(
+                f"proxy {proxy_addr} implementation slot holds {slot_addr}, expected {impl} — "
+                "NOT minting on it"
             )
 
         relic = w3.eth.contract(address=proxy_addr, abi=MANIFOLD_ABI)

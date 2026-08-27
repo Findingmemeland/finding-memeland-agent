@@ -515,14 +515,25 @@ def test_manifold_minter_pins_the_metadata_and_mints_with_its_uri():
     assert res.image_uri == "ipfs://bafyIMG"
 
 
-def test_manifold_minter_uses_the_artifact_implementation_unless_overridden():
+def test_manifold_minter_points_at_the_crowd_implementation_by_default():
+    """The camouflage is the implementation ADDRESS thousands of Manifold proxies
+    hold in their EIP-1967 slot. A different address — even our own copy of
+    their code — would make the pool a class of one again, so an override is
+    refused unless it is explicit."""
     from finding_memeland.persona.relic_mint import ManifoldMinter, load_manifold_artifact
 
     art = load_manifold_artifact()
     default = ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art)
     assert default.implementation.lower() == art["manifold_implementation"].lower()
+    # Same address in any casing is not an override.
+    same = ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art,
+                          implementation=art["manifold_implementation"].upper().replace("0X", "0x"))
+    assert same.implementation.lower() == art["manifold_implementation"].lower()
+    with pytest.raises(RuntimeError, match="differs from the artifact"):
+        ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art,
+                       implementation="0x" + "11" * 20)
     over = ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art,
-                          implementation="0x" + "11" * 20)
+                          implementation="0x" + "11" * 20, allow_implementation_override=True)
     assert over.implementation == "0x" + "11" * 20
 
 

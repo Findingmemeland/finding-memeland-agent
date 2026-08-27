@@ -168,6 +168,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     web3=web3, wallets=relic_wallets, pinner=PinataPinner(s.pinata_jwt),
                     artifact=load_manifold_artifact(),
                     implementation=s.manifold_implementation or None,
+                    # A different implementation address is a class of one again:
+                    # only with the explicit switch, never by a stray env value.
+                    allow_implementation_override=s.manifold_implementation_override_ok,
                 )
             elif s.relic_mint_backend == "relicnft":
                 _abi, _bytecode = load_contract_artifact()
