@@ -220,17 +220,23 @@ def generate_trail_clue(
     trails aren't allowed here, when generation/parsing fails, or when
     verification fails within the attempt budget — the caller then falls back to
     an ordinary direct clue."""
-    from .relic_clues import (
-        RELIC_SYSTEM_PROMPT, angle_for, build_relic_user_message, relic_slot_for,
-    )
     from .clue_engine import HARD_CLUE_FLOOR
+    from .relic_clues import (
+        PUZZLE_PHASE_RULES,
+        RELIC_SYSTEM_PROMPT,
+        angle_for,
+        build_relic_user_message,
+        relic_slot_for,
+    )
 
     if not policy.allows(clue_index, angle_for(clue_index, ctx)):
         return None
 
     obliqueness = relic_slot_for(clue_index, ctx)[1]
+    # Trails only exist in the puzzle phase (policy), so the puzzle rules apply.
     system = RELIC_SYSTEM_PROMPT.format(
-        index=clue_index, obliqueness=obliqueness, hard_floor=HARD_CLUE_FLOOR
+        index=clue_index, obliqueness=obliqueness, hard_floor=HARD_CLUE_FLOOR,
+        phase_rules=PUZZLE_PHASE_RULES,
     ) + "\n" + TRAIL_INSTRUCTIONS
 
     feedback = ""

@@ -523,6 +523,21 @@ class ClueEngine:
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         return _parse_clue(text)
 
+    def _guardrail_kwargs(self, persona: PersonaContext, clue_index: int) -> dict:
+        """Extra `check_clue` switches for this hunt type. The persona engine has
+        none; the relic engine turns on the puzzle-phase rules (no emoji, no
+        rhyme) for clues 1..PUZZLE_CLUES."""
+        return {}
+
+    def _post_guardrail_reasons(
+        self, draft: ClueDraft, persona: PersonaContext, clue_index: int,
+        prior_clues: list[str],
+    ) -> list[str]:
+        """Rejection reasons that need more than a regex — run only after the
+        text checks pass. Empty list = accepted. Overridden by the relic engine
+        (blind solver, Hunt #7 post-mortem)."""
+        return []
+
     def next_clue(
         self,
         persona: PersonaContext,
@@ -551,13 +566,21 @@ class ClueEngine:
                 # anywhere ('tit' isn't visible in the camelCase split, so the
                 # guardrail alone can't see it).
                 solution_terms=[*persona.solution_terms, *hint_terms(persona.handle_hint)],
+                **self._guardrail_kwargs(persona, clue_index),
             )
-            if result.ok:
+            reasons = list(result.reasons)
+            if not reasons:
+                # Text-level checks passed; a subclass may still reject on
+                # what the clue DOES (the relic engine runs a blind solver).
+                reasons = self._post_guardrail_reasons(
+                    draft, persona, clue_index, prior_clues
+                )
+            if not reasons:
                 return draft
-            last_reasons = result.reasons
+            last_reasons = reasons
             feedback = (
                 "Your previous attempt was REJECTED by the guardrails: "
-                + "; ".join(result.reasons)
+                + "; ".join(reasons)
                 + f". It was: {draft.text!r}. Write a COMPLETELY NEW clue that "
                 "never contains the flagged word(s) themselves — point at them "
                 "purely by inference (imagery, etymology, association, wordplay). "

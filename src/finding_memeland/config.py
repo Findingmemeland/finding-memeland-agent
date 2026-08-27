@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="")
     openai_image_model: str = Field(default="gpt-image-1")
     openai_image_size: str = Field(default="1024x1024")
+    # Blind solver for relic clues (Hunt #7 post-mortem): an INDEPENDENT model
+    # tries to solve every puzzle piece before it is posted. "openai" uses the
+    # client above (falls back to Anthropic when no key is set); "anthropic"
+    # forces the same family as the writer; "off" disables it.
+    relic_solver_backend: str = Field(default="openai")
+    relic_solver_model: str = Field(default="gpt-4.1-mini")
 
     # Supabase
     supabase_url: str = Field(default="")

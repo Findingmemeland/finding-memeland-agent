@@ -263,9 +263,25 @@ def build_agent(settings: Settings | None = None) -> Agent:
             )
             trail_policy = TrailPolicy(enabled=True)
 
+        # Blind solver (Hunt #7 post-mortem): an independent model reads every
+        # puzzle piece before it is posted. OpenAI by default — the same model
+        # writing and guessing shares its blind spots.
+        from .content.relic_clues import AnthropicBlindSolver, OpenAIBlindSolver
+
+        if s.relic_solver_backend == "off":
+            solver = False
+        elif s.relic_solver_backend == "openai" and s.openai_api_key:
+            solver = OpenAIBlindSolver(openai, s.relic_solver_model)
+        else:
+            solver = AnthropicBlindSolver(anthropic, s.anthropic_model)
+        print(
+            "[relic] blind solver: "
+            + ("off" if solver is False else f"{solver.name}/{solver.model}")
+        )
         relic_clue_engine = RelicClueEngine(
             anthropic, s.anthropic_model,
             trail_verifier=trail_verifier, trail_policy=trail_policy,
+            solver=solver,
         )
         if relic_wallets is not None:
             trophy_port = Web3NFTTransfer(web3=web3, wallets=relic_wallets)
@@ -973,16 +989,18 @@ def build_agent(settings: Settings | None = None) -> Agent:
             relic_id = unminted[0].id
 
         try:
-            free = len(relic_wallets.free_refs())
-        except Exception:  # noqa: BLE001
-            free = -1
-        try:
             result = mint_relic(
                 relic_id=relic_id, pool=relic_pool, wallets=relic_wallets,
                 image_gen=relic_artwork, minter=relic_minter,
             )
         except Exception as e:  # noqa: BLE001
             return f"⛔ mint FAILED for {relic_id}: {e!r}"
+        # Contado DEPOIS do mint: a carteira deste relic já conta como gasta, e
+        # um retry sobre uma reserva antiga dava "-1" (26/08).
+        try:
+            free = len(relic_wallets.free_refs())
+        except Exception:  # noqa: BLE001
+            free = -1
 
         # NEM o contrato NEM a tx: ambos resolvem para o nome e o código num
         # clique, e esta mensagem dizia "blind mode" mesmo por cima deles
@@ -992,7 +1010,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             f"✅ minted (blind — nada aqui identifica o relic)\n"
             f"  relic:    {relic_id}\n"
             f"  backend:  {s.relic_mint_backend}\n"
-            f"  wallets left: {free - 1 if free >= 0 else '?'}"
+            f"  wallets left: {free if free >= 0 else '?'}"
         )
 
     actions = {

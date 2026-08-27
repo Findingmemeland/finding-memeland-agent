@@ -22,6 +22,15 @@ def _ctx():
     return RelicClueContext.from_identity(ident, backstory="the one who was right")
 
 
+def _anchor_clue(ctx=None) -> int:
+    """The puzzle clue whose angle is CONCRETE ANCHOR for this name. Since the
+    Hunt #7 fix the angle order is a seeded permutation, so the anchor is not
+    at clue 1 by default — the tests look it up instead of assuming it."""
+    from finding_memeland.content.relic_clues import PUZZLE_CLUES, angle_for, is_anchor_angle
+    ctx = ctx or _ctx()
+    return next(i for i in range(1, PUZZLE_CLUES + 1) if is_anchor_angle(angle_for(i, ctx)))
+
+
 class _Blk:
     def __init__(self, t): self.type, self.text = "text", t
 
@@ -102,7 +111,7 @@ def test_policy_disabled_allows_nothing():
 def test_verified_trail_is_returned_with_artifact_and_terms():
     eng = RelicClueEngine(FakeClient([TRAIL_JSON]), "m")
     v = YesVerifier()
-    d = generate_trail_clue(eng, _ctx(), 1, [], verifier=v, policy=TrailPolicy())
+    d = generate_trail_clue(eng, _ctx(), _anchor_clue(), [], verifier=v, policy=TrailPolicy())
     assert d is not None and d.verified
     assert "Everest" in d.artifact and len(d.search_terms) == 2
     assert v.seen[0][0] == d.artifact          # the verifier saw the real claim
@@ -111,7 +120,7 @@ def test_verified_trail_is_returned_with_artifact_and_terms():
 def test_unverified_trail_returns_none_after_attempts():
     client = FakeClient([TRAIL_JSON, TRAIL_JSON])
     eng = RelicClueEngine(client, "m")
-    d = generate_trail_clue(eng, _ctx(), 1, [], verifier=AlwaysDenyVerifier(),
+    d = generate_trail_clue(eng, _ctx(), _anchor_clue(), [], verifier=AlwaysDenyVerifier(),
                             policy=TrailPolicy(max_attempts=2))
     assert d is None and client.calls == 2     # retried, then gave up
 
@@ -157,7 +166,7 @@ def test_parse_trail_requires_clue_text():
 def test_engine_uses_verified_trail():
     eng = RelicClueEngine(FakeClient([TRAIL_JSON]), "m",
                           trail_verifier=YesVerifier(), trail_policy=TrailPolicy())
-    draft = eng.next_clue(_ctx(), 1, [])
+    draft = eng.next_clue(_ctx(), _anchor_clue(), [])
     assert "climber" in draft.text
 
 
@@ -166,7 +175,7 @@ def test_engine_falls_back_to_direct_when_unverified():
     client = FakeClient([TRAIL_JSON, DIRECT_JSON, DIRECT_JSON, DIRECT_JSON])
     eng = RelicClueEngine(client, "m", trail_verifier=AlwaysDenyVerifier(),
                           trail_policy=TrailPolicy(max_attempts=1))
-    draft = eng.next_clue(_ctx(), 1, [])
+    draft = eng.next_clue(_ctx(), _anchor_clue(), [])
     assert "dried blood" in draft.text          # the direct clue won
 
 
@@ -175,7 +184,7 @@ def test_engine_discards_a_verified_trail_that_leaks_the_name():
     client = FakeClient([LEAKY_TRAIL_JSON, DIRECT_JSON, DIRECT_JSON])
     eng = RelicClueEngine(client, "m", trail_verifier=YesVerifier(),
                           trail_policy=TrailPolicy())
-    draft = eng.next_clue(_ctx(), 1, [])
+    draft = eng.next_clue(_ctx(), _anchor_clue(), [])
     assert "maroon" not in draft.text.lower()
 
 
@@ -184,7 +193,8 @@ def test_engine_without_verifier_behaves_exactly_as_before():
     client = FakeClient([DIRECT_JSON])
     eng = RelicClueEngine(client, "m")
     draft = eng.next_clue(_ctx(), 1, [])
-    assert "dried blood" in draft.text and client.calls == 1
+    # 2 calls: the direct clue + the blind solver (puzzle phase). No trail call.
+    assert "dried blood" in draft.text and client.calls == 2
 
 
 def test_late_clues_never_use_trails_even_when_enabled():

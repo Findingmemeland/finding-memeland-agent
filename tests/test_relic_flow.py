@@ -35,10 +35,37 @@ def _ctx(name="Maroon Ledger"):
 # --------------------------------------------------------------------------- #
 
 
-def test_ramp_head_never_opens_on_the_image():
-    for _ in range(50):
-        plan = relic_ramp_plan("Maroon Ledger")
-        assert plan[0][0] != "image"
+def test_ramp_order_is_free_but_opens_on_a_name_and_art_pieces_never_touch():
+    """Pedro (27/08): clues 1 and 2 need not be word 1 and word 2 — two pieces on
+    the same word back to back is fine, the art can come second. Opus (27/08):
+    clue 1 is the cold-traffic post under "work out the two-word name", so it
+    always opens on a NAME piece. Two art pieces are never adjacent."""
+    names = ["Maroon Ledger", "Uncle Pump", "goblin accountant", "soggy firewall",
+             "burnt oracle", "leaky astronaut", "pickled Ptolemy", "Clinging Shrimp",
+             "clone brunch", "velvet landlord", "midnight plumber", "quiet auditor"]
+    same_word_twice = art_second = 0
+    for name in names:
+        plan = relic_ramp_plan(name)
+        facets = [f for f, _ in plan]
+        assert facets[0] != "image", name
+        assert not any(a == b == "image" for a, b in zip(facets, facets[1:], strict=False)), name
+        art_second += facets[1] == "image"
+        same_word_twice += any(a == b != "image" for a, b in zip(facets, facets[1:], strict=False))
+    assert same_word_twice >= 1        # the freedom is real, not theoretical
+    assert art_second >= 1
+
+
+def test_relation_angle_never_opens_the_hunt():
+    """A constraint on the OTHER word is unusable before that word had a piece —
+    and clue 1 is the most-read post (Opus, 27/08)."""
+    from finding_memeland.content.relic_clues import angle_for_unverifiable
+    for name in ["Maroon Ledger", "Uncle Pump", "goblin accountant", "soggy firewall",
+                 "burnt oracle", "leaky astronaut", "pickled Ptolemy", "Clinging Shrimp",
+                 "clone brunch", "velvet landlord", "midnight plumber", "quiet auditor"]:
+        ident = new_identity(name=name, description="d", image_prompt="p", solution_terms=["x"])
+        ctx = RelicClueContext.from_identity(ident)
+        for pick in (angle_for, angle_for_unverifiable):
+            assert not (pick(1, ctx) or "").startswith("RELATION"), name
 
 
 def test_puzzle_phase_name_pieces_are_all_hard():
@@ -50,15 +77,19 @@ def test_puzzle_phase_name_pieces_are_all_hard():
     assert {f for f, _ in slots} <= {"name_word_1", "name_word_2", "image"}
 
 
-def test_artwork_gets_one_hard_piece_and_one_easy():
-    """You cannot SEARCH an image, so the art is for recognition: one oblique
-    piece, the rest plain descriptions (Pedro, 2026-08-22)."""
-    for _ in range(50):
-        plan = relic_ramp_plan("Maroon Ledger")
-        art = [o for f, o in plan if f == "image"]
-        assert len(art) == PUZZLE_IMAGE_PIECES
-        assert sum(1 for o in art if o == IMAGE_EASY_OBLIQUENESS) == 1
-        assert sum(1 for o in art if o >= 0.65) == 1
+def test_every_puzzle_piece_is_hard_including_the_art():
+    """Hunt #7 post-mortem: the art is generated FROM the name, so a plain
+    description of it is the name in other words. All 7 pieces take the hard
+    curve; the plain art description lives in the reveal phase now."""
+    from finding_memeland.content.relic_clues import REVEAL_IMAGE_SLOT
+    ctx, _ = _ctx()
+    plan = relic_ramp_plan("Maroon Ledger")
+    art = [o for f, o in plan if f == "image"]
+    assert len(art) == PUZZLE_IMAGE_PIECES
+    assert all(o >= 0.65 for _, o in plan)
+    assert [o for _, o in plan] == list(PUZZLE_OBLIQUENESS)
+    easy_art = relic_slot_for(PUZZLE_CLUES + REVEAL_IMAGE_SLOT, ctx)
+    assert easy_art == ("image", IMAGE_EASY_OBLIQUENESS)
 
 
 def test_no_name_word_is_ever_starved_of_pieces():
@@ -120,11 +151,13 @@ def test_reveal_phase_alternates_name_words_and_only_eases():
     easier every time, forever (no lore, no 'where to search')."""
     ctx, _ = _ctx()
     rev = [relic_slot_for(i, ctx) for i in range(PUZZLE_CLUES + 1, PUZZLE_CLUES + 9)]
-    assert all(f.startswith("name_word_") for f, _ in rev)
-    assert [f for f, _ in rev][:4] == ["name_word_1", "name_word_2",
-                                       "name_word_1", "name_word_2"]
-    obl = [o for _, o in rev]
+    names = [(f, o) for f, o in rev if f != "image"]
+    assert len(rev) - len(names) == 1          # exactly one plain art description
+    assert [f for f, _ in names][:4] == ["name_word_1", "name_word_2",
+                                         "name_word_1", "name_word_2"]
+    obl = [o for _, o in names]
     assert obl == sorted(obl, reverse=True) and min(obl) >= REVEAL_FLOOR
+    assert obl[0] == 0.4 and obl[1] == 0.35     # the image slot doesn't skip a step
 
 
 def test_reveal_never_goes_below_the_floor():
@@ -195,8 +228,264 @@ def test_engine_inherits_guardrail_loop_and_regenerates(monkeypatch):
     client = _Client()
     eng = RelicClueEngine(client, "m")
     draft = eng.next_clue(ctx, 1, [])
-    assert client.calls == 2                     # first was rejected
+    # 3 calls: leaky draft (rejected by text rules, no solver), clean draft,
+    # then the blind solver on the clean draft (it answers with the clue JSON,
+    # which has no guesses — a pass).
+    assert client.calls == 3
     assert "maroon" not in draft.text.lower()    # the leak never survives
+
+
+# --------------------------------------------------------------------------- #
+# Hunt #7 post-mortem (27/08): the opening pair, emoji, rhyme, the blind solver #
+# --------------------------------------------------------------------------- #
+
+
+def _scripted_engine(responses, **kw):
+    class _Blk:
+        def __init__(self, t): self.type, self.text = "text", t
+
+    class _Resp:
+        def __init__(self, t): self.content = [_Blk(t)]
+
+    class _Client:
+        def __init__(self):
+            self.calls = 0
+            self.systems = []
+        @property
+        def messages(self):
+            outer = self
+            class M:
+                def create(self, **kw):
+                    outer.calls += 1
+                    outer.systems.append(kw.get("system", ""))
+                    return _Resp(responses[min(outer.calls - 1, len(responses) - 1)])
+            return M()
+
+    client = _Client()
+    return RelicClueEngine(client, "m", **kw), client
+
+
+def test_sound_is_not_a_puzzle_angle():
+    """Hunt #7: "rhymes with 'singing'", "rhymes with 'blimp'" — a rhyme fixes
+    the word's ending and any second fact finishes it. Reveal phase only."""
+    assert not any(a.startswith("SOUND") for a in PUZZLE_ANGLES)
+
+
+def test_clue_1_and_clue_2_never_share_an_angle():
+    """The structural bug behind Hunt #7: each word restarted the angle sequence
+    at the same offset, so the first piece of word 1 and the first piece of
+    word 2 — clues 1 and 2 in the old fixed order — always got the SAME angle."""
+    from finding_memeland.content.relic_clues import angle_for_unverifiable
+    names = ["Maroon Ledger", "Uncle Pump", "goblin accountant", "soggy firewall",
+             "burnt oracle", "leaky astronaut", "pickled Ptolemy", "Clinging Shrimp",
+             "clone brunch", "velvet landlord", "midnight plumber", "quiet auditor"]
+    for name in names:
+        ident = new_identity(name=name, description="d", image_prompt="p", solution_terms=["x"])
+        ctx = RelicClueContext.from_identity(ident)
+        for pick in (angle_for, angle_for_unverifiable):
+            angles = [pick(i, ctx) for i in range(1, PUZZLE_CLUES + 1)]
+            named = [a for a in angles if a]
+            # Consecutive name pieces never share an angle, whichever words they hit.
+            for a, b in zip(angles, angles[1:], strict=False):
+                assert not (a and b and a == b), (name, a)
+            # And the first piece of each word differs from the other word's first.
+            firsts = {}
+            for i in range(1, PUZZLE_CLUES + 1):
+                f = relic_slot_for(i, ctx)[0]
+                if f != "image" and f not in firsts:
+                    firsts[f] = angles[i - 1]
+            assert len(set(firsts.values())) == len(firsts), (name, firsts)
+            # (Per-word uniqueness is test_each_name_piece_uses_a_different_angle;
+            # across words a repeat is legal on the 4-angle direct path.)
+            assert named
+
+
+def test_word_guidance_is_a_constraint_in_the_puzzle_and_a_hint_in_the_reveal():
+    """The old guidance told the model to make the player 'arrive at the literal
+    word' via 'meaning, a synonym, or wordplay' — one line under the puzzle
+    doctrine. That's the second vector Hunt #7's clues carried."""
+    from finding_memeland.content.relic_clues import relic_guidance_for
+    ctx, _ = _ctx()
+    hard = relic_guidance_for("name_word_1", ctx, 1)
+    easy = relic_guidance_for("name_word_1", ctx, PUZZLE_CLUES + 1)
+    assert "NOT its meaning" in hard and "NOT a rhyme" in hard
+    assert "several candidates" in hard
+    assert "synonym" in easy and "rhyme" in easy
+    assert "arrives at the literal word" in easy
+    assert "arrives at the literal word" not in hard
+
+
+def test_system_prompt_carries_the_phase_rules():
+    eng, client = _scripted_engine(['{"clue": "kept where the numbers sleep", "taunt": ""}',
+                                    '{"guesses": ["vault", "bank"]}'])
+    eng.next_clue(_ctx()[0], 1, [])
+    assert "NO EMOJI" in client.systems[0] and "NO SOUND" in client.systems[0]
+    assert "BLIND SOLVER" in client.systems[0]
+    eng, client = _scripted_engine(['{"clue": "kept where the numbers sleep", "taunt": "x"}'])
+    eng.next_clue(_ctx()[0], PUZZLE_CLUES + 1, ["c"] * PUZZLE_CLUES)
+    assert "REVEAL PHASE" in client.systems[0] and "NO EMOJI" not in client.systems[0]
+
+
+def test_puzzle_phase_rejects_emoji_and_rhyme_through_the_engine():
+    """The two Hunt #7 clues, verbatim, must not survive the loop; the third
+    attempt (clean) is what gets published. The solver answers 'no idea'."""
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine([
+        '{"clue": "word one of two: rhymes with singing but carries more weight 🎒", '
+        '"taunt": ""}',
+        '{"clue": "word two of two: leans smaller — the sound alone should make you feel sorry '
+        '🦐", "taunt": ""}',
+        '{"clue": "kept where the numbers sleep", "taunt": ""}',
+        '{"guesses": ["vault", "bank", "safe"]}',
+    ])
+    draft = eng.next_clue(ctx, 1, [])
+    assert draft.text == "kept where the numbers sleep"
+    assert client.calls == 4                     # 3 drafts + 1 solver call
+
+
+def test_emoji_is_allowed_again_in_the_reveal_phase():
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine(['{"clue": "the colour of dried blood 📕", "taunt": "x"}'])
+    draft = eng.next_clue(ctx, PUZZLE_CLUES + 1, ["c"] * PUZZLE_CLUES)
+    assert "📕" in draft.text and client.calls == 1     # no solver after the puzzle
+
+
+def test_blind_solver_rejects_a_clue_it_can_solve():
+    """A clue that passes every text rule but is a definition in disguise: the
+    solver names the word, the clue is regenerated, and the feedback says why."""
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine([
+        '{"clue": "the colour of dried blood, kept in a book", "taunt": ""}',
+        '{"guesses": ["maroon", "crimson", "burgundy"]}',
+        '{"clue": "the shade every football club claims is nothing like red", "taunt": ""}',
+        '{"guesses": ["claret", "burgundy", "scarlet"]}',
+    ])
+    draft = eng.next_clue(ctx, 1, [])
+    assert "football" in draft.text and client.calls == 4
+
+
+def test_blind_solver_matches_on_the_stem_and_on_the_facet_word_only():
+    from finding_memeland.content.relic_clues import _solver_target_words, solver_hits
+    ctx, _ = _ctx(name="Clinging Shrimp")
+    w1, art = _solver_target_words(ctx, "name_word_1"), _solver_target_words(ctx, "image")
+    assert solver_hits(["cling", "Clingy!"], w1) == ["Clingy!", "cling"]
+    assert solver_hits(["shrimp"], w1) == []              # the other word: not this facet
+    assert solver_hits(["shrimp"], art) == ["shrimp"]      # art piece: any name word
+    assert solver_hits(["prawn", "crab"], _solver_target_words(ctx, "name_word_2")) == []
+
+
+class _DownSolver:
+    name = "down"
+    model = "x"
+
+    def guess(self, clues, word_count):
+        raise ConnectionError("solver down")
+
+
+def test_blind_solver_failure_is_fail_closed_on_clue_1(caplog):
+    """Nothing is published yet and the operator can still abort: raise, so the
+    alert reaches Telegram at once (Opus, 27/08)."""
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine(['{"clue": "kept where the numbers sleep", "taunt": ""}'],
+                                   solver=_DownSolver())
+    with pytest.raises(RuntimeError, match="blind solver"):
+        eng.next_clue(ctx, 1, [])
+    assert client.calls == 1                     # no six wasted regenerations
+
+
+def test_blind_solver_failure_is_fail_open_from_clue_2_and_logged(caplog):
+    """The hunt is live: stopping is worse than publishing on the text rules.
+    The solver's absence is logged, the clue goes out."""
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine(['{"clue": "kept where the numbers sleep", "taunt": "x"}'],
+                                   solver=_DownSolver())
+    with caplog.at_level("WARNING"):
+        draft = eng.next_clue(ctx, 2, ["c1"])
+    assert draft.text == "kept where the numbers sleep"
+    assert any("blind solver unavailable" in r.message for r in caplog.records)
+
+
+class _ScriptedSolver:
+    """Answers per call: first the ALONE guess list, then the ACCUMULATED one."""
+    name = "scripted"
+    model = "x"
+
+    def __init__(self, answers):
+        self.answers, self.seen = list(answers), []
+
+    def guess(self, clues, word_count):
+        self.seen.append(list(clues))
+        return self.answers.pop(0) if self.answers else []
+
+
+def test_accumulated_solver_rejects_at_clue_2_but_only_logs_later(caplog):
+    """Pedro (27/08): the answer must stay ambiguous after one clue or two.
+    Clue 2 solved TOGETHER with clue 1 is rejected; from clue 3 a converging
+    solver is the design working and is only recorded."""
+    from finding_memeland.content.relic_clues import SOLVER_STRICT_ACCUMULATED_UNTIL
+    assert SOLVER_STRICT_ACCUMULATED_UNTIL == 2
+    ctx, _ = _ctx()
+    # clue 2: alone -> miss, accumulated -> HIT (reject); second draft: miss, miss.
+    solver = _ScriptedSolver([["vault"], ["maroon", "ledger"], ["vault"], ["bank"]])
+    eng, client = _scripted_engine([
+        '{"clue": "a book that never closes", "taunt": "x"}',
+        '{"clue": "kept where the numbers sleep", "taunt": "x"}',
+    ], solver=solver)
+    draft = eng.next_clue(ctx, 2, ["the colour of dried blood"])
+    assert draft.text == "kept where the numbers sleep" and client.calls == 2
+    assert solver.seen[1] == ["the colour of dried blood", "a book that never closes"]
+    # clue 3: accumulated HIT is logged, not rejected.
+    solver = _ScriptedSolver([["vault"], ["maroon", "ledger"]])
+    eng, client = _scripted_engine(['{"clue": "a book that never closes", "taunt": "x"}'],
+                                   solver=solver)
+    with caplog.at_level("INFO"):
+        draft = eng.next_clue(ctx, 3, ["c1", "c2"])
+    assert draft.text == "a book that never closes" and client.calls == 1
+    assert any("converged at clue #3" in r.message for r in caplog.records)
+
+
+def test_openai_solver_adapter_parses_chat_completions():
+    from finding_memeland.content.relic_clues import OpenAIBlindSolver
+
+    class _Msg:
+        content = '{"guesses": ["ledger", "book"]}'
+
+    class _Choice:
+        message = _Msg()
+
+    class _Resp:
+        choices = [_Choice()]
+
+    class _Client:
+        def __init__(self):
+            self.kw = None
+        @property
+        def chat(self):
+            outer = self
+            class _C:
+                @property
+                def completions(self):
+                    class _CC:
+                        def create(self, **kw):
+                            outer.kw = kw
+                            return _Resp()
+                    return _CC()
+            return _C()
+
+    c = _Client()
+    out = OpenAIBlindSolver(c, "gpt-test").guess(["c1", "c2"], 2)
+    assert out == ["ledger", "book"] and c.kw["model"] == "gpt-test"
+    assert "Last clue (solve this one): c2" in c.kw["messages"][1]["content"]
+    assert "exactly 2 word(s)" in c.kw["messages"][0]["content"]
+
+
+def test_blind_solver_can_be_switched_off():
+    ctx, _ = _ctx()
+    eng, client = _scripted_engine(
+        ['{"clue": "kept where the numbers sleep", "taunt": ""}'], solver=False
+    )
+    eng.next_clue(ctx, 1, [])
+    assert client.calls == 1
 
 
 # --------------------------------------------------------------------------- #
