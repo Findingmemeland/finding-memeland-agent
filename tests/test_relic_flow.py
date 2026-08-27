@@ -785,4 +785,37 @@ def test_relic_reveal_talks_about_the_relic_not_a_persona():
 def test_persona_reveal_is_untouched():
     from finding_memeland.content.templates import winner_announcement
 
-    assert "The hidden persona was" in winner_announcement(_winner_data())
+    text = winner_announcement(_winner_data())
+    assert "The hidden persona was" in text
+    assert "user_id: base:0xa:1" in text          # persona path: printed whole
+
+
+def test_relic_reveal_never_prints_the_joined_user_id():
+    """Medido na conta de teste (27/08): o X transforma `base:0x…` num link
+    cashtag COM "$" à frente — quem copiava o texto renderizado levava o $ e o
+    hash não batia, no único bloco que pede verificação. O reveal relic mostra
+    os componentes separados; o valor hasheado não muda (protocolo congelado)."""
+    from finding_memeland.content.templates import winner_announcement
+
+    contract = "0xba6a6609411166fd195ed30e1de7ff47882dc401"
+    text = winner_announcement(_winner_data(
+        persona_user_id=f"base:{contract}:1",
+        relic_name="Maroon Ledger", relic_link="basescan.org/x",
+    ))
+    assert f"base:{contract}" not in text          # a forma montada nunca sai
+    assert "chain: base" in text
+    assert f"contract: {contract}" in text
+    assert "tokenId: 1" in text
+    assert "assemble it yourself" in text
+    assert "It matches the hash in Clue 1." in text
+
+
+def test_relic_reveal_falls_back_when_user_id_has_no_chain_shape():
+    """Um user_id que não seja chain:contract:token imprime-se inteiro — nunca
+    um bloco de integridade com campos vazios."""
+    from finding_memeland.content.templates import winner_announcement
+
+    text = winner_announcement(_winner_data(
+        persona_user_id="weird-id", relic_name="Maroon Ledger",
+    ))
+    assert "user_id: weird-id" in text and "chain:" not in text

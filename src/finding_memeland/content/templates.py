@@ -35,6 +35,28 @@ class WinnerData:
     relic_name: str | None = None
     relic_link: str | None = None
 
+    @property
+    def user_id_chain(self) -> str:
+        return self._user_id_parts[0]
+
+    @property
+    def user_id_contract(self) -> str:
+        return self._user_id_parts[1]
+
+    @property
+    def user_id_token(self) -> str:
+        return self._user_id_parts[2]
+
+    @property
+    def _user_id_parts(self) -> tuple[str, str, str]:
+        """chain, contract, token of a relic user_id ('base:0x…:1'), or empty
+        strings when the id doesn't have that exact shape — the reveal then
+        falls back to printing it whole."""
+        parts = (self.persona_user_id or "").split(":")
+        if len(parts) == 3 and all(parts):
+            return (parts[0], parts[1], parts[2])
+        return ("", "", "")
+
 
 # --------------------------------------------------------------------------
 # Cold-traffic explainer (post-mortem P1b): the opening post assumed the reader
@@ -164,17 +186,41 @@ def winner_announcement(d: WinnerData) -> str:
             f"The hidden persona was @{persona} — the profile stays up as a "
             f"trophy. It played once, and never again.\n\n"
         )
-        + f"Integrity check — recompute SHA-256 of:\n"
-        f"  user_id: {d.persona_user_id}\n"
-        f"  claim_code: {d.claim_code}\n"
-        f"  salt: {d.salt}\n"
-        f"It matches the hash in Clue 1.\n\n"
+        + (
+            # Hunt relic: o user_id é `chain:contract:token` — e o X transforma
+            # essa forma montada num link cashtag COM UM "$" À FRENTE (medido
+            # 27/08 na conta de teste: o texto cru não tem $, o ecrã tem).
+            # Quem copiasse o texto renderizado levava o $ e o hash não batia —
+            # no único bloco que pede às pessoas para verificar. Componentes
+            # separados não são tocados pelo renderer (mesmo teste); o valor
+            # hasheado é o MESMO, só a apresentação muda. O protocolo congelado
+            # (integrity.py) fica intacto.
+            (
+                f"Integrity check — recompute SHA-256 of user_id + claim_code "
+                f"+ salt.\n"
+                f"user_id is chain:contract:tokenId joined with ':' (one "
+                f"string, lowercase) — assemble it yourself; posted split "
+                f"because X links the joined form:\n"
+                f"  chain: {d.user_id_chain}\n"
+                f"  contract: {d.user_id_contract}\n"
+                f"  tokenId: {d.user_id_token}\n"
+                f"  claim_code: {d.claim_code}\n"
+                f"  salt: {d.salt}\n"
+                f"It matches the hash in Clue 1.\n\n"
+            )
+            if d.relic_name and d.user_id_contract else
+            f"Integrity check — recompute SHA-256 of:\n"
+            f"  user_id: {d.persona_user_id}\n"
+            f"  claim_code: {d.claim_code}\n"
+            f"  salt: {d.salt}\n"
+            f"It matches the hash in Clue 1.\n\n"
+        )
         # "Turn notifications on" was one of the exact engagement-bait phrases
         # that got the operator account flagged by X (2026-07-15). It sat in the
         # ONE post that matters most — the winner reveal, carrying the tx link
         # and the integrity proof — where a deboost costs the most.
-        f"To the rest of you: keep your eyes open. "
-        f"The next hunt can begin at any time."
+        + "To the rest of you: keep your eyes open. "
+        "The next hunt can begin at any time."
     )
 
 
