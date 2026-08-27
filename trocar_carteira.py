@@ -1,7 +1,8 @@
-"""Meter UMA carteira nova no .env e deixar só ela na lista de mint.
+"""Meter UMA carteira nova no .env E no Doppler, e deixar só ela na lista de mint.
 
     .venv/bin/python trocar_carteira.py                 # ref RX01
     .venv/bin/python trocar_carteira.py RX02            # ref à escolha
+    .venv/bin/python trocar_carteira.py RX02 --config dev   # outra config
 
 O que faz, por esta ordem:
   1. pede o ENDEREÇO (visível — é público) e a CHAVE PRIVADA (tapada), e
@@ -10,26 +11,58 @@ O que faz, por esta ordem:
   3. reescreve RELIC_WALLET_REFS para conter SÓ a ref nova — as carteiras que
      ainda não mintaram (RW06-RW10) deixam de poder ser escolhidas. Os pares
      RWxx_ADDR/RWxx_PK ficam intactos: a transferência do troféu resolve a chave
-     pela ref gravada no relic, e RW01-RW05 ainda guardam relics.
+     pela ref gravada no relic, e RW01-RW05 ainda guardam relics;
+  4. pergunta se corre o Doppler já (Pedro, 27/08: "quanto menos passos
+     melhor") e, com um "s", escreve RELIC_WALLET_REFS + {REF}_ADDR + {REF}_PK
+     na config indicada — a chave segue por stdin, nunca por argumento (os
+     argumentos de um processo são visíveis a quem liste processos). Sem
+     doppler instalado, ou com "n", imprime os comandos como antes.
 
-Nunca mostra a chave. No fim imprime os comandos para o Doppler — a chave vai
-por pipe a partir do .env, sem passar pelo ecrã nem pelo histórico da shell.
+Nunca mostra a chave. ATENÇÃO à config: o mint de 27/08 falhou porque a RX02
+entrou no ecrã da config errada — por omissão este script escreve em `prd`.
 """
 
 from __future__ import annotations
 
 import getpass
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 ENV = Path(__file__).with_name(".env")
+DOPPLER_PROJECT = "finding-memeland"
+DOPPLER_CONFIG = "prd"
+
+
+def _doppler_set(args: list[str], *, config: str, stdin: str | None = None) -> bool:
+    """`doppler secrets set …` na config dada. A chave (stdin) nunca entra na
+    linha de comandos. True se o doppler devolveu 0."""
+    cmd = ["doppler", "secrets", "set", *args,
+           "--project", DOPPLER_PROJECT, "--config", config, "--silent"]
+    try:
+        proc = subprocess.run(cmd, input=stdin, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"⛔ doppler falhou: {e!r}")
+        return False
+    return proc.returncode == 0
 
 
 def main() -> int:
-    ref = (sys.argv[1] if len(sys.argv) > 1 else "RX01").strip().upper()
+    args = sys.argv[1:]
+    config = DOPPLER_CONFIG
+    if "--config" in args:
+        i = args.index("--config")
+        try:
+            config = args[i + 1]
+        except IndexError:
+            print("uso: trocar_carteira.py [REF] [--config prd]")
+            return 2
+        args = args[:i] + args[i + 2:]
+    ref = (args[0] if args else "RX01").strip().upper()
     if not re.fullmatch(r"[A-Z]{1,6}[0-9]{2}", ref):
-        print("uso: trocar_carteira.py [REF]   (ex.: RX01)")
+        print("uso: trocar_carteira.py [REF] [--config prd]   (ex.: RX02)")
         return 2
 
     try:
@@ -88,14 +121,32 @@ def main() -> int:
     if dropped:
         print(f"   fora da lista de mint (chaves mantidas): {', '.join(dropped)}")
 
-    print("\nAgora o Doppler (config prd). A chave vai por pipe, nunca pelo ecrã:\n")
-    print(f"  doppler secrets set RELIC_WALLET_REFS={ref} {ref}_ADDR={addr} "
-          "--project finding-memeland --config prd")
-    print(f"  grep '^{ref}_PK=' .env | cut -d= -f2- | tr -d '\\n' | "
-          f"doppler secrets set {ref}_PK --project finding-memeland --config prd")
+    # ---- Doppler, directo (Pedro, 27/08: "quanto menos passos melhor") ----
+    done = False
+    if shutil.which("doppler"):
+        prompt = f"\nEscrever já no Doppler ({DOPPLER_PROJECT}/{config})? [s/N] "
+        ans = input(prompt).strip().lower()
+        if ans in ("s", "sim", "y", "yes"):
+            done = (
+                _doppler_set([f"RELIC_WALLET_REFS={ref}", f"{ref}_ADDR={addr}"], config=config)
+                and _doppler_set([f"{ref}_PK"], config=config, stdin=key)
+            )
+            if done:
+                print(f"✅ Doppler {DOPPLER_PROJECT}/{config}: RELIC_WALLET_REFS={ref}, "
+                      f"{ref}_ADDR e {ref}_PK escritos.")
+            else:
+                print("⛔ o Doppler não confirmou — corre os comandos à mão (abaixo).")
+    else:
+        print("\n(doppler CLI não encontrado — comandos manuais abaixo.)")
+
+    if not done:
+        print(f"\nDoppler manual (config {config}). A chave vai por pipe, nunca pelo ecrã:\n")
+        print(f"  doppler secrets set RELIC_WALLET_REFS={ref} {ref}_ADDR={addr} "
+              f"--project {DOPPLER_PROJECT} --config {config}")
+        print(f"  grep '^{ref}_PK=' .env | cut -d= -f2- | tr -d '\\n' | "
+              f"doppler secrets set {ref}_PK --project {DOPPLER_PROJECT} --config {config}")
     print("\nA Railway reinicia o processo ao mudar o env — faz isto sem hunt a decorrer.")
-    print(f"Depois: /relic_mint → confirma eth_getCode do contrato novo == o do Maroon Ledgerkeep "
-          "e o slot EIP-1967 a acabar em 95d452fc85869a7834189f41ec6bb0915f943aa3.\n")
+    print("Depois: /relic_mint → confirma '✅ minted' com 'backend: manifold'.\n")
     return 0
 
 
