@@ -427,3 +427,121 @@ def test_mint_retry_reuses_the_reserved_wallet_instead_of_burning_another():
                image_gen=FakeImageGen(), minter=minter)
     assert minter.minted[0]["wallet_ref"] == "W1"
     assert repo.get_relic("r1").mint_wallet_ref == "W1"
+
+
+# --------------------------------------------------------------------------- #
+# Manifold-proxy minter (probe 2026-08-26, Probe_Manifold_Proxy.md)             #
+# --------------------------------------------------------------------------- #
+
+
+def test_manifold_artifact_is_the_real_proxy_runtime():
+    """The artifact carries the constructor-only deployer AND the 298 bytes of a
+    real Manifold ERC721Creator proxy read from Base, plus its implementation."""
+    from finding_memeland.persona.relic_mint import load_manifold_artifact
+
+    art = load_manifold_artifact()
+    ctor = next(e for e in art["abi"] if e["type"] == "constructor")
+    assert [i["type"] for i in ctor["inputs"]] == ["address", "string", "string", "bytes"]
+    runtime = bytes.fromhex(art["manifold_runtime"][2:])
+    assert len(runtime) == 298                       # the Manifold proxy, verbatim
+    assert runtime[:4] == bytes.fromhex("60806040")   # solc prologue
+    assert runtime[-2:] == bytes.fromhex("0033")      # CBOR trailer terminator
+    assert art["manifold_implementation"].lower() == "0x95d452fc85869a7834189f41ec6bb0915f943aa3"
+    assert art["bytecode"].startswith("0x")
+
+
+class _RecordingPinner:
+    def __init__(self):
+        self.pinned: list[tuple[bytes, str]] = []
+
+    def pin(self, data: bytes, *, name: str = "relic.png") -> str:
+        self.pinned.append((data, name))
+        return f"ipfs://bafyMETA{len(self.pinned)}"
+
+
+class _FakeManifoldMinter:
+    """ManifoldMinter with `_send` replaced: records the three-step call and
+    hands back the coordinates the chain would."""
+
+    def __init__(self, **kw):
+        from finding_memeland.persona.relic_mint import ManifoldMinter
+
+        self.sent: list[dict] = []
+        outer = self
+
+        class _M(ManifoldMinter):
+            def _send(self, **kw2):
+                outer.sent.append(kw2)
+                return "0xPROXY000000000000000000000000000000000001", 1, "0xminttx"
+
+        self.minter = _M(**kw)
+
+
+def _manifold_minter():
+    from finding_memeland.persona.relic_mint import load_manifold_artifact
+
+    pinner = _RecordingPinner()
+    wrap = _FakeManifoldMinter(
+        web3=None, wallets=WalletPool(FakeWalletDirectory(["RW01"]), FakeKeyResolver()),
+        pinner=pinner, artifact=load_manifold_artifact(),
+    )
+    return wrap, pinner
+
+
+def test_manifold_minter_pins_the_metadata_and_mints_with_its_uri():
+    import json
+
+    wrap, pinner = _manifold_minter()
+    res = wrap.minter.deploy_and_mint(
+        name="Maroon Ledger", symbol="MLDG",
+        description='kept the "books"\n\ncode: ABCDEFGH', image_uri="ipfs://bafyIMG",
+        attributes='[{"trait_type":"maker","value":"Vex Rue"}]',
+        provenance_hash="0x" + "ab" * 32, wallet_ref="RW01",
+    )
+    # The metadata JSON went to the pinner, with the four fields, properly escaped.
+    data, name = pinner.pinned[0]
+    meta = json.loads(data)
+    assert name == "metadata.json"
+    assert meta["name"] == "Maroon Ledger"
+    assert meta["description"] == 'kept the "books"\n\ncode: ABCDEFGH'
+    assert meta["image"] == "ipfs://bafyIMG"
+    assert meta["attributes"] == [{"trait_type": "maker", "value": "Vex Rue"}]
+    # The chain call got the pinned URI and the relic wallet, never the key.
+    sent = wrap.sent[0]
+    assert sent["token_uri"] == "ipfs://bafyMETA1"
+    assert sent["deployer_address"] == "0xADDR_RW01"
+    assert sent["name"] == "Maroon Ledger" and sent["symbol"] == "MLDG"
+    assert res.contract.startswith("0xPROXY") and res.token_id == "1"
+    assert res.image_uri == "ipfs://bafyIMG"
+
+
+def test_manifold_minter_uses_the_artifact_implementation_unless_overridden():
+    from finding_memeland.persona.relic_mint import ManifoldMinter, load_manifold_artifact
+
+    art = load_manifold_artifact()
+    default = ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art)
+    assert default.implementation.lower() == art["manifold_implementation"].lower()
+    over = ManifoldMinter(web3=None, wallets=None, pinner=None, artifact=art,
+                          implementation="0x" + "11" * 20)
+    assert over.implementation == "0x" + "11" * 20
+
+
+def test_mint_relic_through_manifold_binds_the_commitment_to_the_proxy():
+    """End to end through mint_relic: the commitment is computed over
+    base:<proxy>:<tokenId> and verifies — same frozen protocol, new contract."""
+    from finding_memeland.persona.relic import relic_canonical_id, verify_relic_commitment
+    from finding_memeland.persona.relic_mint import mint_relic
+
+    pool = RelicPool(FakeRelicRepo(), NullPoolCipher())
+    ident = new_identity(name="Maroon Ledger", description="kept the books",
+                         image_prompt="a brass ledger", solution_terms=["Cassandra"])
+    pool.add(Relic(id="r1"), ident)
+    wrap, pinner = _manifold_minter()
+    res = mint_relic(relic_id="r1", pool=pool, wallets=wrap.minter._wallets,
+                     image_gen=FakeImageGen(), minter=wrap.minter)
+    stored = pool._repo.get_relic("r1")
+    cid = relic_canonical_id("base", res.contract, res.token_id)
+    assert stored.contract == res.contract and stored.token_id == "1"
+    assert verify_relic_commitment(cid, ident.claim_code, ident.salt, stored.commitment)
+    # The claim code rides in the pinned description, not on-chain code.
+    assert ident.claim_code in pinner.pinned[0][0].decode()

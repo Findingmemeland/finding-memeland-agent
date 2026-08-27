@@ -156,12 +156,29 @@ def build_agent(settings: Settings | None = None) -> Agent:
             PinataPinner(s.pinata_jwt),
         )
         try:
-            from .persona.relic_mint import Web3Minter, load_contract_artifact
-
-            _abi, _bytecode = load_contract_artifact()
-            relic_minter = Web3Minter(
-                web3=web3, wallets=relic_wallets, abi=_abi, bytecode=_bytecode
+            from .persona.relic_mint import (
+                ManifoldMinter, Web3Minter, load_contract_artifact, load_manifold_artifact,
             )
+
+            if s.relic_mint_backend == "manifold":
+                # Manifold proxy (probe 2026-08-26): the relic's code is the same
+                # 298 bytes as thousands of Manifold collections — no bytecode
+                # class to enumerate. The metadata JSON goes to IPFS like theirs.
+                relic_minter = ManifoldMinter(
+                    web3=web3, wallets=relic_wallets, pinner=PinataPinner(s.pinata_jwt),
+                    artifact=load_manifold_artifact(),
+                    implementation=s.manifold_implementation or None,
+                )
+            elif s.relic_mint_backend == "relicnft":
+                _abi, _bytecode = load_contract_artifact()
+                relic_minter = Web3Minter(
+                    web3=web3, wallets=relic_wallets, abi=_abi, bytecode=_bytecode
+                )
+            else:
+                raise RuntimeError(
+                    f"RELIC_MINT_BACKEND={s.relic_mint_backend!r} is not 'manifold' or 'relicnft'"
+                )
+            print(f"[relic] mint backend: {s.relic_mint_backend}")
         except Exception as e:  # noqa: BLE001 — no artifact == no minting, not a crash
             # Printed in full: the message lists every path that was tried, and
             # this is the only place that detail reaches the logs.
@@ -937,7 +954,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             label for label, ok in (
                 ("RELIC_WALLET_REFS", bool(s.relic_wallet_ref_list)),
                 ("PINATA_JWT", bool(s.pinata_jwt)),
-                ("contracts/RelicNFT.json", relic_minter is not None),
+                (f"mint backend '{s.relic_mint_backend}' (artifact)", relic_minter is not None),
             ) if not ok
         ]
         if missing:
@@ -971,6 +988,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         return (
             f"✅ minted (blind — nada aqui identifica o relic)\n"
             f"  relic:    {relic_id}\n"
+            f"  backend:  {s.relic_mint_backend}\n"
             f"  wallets left: {free - 1 if free >= 0 else '?'}"
         )
 

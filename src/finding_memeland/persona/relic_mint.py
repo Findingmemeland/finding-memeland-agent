@@ -161,6 +161,50 @@ class Minter(Protocol):
     ) -> MintResult: ...
 
 
+def _find_artifact(filename: str, *, path: str | None = None, env_var: str | None = None):
+    """Locate `contracts/<filename>` the same way for every artifact.
+
+    Search instead of computing one path. A single relative guess breaks the
+    moment the deployment layout changes — installed package vs run-from-repo
+    put this module at different depths, and the failure only shows up in
+    production (measured 2026-08-24: worked locally, "not configured" on
+    Railway). Every candidate is reported on failure so the next surprise is
+    diagnosable instead of mysterious.
+    """
+    import os
+    from pathlib import Path
+
+    tried: list[Path] = []
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    if env_var and os.environ.get(env_var):
+        candidates.append(Path(os.environ[env_var]))
+
+    here = Path(__file__).resolve()
+    # Walk up from this module: works whether the package sits in src/, in
+    # site-packages next to a copied contracts/, or anywhere else.
+    candidates += [parent / "contracts" / filename for parent in here.parents[:5]]
+    # Alongside the package itself, if the artifact is shipped as package data.
+    candidates.append(here.parent.parent / "contracts" / filename)
+    # And relative to wherever the process was started.
+    candidates.append(Path.cwd() / "contracts" / filename)
+
+    for candidate in candidates:
+        tried.append(candidate)
+        if candidate.exists():
+            return candidate
+    listed = "\n  ".join(str(t) for t in tried)
+    raise RuntimeError(
+        f"contract artifact {filename} not found. Looked in:\n  "
+        + listed
+        + (f"\nSet {env_var} to an absolute path, or " if env_var else "\n")
+        + "place the file in contracts/ at the repo root. It must be the ABI + "
+        "bytecode from the SAME compilation deployed by hand, so the agent mints "
+        "with bytecode that is known to work."
+    )
+
+
 def load_contract_artifact(path: str | None = None) -> tuple[list, str]:
     """(abi, bytecode) for RelicNFT.sol, read from a compiled artifact JSON.
 
@@ -177,47 +221,8 @@ def load_contract_artifact(path: str | None = None) -> tuple[list, str]:
     `data.bytecode.object` or `evm.bytecode.object`.
     """
     import json
-    import os
-    from pathlib import Path
 
-    # Search instead of computing one path. A single relative guess breaks the
-    # moment the deployment layout changes — installed package vs run-from-repo
-    # put this module at different depths, and the failure only shows up in
-    # production (measured 2026-08-24: worked locally, "not configured" on
-    # Railway). Every candidate is reported on failure so the next surprise is
-    # diagnosable instead of mysterious.
-    tried: list[Path] = []
-    candidates: list[Path] = []
-    if path:
-        candidates.append(Path(path))
-    if os.environ.get("RELIC_CONTRACT_ARTIFACT"):
-        candidates.append(Path(os.environ["RELIC_CONTRACT_ARTIFACT"]))
-
-    here = Path(__file__).resolve()
-    # Walk up from this module: works whether the package sits in src/, in
-    # site-packages next to a copied contracts/, or anywhere else.
-    candidates += [parent / "contracts" / "RelicNFT.json" for parent in here.parents[:5]]
-    # Alongside the package itself, if the artifact is shipped as package data.
-    candidates.append(here.parent.parent / "contracts" / "RelicNFT.json")
-    # And relative to wherever the process was started.
-    candidates.append(Path.cwd() / "contracts" / "RelicNFT.json")
-
-    p = None
-    for candidate in candidates:
-        tried.append(candidate)
-        if candidate.exists():
-            p = candidate
-            break
-    if p is None:
-        listed = "\n  ".join(str(t) for t in tried)
-        raise RuntimeError(
-            "contract artifact RelicNFT.json not found. Looked in:\n  "
-            + listed
-            + "\nSet RELIC_CONTRACT_ARTIFACT to an absolute path, or place the file "
-            "in contracts/ at the repo root. It must be the ABI + bytecode from the "
-            "SAME compilation deployed by hand, so the agent mints with bytecode "
-            "that is known to work."
-        )
+    p = _find_artifact("RelicNFT.json", path=path, env_var="RELIC_CONTRACT_ARTIFACT")
     data = json.loads(p.read_text())
 
     abi = data.get("abi")
@@ -233,6 +238,38 @@ def load_contract_artifact(path: str | None = None) -> tuple[list, str]:
     if not str(bytecode).startswith("0x"):
         bytecode = "0x" + str(bytecode)
     return abi, str(bytecode)
+
+
+MANIFOLD_ARTIFACT = "RelicManifoldProxy.json"
+
+
+def load_manifold_artifact(path: str | None = None) -> dict:
+    """The Manifold-proxy artifact (contracts/RelicManifoldProxy.json), validated.
+
+    Keys: `abi` + `bytecode` (the constructor-only deployer, RelicManifoldProxy.sol),
+    `manifold_runtime` (the 298 bytes of a real Manifold ERC721Creator proxy on
+    Base, returned verbatim as the deployed code) and `manifold_implementation`
+    (the EIP-1967 implementation those proxies point to). See
+    Probe_Manifold_Proxy.md for how each was read from the chain."""
+    import json
+
+    p = _find_artifact(MANIFOLD_ARTIFACT, path=path, env_var="RELIC_MANIFOLD_ARTIFACT")
+    data = json.loads(p.read_text())
+    abi, bytecode = data.get("abi"), data.get("bytecode")
+    runtime, impl = data.get("manifold_runtime"), data.get("manifold_implementation")
+    if not abi or not bytecode:
+        raise RuntimeError(f"artifact at {p} has no usable abi/bytecode")
+    ctor = next((e for e in abi if e.get("type") == "constructor"), None)
+    types = [i.get("type") for i in (ctor or {}).get("inputs", [])]
+    if types != ["address", "string", "string", "bytes"]:
+        raise RuntimeError(
+            f"artifact at {p}: constructor must be (address,string,string,bytes), got {types}"
+        )
+    if not runtime or not str(runtime).startswith("0x") or len(runtime) < 2 + 2 * 100:
+        raise RuntimeError(f"artifact at {p}: manifold_runtime missing or too short")
+    if not impl or not str(impl).startswith("0x") or len(impl) != 42:
+        raise RuntimeError(f"artifact at {p}: manifold_implementation is not an address")
+    return data
 
 
 def create_relic(
@@ -415,6 +452,180 @@ class Web3Minter:
                 "recibo inesperado, nada gravado"
             )
         return receipt.contractAddress, 1, tx_hash.hex()
+
+
+# --------------------------------------------------------------------------- #
+# Manifold-proxy minter (probe 2026-08-26, Probe_Manifold_Proxy.md)              #
+# --------------------------------------------------------------------------- #
+
+# The slice of Manifold's ERC721CreatorImplementation we call through the proxy.
+MANIFOLD_ABI = [
+    {
+        "inputs": [{"name": "to", "type": "address"}, {"name": "uri", "type": "string"}],
+        "name": "mintBase",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "renounceOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+# keccak("Transfer(address,address,uint256)") — the mint log; topics[3] is the id.
+_ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def build_token_metadata(*, name: str, description: str, image_uri: str, attributes: str) -> bytes:
+    """The ERC-721 metadata JSON for a Manifold relic — same four fields the
+    RelicNFT.sol tokenURI carried, now a file pinned to IPFS (the crowd's
+    convention; an on-chain data: URI would be a rare trait among Manifold
+    collections). `attributes` arrives as the JSON array string from
+    generate_attributes(). json.dumps does the escaping — no json_escape here."""
+    return json.dumps(
+        {
+            "name": name,
+            "description": description,
+            "image": image_uri,
+            "attributes": json.loads(attributes) if attributes else [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+class ManifoldMinter:
+    """Mint a relic as a Manifold `ERC721Creator` proxy (three transactions from
+    the relic wallet): deploy the proxy, `mintBase(wallet, uri)`,
+    `renounceOwnership()`.
+
+    Why this exists: a pool of contracts compiled from one source is one bytecode
+    class, enumerable with a single indexer query (audit P0-1, confirmed on-chain).
+    A Manifold proxy's RUNTIME is byte-for-byte the same across thousands of
+    collections on Base, so `eth_getCode` no longer distinguishes the pool.
+
+    Why `renounceOwnership` is not optional: Manifold's `setTokenURI` is
+    owner/admin-only — while the relic wallet is owner, whoever holds its key can
+    rewrite the description (and the claim code) mid-hunt, and the public promise
+    "nothing moves after the mint" would be false. After renouncing, owner is
+    0x0, no admin exists (the deployer is never admin by default), and the
+    metadata is as fixed as RelicNFT.sol's was.
+
+    Same discipline as Web3Minter: web3 injected, `_send` overridden in tests,
+    the key resolved only at the instant of signing."""
+
+    def __init__(self, *, web3, wallets, pinner, artifact: dict,
+                 implementation: str | None = None, chain_id: int | None = None):
+        self._w3 = web3
+        self._wallets = wallets
+        self._pinner = pinner                     # relic_image.PinataPinner (or a fake)
+        self._abi = artifact["abi"]
+        self._bytecode = artifact["bytecode"]
+        self._runtime = artifact["manifold_runtime"]
+        self._impl = implementation or artifact["manifold_implementation"]
+        self._chain_id = chain_id
+
+    @property
+    def implementation(self) -> str:
+        return self._impl
+
+    def deploy_and_mint(self, *, name, symbol, description, image_uri, attributes,
+                        provenance_hash, wallet_ref) -> MintResult:
+        # `provenance_hash` is accepted for protocol compatibility and unused:
+        # the proxy has no code of its own to make unique — that is the point.
+        del provenance_hash
+        metadata = build_token_metadata(
+            name=name, description=description, image_uri=image_uri, attributes=attributes,
+        )
+        token_uri = self._pinner.pin(metadata, name="metadata.json")
+        address, key = self._wallets.signing_key(wallet_ref)
+        contract_addr, token_id, tx_hash = self._send(
+            deployer_address=address, key=key, name=name, symbol=symbol, token_uri=token_uri,
+        )
+        return MintResult(
+            contract=contract_addr, token_id=str(token_id),
+            image_uri=image_uri, tx_hash=tx_hash,
+        )
+
+    def _send(self, *, deployer_address, key, name, symbol, token_uri):  # pragma: no cover
+        """Three transactions, in order, each waited for and status-checked:
+        deploy proxy -> mintBase -> renounceOwnership. Overridden in tests.
+
+        A failure after the deploy leaves an initialised, empty, still-owned
+        proxy on-chain: the wallet stays reserved (relic_pool.reserve_wallet) and
+        the retry re-runs all three steps from a NEW proxy — the orphan is inert
+        (no token, no code of ours) and costs nothing but its gas."""
+        w3 = self._w3
+        acct = w3.eth.account.from_key(key)
+        chain_id = self._chain_id or w3.eth.chain_id
+        runtime = bytes.fromhex(self._runtime[2:])
+        impl = w3.to_checksum_address(self._impl)
+        if not w3.eth.get_code(impl):
+            raise RuntimeError(
+                f"manifold implementation {impl} has no code on this chain — refusing to mint"
+            )
+
+        def _submit(build, label: str):
+            tx = build.build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address, "pending"),
+                "chainId": chain_id,
+                "gasPrice": w3.eth.gas_price,
+            })
+            signed = w3.eth.account.sign_transaction(tx, private_key=key)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+            if receipt["status"] != 1:
+                raise RuntimeError(f"{label} reverted (tx {tx_hash.hex()})")
+            return receipt, tx_hash.hex()
+
+        Proxy = w3.eth.contract(abi=self._abi, bytecode=self._bytecode)
+        deploy_rc, _deploy_tx = _submit(
+            Proxy.constructor(impl, name, symbol, runtime), "proxy deploy"
+        )
+        proxy_addr = deploy_rc["contractAddress"]
+        if not proxy_addr:
+            raise RuntimeError("proxy deploy: no contractAddress in receipt")
+        if w3.eth.get_code(proxy_addr) != runtime:
+            raise RuntimeError(
+                f"proxy {proxy_addr} runtime differs from the Manifold runtime — "
+                "NOT minting on it; investigate before retrying"
+            )
+
+        relic = w3.eth.contract(address=proxy_addr, abi=MANIFOLD_ABI)
+        mint_rc, mint_tx = _submit(
+            relic.functions.mintBase(acct.address, token_uri), "mintBase"
+        )
+        token_id = None
+        for log in mint_rc["logs"]:
+            topics = [t.hex() if hasattr(t, "hex") else str(t) for t in log.get("topics", [])]
+            topics = [t if t.startswith("0x") else "0x" + t for t in topics]
+            if (
+                log["address"].lower() == proxy_addr.lower()
+                and len(topics) == 4 and topics[0] == _ERC721_TRANSFER_TOPIC
+            ):
+                token_id = int(topics[3], 16)
+                break
+        if token_id is None:
+            raise RuntimeError(
+                f"mintBase mined ({mint_tx}) but no Transfer log found — "
+                "record the token id by hand before launching this relic"
+            )
+
+        _submit(relic.functions.renounceOwnership(), "renounceOwnership")
+        if int(relic.functions.owner().call(), 16) != 0:
+            raise RuntimeError(f"proxy {proxy_addr} still has an owner after renounce")
+        return proxy_addr, token_id, mint_tx
 
 
 # --------------------------------------------------------------------------- #

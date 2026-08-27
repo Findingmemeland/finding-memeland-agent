@@ -127,6 +127,20 @@ class Settings(BaseSettings):
     # Trail clues. With no verifier wired they fall back to direct clues,
     # silently — an unverified anchor is worse than a boring clue.
     relic_trails_enabled: bool = Field(default=False)
+    # Which contract a relic is minted as (probe 2026-08-26, Probe_Manifold_Proxy.md):
+    #   "manifold" — a Manifold ERC721Creator proxy (contracts/RelicManifoldProxy.json):
+    #                runtime byte-for-byte identical to thousands of Manifold
+    #                collections on Base, metadata JSON pinned to IPFS, ownership
+    #                renounced after the mint. The default.
+    #   "relicnft" — the bespoke RelicNFT.sol (contracts/RelicNFT.json): one
+    #                bytecode class per pool, enumerable (audit P0-1). Kept for
+    #                the dry-run harness and as a fallback.
+    relic_mint_backend: str = Field(default="manifold")
+    # Override for the Manifold implementation address the proxy points to.
+    # Empty = the address recorded in the artifact (read from the chain when the
+    # artifact was built). Set it only after checking a fresh Manifold Studio
+    # deployment on Base points somewhere else.
+    manifold_implementation: str = Field(default="")
 
     @property
     def relic_wallet_ref_list(self) -> list[str]:
