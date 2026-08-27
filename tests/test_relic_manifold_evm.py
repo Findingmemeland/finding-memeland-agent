@@ -149,3 +149,32 @@ def test_manifold_mint_resumes_on_a_proxy_left_by_a_dead_attempt(chain):
         attributes="[]", provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
     )
     assert res2.contract != orphan
+
+
+def test_manifold_mint_resumes_a_fully_minted_proxy_without_new_transactions(chain):
+    """Second live incident (2026-08-27): deploy + mintBase + renounce all mined,
+    the owner() read right after came back stale, the guard raised, and the
+    relic was never recorded. The retry must recognise the finished proxy and
+    return its coordinates with ZERO new transactions."""
+    w3, wallet, key = chain
+    fake = json.loads(FIXTURE.read_text())
+    deploy = w3.eth.contract(abi=fake["abi"], bytecode=fake["bytecode"]).constructor()
+    impl = w3.eth.wait_for_transaction_receipt(deploy.transact({"from": wallet})).contractAddress
+    art = load_manifold_artifact()
+    minter = ManifoldMinter(
+        web3=w3, wallets=_Wallets(wallet, key), pinner=_Pinner(), artifact=art,
+        implementation=impl, allow_implementation_override=True,
+    )
+    first = minter.deploy_and_mint(
+        name="Maroon Ledger", symbol="MLDG", description="d", image_uri="ipfs://i",
+        attributes="[]", provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
+    )
+    nonce_after_first = w3.eth.get_transaction_count(wallet)
+
+    again = minter.deploy_and_mint(
+        name="Maroon Ledger", symbol="MLDG", description="d", image_uri="ipfs://i",
+        attributes="[]", provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
+    )
+    assert again.contract == first.contract and again.token_id == "1"
+    assert again.tx_hash.startswith("resumed:")
+    assert w3.eth.get_transaction_count(wallet) == nonce_after_first   # nothing sent

@@ -602,59 +602,83 @@ class ManifoldMinter:
             time.sleep(pause_s * (i + 1))
         return code
 
-    def _looks_like_our_proxy(self, address, *, deployer, name) -> bool:  # pragma: no cover
-        """A Manifold proxy this wallet already deployed for THIS relic and never
-        minted on: same runtime, same implementation slot, owner == the wallet,
-        same collection name, no token 1. Used to RESUME after a partial mint
-        instead of leaving an initialised orphan behind and deploying again."""
+    def _probe_proxy(self, address, *, deployer, name):  # pragma: no cover
+        """What this wallet already did on `address` for THIS relic, or None if
+        the address is not our proxy for it. Returns a dict:
+          {"state": "empty" | "minted", "token_id": int | None, "owner_zero": bool}
+        Used to RESUME after a partial mint instead of deploying again: the very
+        first mints on Base (2026-08-27) died on stale RPC reads AFTER the deploy
+        and AFTER the renounce, each time leaving a perfectly good proxy behind."""
         w3 = self._w3
         runtime = bytes.fromhex(self._runtime[2:])
         if self._code_at(address, attempts=2) != runtime:
-            return False
+            return None
         slot = bytes(w3.eth.get_storage_at(address, self.IMPLEMENTATION_SLOT))
         if ("0x" + slot.hex()[-40:]).lower() != self._impl.lower():
-            return False
+            return None
         relic = w3.eth.contract(
             address=w3.to_checksum_address(address), abi=MANIFOLD_ABI + _ERC721_READ_ABI
         )
         try:
-            if relic.functions.owner().call().lower() != str(deployer).lower():
-                return False
             if relic.functions.name().call() != name:
-                return False
+                return None
+            owner = relic.functions.owner().call()
         except Exception:  # noqa: BLE001 — not ours if it does not even answer
-            return False
+            return None
+        owner_zero = int(owner, 16) == 0
+        if not owner_zero and owner.lower() != str(deployer).lower():
+            return None                       # someone else's collection with our name
         try:
             holder = relic.functions.ownerOf(1).call()
-        except Exception:  # noqa: BLE001 — "invalid token ID" == still empty: reusable
-            return True
-        return int(holder, 16) == 0           # a real token holder == a finished relic
+        except Exception:  # noqa: BLE001 — "invalid token ID" == still empty
+            holder = None
+        if holder is None or int(holder, 16) == 0:
+            if owner_zero:
+                return None                   # renounced AND empty: unusable, never ours mid-way
+            return {"state": "empty", "token_id": None, "owner_zero": False}
+        if holder.lower() != str(deployer).lower():
+            return None                       # token already moved: a finished, delivered relic
+        return {"state": "minted", "token_id": 1, "owner_zero": owner_zero}
 
     def _existing_proxy_for(self, deployer, name):  # pragma: no cover
-        """The address of an un-minted proxy this wallet already deployed for
-        `name`, or None. CREATE addresses are deterministic in (deployer, nonce),
-        so every past nonce is a candidate."""
+        """(address, probe) of a proxy this wallet already deployed for `name`,
+        or (None, None). CREATE addresses are deterministic in (deployer, nonce),
+        so every past nonce is a candidate; the newest wins."""
         import rlp
         from eth_utils import keccak, to_checksum_address
 
         w3 = self._w3
         n = w3.eth.get_transaction_count(w3.to_checksum_address(deployer), "latest")
-        for nonce in range(n):
+        for nonce in reversed(range(n)):
             cand = to_checksum_address(
                 keccak(rlp.encode([bytes.fromhex(str(deployer)[2:]), nonce]))[12:]
             )
-            if self._looks_like_our_proxy(cand, deployer=deployer, name=name):
-                return cand
-        return None
+            probe = self._probe_proxy(cand, deployer=deployer, name=name)
+            if probe is not None:
+                return cand, probe
+        return None, None
+
+    def _read_until(self, fn, ok, *, attempts: int = 8, pause_s: float = 1.5):  # pragma: no cover
+        """Re-read a view until `ok(value)` — the public RPC can answer from a
+        node a block behind right after a transaction is mined."""
+        import time
+
+        value = None
+        for i in range(attempts):
+            value = fn()
+            if ok(value):
+                return value
+            time.sleep(pause_s * (i + 1))
+        return value
 
     def _send(self, *, deployer_address, key, name, symbol, token_uri):  # pragma: no cover
         """Three transactions, in order, each waited for and status-checked:
         deploy proxy -> mintBase -> renounceOwnership. Overridden in tests.
 
-        RESUMES rather than repeats: if this wallet already deployed a proxy for
-        this relic (a previous attempt that died after the deploy), that proxy
-        is used and only the missing steps run — no second collection with the
-        same name is ever created."""
+        RESUMES rather than repeats: whatever a previous attempt already did on
+        this wallet for this relic (deploy; deploy + mint; all three) is
+        detected on-chain and only the missing steps run — never a second
+        collection with the relic's name, never a second token."""
         w3 = self._w3
         acct = w3.eth.account.from_key(key)
         chain_id = self._chain_id or w3.eth.chain_id
@@ -679,7 +703,7 @@ class ManifoldMinter:
                 raise RuntimeError(f"{label} reverted (tx {tx_hash.hex()})")
             return receipt, tx_hash.hex()
 
-        proxy_addr = self._existing_proxy_for(acct.address, name)
+        proxy_addr, probe = self._existing_proxy_for(acct.address, name)
         if proxy_addr is None:
             Proxy = w3.eth.contract(abi=self._abi, bytecode=self._bytecode)
             deploy_rc, _deploy_tx = _submit(
@@ -700,29 +724,37 @@ class ManifoldMinter:
                     f"proxy {proxy_addr} implementation slot holds {slot_addr}, expected {impl} — "
                     "NOT minting on it"
                 )
+            probe = {"state": "empty", "token_id": None, "owner_zero": False}
 
         relic = w3.eth.contract(address=proxy_addr, abi=MANIFOLD_ABI)
-        mint_rc, mint_tx = _submit(
-            relic.functions.mintBase(acct.address, token_uri), "mintBase"
-        )
-        token_id = None
-        for log in mint_rc["logs"]:
-            topics = [t.hex() if hasattr(t, "hex") else str(t) for t in log.get("topics", [])]
-            topics = [t if t.startswith("0x") else "0x" + t for t in topics]
-            if (
-                log["address"].lower() == proxy_addr.lower()
-                and len(topics) == 4 and topics[0] == _ERC721_TRANSFER_TOPIC
-            ):
-                token_id = int(topics[3], 16)
-                break
-        if token_id is None:
-            raise RuntimeError(
-                f"mintBase mined ({mint_tx}) but no Transfer log found — "
-                "record the token id by hand before launching this relic"
+        if probe["state"] == "minted":
+            token_id, mint_tx = probe["token_id"], f"resumed:{proxy_addr}"
+        else:
+            mint_rc, mint_tx = _submit(
+                relic.functions.mintBase(acct.address, token_uri), "mintBase"
             )
+            token_id = None
+            for log in mint_rc["logs"]:
+                topics = [t.hex() if hasattr(t, "hex") else str(t) for t in log.get("topics", [])]
+                topics = [t if t.startswith("0x") else "0x" + t for t in topics]
+                if (
+                    log["address"].lower() == proxy_addr.lower()
+                    and len(topics) == 4 and topics[0] == _ERC721_TRANSFER_TOPIC
+                ):
+                    token_id = int(topics[3], 16)
+                    break
+            if token_id is None:
+                raise RuntimeError(
+                    f"mintBase mined ({mint_tx}) but no Transfer log found — "
+                    "record the token id by hand before launching this relic"
+                )
 
-        _submit(relic.functions.renounceOwnership(), "renounceOwnership")
-        if int(relic.functions.owner().call(), 16) != 0:
+        if not probe.get("owner_zero"):
+            _submit(relic.functions.renounceOwnership(), "renounceOwnership")
+        owner = self._read_until(
+            lambda: relic.functions.owner().call(), lambda v: int(v, 16) == 0
+        )
+        if int(owner, 16) != 0:
             raise RuntimeError(f"proxy {proxy_addr} still has an owner after renounce")
         return proxy_addr, token_id, mint_tx
 
