@@ -482,6 +482,13 @@ MANIFOLD_ABI = [
         "type": "function",
     },
 ]
+# Read-only slice used by the resume check (name + ownerOf).
+_ERC721_READ_ABI = [
+    {"inputs": [], "name": "name", "outputs": [{"name": "", "type": "string"}],
+     "stateMutability": "view", "type": "function"},
+    {"inputs": [{"name": "tokenId", "type": "uint256"}], "name": "ownerOf",
+     "outputs": [{"name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
+]
 # keccak("Transfer(address,address,uint256)") — the mint log; topics[3] is the id.
 _ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
@@ -577,20 +584,83 @@ class ManifoldMinter:
             image_uri=image_uri, tx_hash=tx_hash,
         )
 
+    # ---- chain helpers (tolerant of a lagging public RPC) ------------------ #
+    def _code_at(self, address, *, attempts: int = 8,
+                 pause_s: float = 1.5) -> bytes:  # pragma: no cover
+        """`eth_getCode` that survives a load-balanced RPC answering from a node a
+        block behind: the very first mint on Base (2026-08-27) deployed a perfect
+        proxy and then read empty code back one second later — and the guard,
+        correctly, refused to mint on "different" code. Retry until non-empty."""
+        import time
+
+        w3 = self._w3
+        code = b""
+        for i in range(attempts):
+            code = bytes(w3.eth.get_code(w3.to_checksum_address(address)))
+            if code:
+                return code
+            time.sleep(pause_s * (i + 1))
+        return code
+
+    def _looks_like_our_proxy(self, address, *, deployer, name) -> bool:  # pragma: no cover
+        """A Manifold proxy this wallet already deployed for THIS relic and never
+        minted on: same runtime, same implementation slot, owner == the wallet,
+        same collection name, no token 1. Used to RESUME after a partial mint
+        instead of leaving an initialised orphan behind and deploying again."""
+        w3 = self._w3
+        runtime = bytes.fromhex(self._runtime[2:])
+        if self._code_at(address, attempts=2) != runtime:
+            return False
+        slot = bytes(w3.eth.get_storage_at(address, self.IMPLEMENTATION_SLOT))
+        if ("0x" + slot.hex()[-40:]).lower() != self._impl.lower():
+            return False
+        relic = w3.eth.contract(
+            address=w3.to_checksum_address(address), abi=MANIFOLD_ABI + _ERC721_READ_ABI
+        )
+        try:
+            if relic.functions.owner().call().lower() != str(deployer).lower():
+                return False
+            if relic.functions.name().call() != name:
+                return False
+        except Exception:  # noqa: BLE001 — not ours if it does not even answer
+            return False
+        try:
+            holder = relic.functions.ownerOf(1).call()
+        except Exception:  # noqa: BLE001 — "invalid token ID" == still empty: reusable
+            return True
+        return int(holder, 16) == 0           # a real token holder == a finished relic
+
+    def _existing_proxy_for(self, deployer, name):  # pragma: no cover
+        """The address of an un-minted proxy this wallet already deployed for
+        `name`, or None. CREATE addresses are deterministic in (deployer, nonce),
+        so every past nonce is a candidate."""
+        import rlp
+        from eth_utils import keccak, to_checksum_address
+
+        w3 = self._w3
+        n = w3.eth.get_transaction_count(w3.to_checksum_address(deployer), "latest")
+        for nonce in range(n):
+            cand = to_checksum_address(
+                keccak(rlp.encode([bytes.fromhex(str(deployer)[2:]), nonce]))[12:]
+            )
+            if self._looks_like_our_proxy(cand, deployer=deployer, name=name):
+                return cand
+        return None
+
     def _send(self, *, deployer_address, key, name, symbol, token_uri):  # pragma: no cover
         """Three transactions, in order, each waited for and status-checked:
         deploy proxy -> mintBase -> renounceOwnership. Overridden in tests.
 
-        A failure after the deploy leaves an initialised, empty, still-owned
-        proxy on-chain: the wallet stays reserved (relic_pool.reserve_wallet) and
-        the retry re-runs all three steps from a NEW proxy — the orphan is inert
-        (no token, no code of ours) and costs nothing but its gas."""
+        RESUMES rather than repeats: if this wallet already deployed a proxy for
+        this relic (a previous attempt that died after the deploy), that proxy
+        is used and only the missing steps run — no second collection with the
+        same name is ever created."""
         w3 = self._w3
         acct = w3.eth.account.from_key(key)
         chain_id = self._chain_id or w3.eth.chain_id
         runtime = bytes.fromhex(self._runtime[2:])
         impl = w3.to_checksum_address(self._impl)
-        if not w3.eth.get_code(impl):
+        if not self._code_at(impl, attempts=3):
             raise RuntimeError(
                 f"manifold implementation {impl} has no code on this chain — refusing to mint"
             )
@@ -609,25 +679,27 @@ class ManifoldMinter:
                 raise RuntimeError(f"{label} reverted (tx {tx_hash.hex()})")
             return receipt, tx_hash.hex()
 
-        Proxy = w3.eth.contract(abi=self._abi, bytecode=self._bytecode)
-        deploy_rc, _deploy_tx = _submit(
-            Proxy.constructor(impl, name, symbol, runtime), "proxy deploy"
-        )
-        proxy_addr = deploy_rc["contractAddress"]
-        if not proxy_addr:
-            raise RuntimeError("proxy deploy: no contractAddress in receipt")
-        if w3.eth.get_code(proxy_addr) != runtime:
-            raise RuntimeError(
-                f"proxy {proxy_addr} runtime differs from the Manifold runtime — "
-                "NOT minting on it; investigate before retrying"
+        proxy_addr = self._existing_proxy_for(acct.address, name)
+        if proxy_addr is None:
+            Proxy = w3.eth.contract(abi=self._abi, bytecode=self._bytecode)
+            deploy_rc, _deploy_tx = _submit(
+                Proxy.constructor(impl, name, symbol, runtime), "proxy deploy"
             )
-        slot = w3.eth.get_storage_at(proxy_addr, self.IMPLEMENTATION_SLOT)
-        slot_addr = "0x" + bytes(slot).hex()[-40:]
-        if slot_addr.lower() != impl.lower():
-            raise RuntimeError(
-                f"proxy {proxy_addr} implementation slot holds {slot_addr}, expected {impl} — "
-                "NOT minting on it"
-            )
+            proxy_addr = deploy_rc["contractAddress"]
+            if not proxy_addr:
+                raise RuntimeError("proxy deploy: no contractAddress in receipt")
+            if self._code_at(proxy_addr) != runtime:
+                raise RuntimeError(
+                    f"proxy {proxy_addr} runtime differs from the Manifold runtime — "
+                    "NOT minting on it; investigate before retrying"
+                )
+            slot = bytes(w3.eth.get_storage_at(proxy_addr, self.IMPLEMENTATION_SLOT))
+            slot_addr = "0x" + slot.hex()[-40:]
+            if slot_addr.lower() != impl.lower():
+                raise RuntimeError(
+                    f"proxy {proxy_addr} implementation slot holds {slot_addr}, expected {impl} — "
+                    "NOT minting on it"
+                )
 
         relic = w3.eth.contract(address=proxy_addr, abi=MANIFOLD_ABI)
         mint_rc, mint_tx = _submit(

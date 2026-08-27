@@ -12,7 +12,7 @@ contract FakeImpl {
     function mintBase(address to, string calldata uri) external adminRequired returns (uint256) { uint256 id = ++_next; _owner[id] = to; _uri[id] = uri; emit Transfer(address(0), to, id); return id; }
     function setTokenURI(uint256 id, string calldata uri) external adminRequired { _uri[id] = uri; }
     function tokenURI(uint256 id) external view returns (string memory) { return _uri[id]; }
-    function ownerOf(uint256 id) external view returns (address) { return _owner[id]; }
+    function ownerOf(uint256 id) external view returns (address) { require(_owner[id] != address(0), "ERC721: invalid token ID"); return _owner[id]; }
     function renounceOwnership() external { require(msg.sender == owner, "Ownable: caller is not the owner"); owner = address(0); }
     function safeTransferFrom(address from, address to, uint256 id) external { require(_owner[id] == from && msg.sender == from, "not owner"); _owner[id] = to; emit Transfer(from, to, id); }
 }

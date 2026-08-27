@@ -108,3 +108,44 @@ def test_manifold_minter_refuses_an_implementation_without_code(chain):
             name="X Y", symbol="XY", description="d", image_uri="ipfs://i", attributes="[]",
             provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
         )
+
+
+def test_manifold_mint_resumes_on_a_proxy_left_by_a_dead_attempt(chain):
+    """First live mint on Base (2026-08-27): the proxy deployed fine, a lagging
+    RPC read empty code back, the guard refused, and the relic was left with an
+    initialised, token-less proxy. The retry must USE that proxy — never leave an
+    orphan collection with the relic's name and deploy a second one."""
+    w3, wallet, key = chain
+    fake = json.loads(FIXTURE.read_text())
+    deploy = w3.eth.contract(abi=fake["abi"], bytecode=fake["bytecode"]).constructor()
+    impl = w3.eth.wait_for_transaction_receipt(deploy.transact({"from": wallet})).contractAddress
+    art = load_manifold_artifact()
+
+    # A previous attempt that died right after the deploy.
+    proxy_ctor = w3.eth.contract(abi=art["abi"], bytecode=art["bytecode"]).constructor(
+        impl, "Maroon Ledger", "MLDG", bytes.fromhex(art["manifold_runtime"][2:])
+    )
+    orphan_rc = w3.eth.wait_for_transaction_receipt(proxy_ctor.transact({"from": wallet}))
+    orphan = orphan_rc.contractAddress
+    nonce_before = w3.eth.get_transaction_count(wallet)
+
+    minter = ManifoldMinter(
+        web3=w3, wallets=_Wallets(wallet, key), pinner=_Pinner(), artifact=art,
+        implementation=impl, allow_implementation_override=True,
+    )
+    res = minter.deploy_and_mint(
+        name="Maroon Ledger", symbol="MLDG", description="d", image_uri="ipfs://i",
+        attributes="[]", provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
+    )
+    assert res.contract == orphan                                   # resumed, not redeployed
+    assert w3.eth.get_transaction_count(wallet) == nonce_before + 2  # mintBase + renounce only
+    proxy = w3.eth.contract(address=orphan, abi=fake["abi"])
+    assert proxy.functions.ownerOf(1).call() == wallet
+    assert int(proxy.functions.owner().call(), 16) == 0
+
+    # A DIFFERENT name on the same wallet must not reuse it (the proxy is named).
+    res2 = minter.deploy_and_mint(
+        name="Salted Horizonet", symbol="SHZ", description="d", image_uri="ipfs://i",
+        attributes="[]", provenance_hash="0x" + "00" * 32, wallet_ref="RW01",
+    )
+    assert res2.contract != orphan
