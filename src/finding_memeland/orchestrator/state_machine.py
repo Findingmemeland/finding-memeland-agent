@@ -2242,8 +2242,15 @@ class Orchestrator:
             # "the hidden persona was @relic:abc… — the profile stays up" E "the
             # relic: <nome>" (auditoria v3).
             relic_name=getattr(hunt, "relic_name", None),
+            # Rarible, não BaseScan (Pedro, 29/08): o X renderiza UM cartão por
+            # post — o do ÚLTIMO URL do texto — e a página da Rarible tem a arte
+            # do NFT como imagem OG, portanto o reveal passa a mostrar a peça.
+            # O hash da transferência fica como texto simples (sem https), logo
+            # este continua a ser o único URL do post. Formato confirmado pelo
+            # Pedro no site: rarible.com/base/items/<contract>:<tokenId>.
             relic_link=(
-                f"basescan.org/token/{hunt.relic.contract}?a={hunt.relic.token_id}"
+                f"rarible.com/{hunt.relic.chain}/items/"
+                f"{str(hunt.relic.contract).lower()}:{hunt.relic.token_id}"
                 if getattr(hunt, "relic", None) is not None
                 and getattr(hunt, "relic_name", None) else None
             ),
