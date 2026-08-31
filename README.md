@@ -68,8 +68,6 @@ db/schema.sql                   # Supabase schema
 tests/                          # ~560 tests: pytest -q
 ```
 
-The persona-era modules (`dm/`, `persona/dresser.py`, `persona/generator.py`, `persona/dress_pipeline.py`) are the previous mechanic — a disposable X account as the hidden target, claims by DM. They are kept for history and for the persona code paths still covered by tests; a relic hunt never touches them. Internal env names still carry the historical `FMML_` prefix; the token is $FIND.
-
 ## Hunt lifecycle
 
 ```
@@ -121,3 +119,7 @@ Requires Python 3.11+. Create the Supabase project from `db/schema.sql`; set the
 ## Verifying a past hunt
 
 Take the Clue 1 post's `integrity:` value and the Winner Announcement's `relic_id`, `claim_code` and `salt`; `SHA-256(relic_id + claim_code + salt)` must equal it. The relic's contract on BaseScan shows the renounced ownership and the transfer to the winner.
+
+## A note on the older modules
+
+The persona-era modules (`dm/`, `persona/dresser.py`, `persona/generator.py`, `persona/dress_pipeline.py`) are the previous mechanic — a disposable X account as the hidden target, claims by DM. They are kept for history and for the persona code paths still covered by tests; a relic hunt never touches them. Internal env names still carry the historical `FMML_` prefix; the token is $FIND.
