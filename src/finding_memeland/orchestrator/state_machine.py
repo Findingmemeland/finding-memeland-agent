@@ -2242,15 +2242,18 @@ class Orchestrator:
             # "the hidden persona was @relic:abc… — the profile stays up" E "the
             # relic: <nome>" (auditoria v3).
             relic_name=getattr(hunt, "relic_name", None),
-            # Rarible, não BaseScan (Pedro, 29/08): o X renderiza UM cartão por
-            # post — o do ÚLTIMO URL do texto — e a página da Rarible tem a arte
-            # do NFT como imagem OG, portanto o reveal passa a mostrar a peça.
-            # O hash da transferência fica como texto simples (sem https), logo
-            # este continua a ser o único URL do post. Formato confirmado pelo
-            # Pedro no site: rarible.com/base/items/<contract>:<tokenId>.
+            # OpenSea, não Rarible (Pedro, 31/08, Hunt #9): o og:image da
+            # Rarible falhou no reveal — card com título e descrição mas SEM a
+            # arte — e no OpenSea a imagem rendeu sempre. Continua a ser UM
+            # cartão por post (o do ÚLTIMO URL do texto); o hash da
+            # transferência fica texto simples, logo este é o único URL.
+            # Link do ITEM, nunca o da colecção: cada relic é um contrato
+            # próprio, e no OpenSea "a colecção" e "o item #1" têm páginas
+            # distintas com o mesmo nome. Formato confirmado pelo Pedro
+            # (post manual que rendeu): opensea.io/item/base/<contract>/<tokenId>.
             relic_link=(
-                f"rarible.com/{hunt.relic.chain}/items/"
-                f"{str(hunt.relic.contract).lower()}:{hunt.relic.token_id}"
+                f"opensea.io/item/{hunt.relic.chain}/"
+                f"{str(hunt.relic.contract).lower()}/{hunt.relic.token_id}"
                 if getattr(hunt, "relic", None) is not None
                 and getattr(hunt, "relic_name", None) else None
             ),
