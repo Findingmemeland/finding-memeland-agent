@@ -1,0 +1,237 @@
+"""Snapshot refresh — builds the curated pool, weekly, OFF the hunt path.
+
+Division of labour (invariants agreed 04/09):
+  · the MARKETPLACE lists candidates (which tokens exist on the curated
+    platforms) and answers name-uniqueness — batch calls, disconnected in
+    time from any hunt, so no query pattern ever points at a target
+  · the CHAIN + a generic gateway give the canonical metadata — the
+    commitment hash is computed from tokenURI resolution, never from a
+    marketplace's cached view of it
+  · the SNAPSHOT is what hunts draw from; nothing here runs at /launch
+
+Filter order per candidate (cheapest first, all fail-closed — an entry that
+cannot be verified is an entry that does not enter the pool):
+  1. base name (trailing serial stripped) has >= 2 real words       [local]
+  2. base name is unique WITHIN the pulled pool — a name seen twice
+     across the platforms kills every bearer                        [local]
+  3. canonical metadata resolves and has an image                   [chain]
+  4. owner is an EOA                                                [chain]
+  5. base name is unique on the marketplace                         [API]
+Global uniqueness runs LAST because it is the only quota-priced filter:
+everything the local and chain checks can kill dies before spending a call.
+
+The anti-circularity rule applies here above all (Opus, 04/09): when the
+pool comes back under the gate, the fix is MORE PLATFORMS in the epoch's
+config — these filters do not loosen.
+
+Every effectful collaborator is injected; the OpenSea lister below is the
+real adapter for the documented v2 shape and, like every real adapter in
+this codebase, is exercised against the live API before production use.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Callable, Iterable, Protocol
+
+from .selector import metadata_hash, name_qualifies, normalize_name
+from .snapshot import CurationEpoch, Snapshot, SnapshotEntry
+
+
+@dataclass(frozen=True)
+class PlatformItem:
+    """One token as a platform lists it. `name` here is only a pre-filter
+    hint — the canonical name/metadata come from the chain resolver."""
+
+    platform: str
+    contract: str
+    token_id: int
+    name: str
+
+
+class PlatformLister(Protocol):
+    """Yields every item of one curated platform (paginated underneath).
+    Raises on transport failure — the refresh reports and keeps the previous
+    snapshot rather than building a silently smaller pool."""
+
+    name: str
+
+    def items(self) -> Iterable[PlatformItem]: ...
+
+
+@dataclass
+class RefreshReport:
+    """Stage counts for the gate and the operator log. Counts only — no
+    entry is ever named here; this reaches Telegram."""
+
+    pulled: int = 0
+    after_name: int = 0
+    after_pool_dedupe: int = 0
+    after_metadata: int = 0
+    after_eoa: int = 0
+    pool_size: int = 0
+    unverifiable: int = 0
+
+
+class RefreshFailed(RuntimeError):
+    """A platform could not be listed. Fail-closed for the BUILD, not the
+    game: the caller keeps serving the previous snapshot."""
+
+
+class RefreshJob:
+    """Builds a Snapshot for one epoch from the epoch's platform listers.
+
+    fetch_metadata(contract, token_id) -> dict | None   (tokenURI, resolved)
+    owner_is_eoa(contract, token_id)   -> bool | None
+    name_is_unique(base, contract, token_id) -> bool | None   (marketplace)
+    now_iso() -> str                                     (built_at stamp)
+    """
+
+    def __init__(
+        self,
+        *,
+        listers: tuple[PlatformLister, ...],
+        fetch_metadata: Callable[[str, int], dict | None],
+        owner_is_eoa: Callable[[str, int], bool | None],
+        name_is_unique: Callable[[str, str, int], bool | None],
+        now_iso: Callable[[], str],
+    ):
+        self._listers = listers
+        self._fetch_metadata = fetch_metadata
+        self._owner_is_eoa = owner_is_eoa
+        self._name_is_unique = name_is_unique
+        self._now_iso = now_iso
+
+    def build(self, epoch: CurationEpoch) -> tuple[Snapshot, RefreshReport]:
+        report = RefreshReport()
+
+        # -- pull everything first: pool-wide dedupe needs the full view ---- #
+        pulled: list[PlatformItem] = []
+        for lister in self._listers:
+            try:
+                pulled.extend(lister.items())
+            except Exception as e:  # noqa: BLE001
+                raise RefreshFailed(
+                    f"platform {lister.name!r} unlistable "
+                    f"({type(e).__name__}) — snapshot NOT rebuilt; keep "
+                    "serving the previous one"
+                ) from e
+        report.pulled = len(pulled)
+
+        # -- 1. base-name shape (local) ------------------------------------ #
+        named = [(it, normalize_name(it.name)) for it in pulled]
+        named = [(it, base) for it, base in named
+                 if name_qualifies(base, min_words=epoch.min_words)]
+        report.after_name = len(named)
+
+        # -- 2. in-pool dedupe: a base name seen twice kills every bearer -- #
+        counts: dict[str, int] = {}
+        for _, base in named:
+            counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
+        named = [(it, base) for it, base in named
+                 if counts[base.casefold()] == 1]
+        report.after_pool_dedupe = len(named)
+
+        # -- 3..5 per candidate, quota-priced check last -------------------- #
+        entries: list[SnapshotEntry] = []
+        for it, base in named:
+            meta = self._fetch_metadata(it.contract, it.token_id)
+            if not (isinstance(meta, dict) and meta.get("image")):
+                continue
+            report.after_metadata += 1
+            eoa = self._owner_is_eoa(it.contract, it.token_id)
+            if eoa is None:
+                report.unverifiable += 1
+                continue
+            if eoa is not True:
+                continue
+            report.after_eoa += 1
+            uniq = self._name_is_unique(base, it.contract, it.token_id)
+            if uniq is None:
+                report.unverifiable += 1
+                continue
+            if uniq is not True:
+                continue
+            entries.append(SnapshotEntry(
+                contract=it.contract.lower(),
+                token_id=it.token_id,
+                name=base,
+                name_onchain=str(meta.get("name") or "").strip(),
+                metadata=meta,
+                metadata_sha256=metadata_hash(meta),
+                platform=it.platform,
+            ))
+        report.pool_size = len(entries)
+
+        snap = Snapshot(epoch_id=epoch.epoch_id, built_at=self._now_iso(),
+                        entries=entries)
+        return snap, report
+
+
+# --------------------------------------------------------------------------- #
+# Real adapter — OpenSea v2 (needs a live key; verify against the API before  #
+# production, same discipline as every measured adapter in this codebase)     #
+# --------------------------------------------------------------------------- #
+
+
+class OpenSeaContractLister:
+    """GET /api/v2/chain/{chain}/contract/{address}/nfts — paginated with a
+    `next` cursor, key in X-API-KEY. Documented shape as of 2026-09; NOT yet
+    measured live (Rarible quota died first) — first run against the real
+    API must confirm field names before this feeds a production refresh.
+
+    `http_get(url, headers: dict) -> str` is injected."""
+
+    def __init__(self, *, http_get, api_key: str, contract: str,
+                 platform: str, chain: str = "base",
+                 base_url: str = "https://api.opensea.io",
+                 page_limit: int = 200, max_pages: int = 500):
+        if not api_key:
+            raise ValueError("OpenSeaContractLister needs an api key")
+        self.name = platform
+        self._get = http_get
+        self._key = api_key
+        self._contract = contract
+        self._chain = chain
+        self._base = base_url.rstrip("/")
+        self._limit = page_limit
+        self._max_pages = max_pages
+
+    def items(self) -> Iterable[PlatformItem]:
+        cursor = ""
+        for _ in range(self._max_pages):
+            url = (f"{self._base}/api/v2/chain/{self._chain}/contract/"
+                   f"{self._contract}/nfts?limit={self._limit}")
+            if cursor:
+                url += f"&next={cursor}"
+            raw = self._get(url, {"X-API-KEY": self._key,
+                                  "Accept": "application/json"})
+            payload = json.loads(raw or "{}")
+            for nft in payload.get("nfts", []) or []:
+                try:
+                    token_id = int(nft.get("identifier"))
+                except (TypeError, ValueError):
+                    continue
+                yield PlatformItem(
+                    platform=self.name,
+                    contract=self._contract,
+                    token_id=token_id,
+                    name=str(nft.get("name") or ""),
+                )
+            cursor = payload.get("next") or ""
+            if not cursor:
+                return
+
+
+class FakeLister:
+    def __init__(self, name: str, items: list[PlatformItem], *,
+                 raises: bool = False):
+        self.name = name
+        self._items = items
+        self._raises = raises
+
+    def items(self) -> Iterable[PlatformItem]:
+        if self._raises:
+            raise RuntimeError("platform unreachable")
+        return list(self._items)
