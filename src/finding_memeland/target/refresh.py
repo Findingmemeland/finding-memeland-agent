@@ -177,11 +177,19 @@ class RefreshJob:
 
 class OpenSeaContractLister:
     """GET /api/v2/chain/{chain}/contract/{address}/nfts — paginated with a
-    `next` cursor, key in X-API-KEY. Documented shape as of 2026-09; NOT yet
-    measured live (Rarible quota died first) — first run against the real
-    API must confirm field names before this feeds a production refresh.
+    `next` cursor, key in X-API-KEY.
+
+    MEASURED live 2026-09-04 (scripts/verificar_opensea.py, 3 Base
+    contracts): `nfts` list with `identifier` and `name` exactly as
+    documented, `next` cursor present, and two facts the docs don't state:
+      · Cloudflare returns 403 (error 1010) to requests WITHOUT a
+        User-Agent, valid key or not — hence the header below
+      · quota comes back in x-ratelimit-limit/-remaining/-reset headers
+        (120-request window on the approved key)
 
     `http_get(url, headers: dict) -> str` is injected."""
+
+    USER_AGENT = "fml-refresh-probe/1.0"   # measured: passes Cloudflare
 
     def __init__(self, *, http_get, api_key: str, contract: str,
                  platform: str, chain: str = "base",
@@ -206,7 +214,8 @@ class OpenSeaContractLister:
             if cursor:
                 url += f"&next={cursor}"
             raw = self._get(url, {"X-API-KEY": self._key,
-                                  "Accept": "application/json"})
+                                  "Accept": "application/json",
+                                  "User-Agent": self.USER_AGENT})
             payload = json.loads(raw or "{}")
             for nft in payload.get("nfts", []) or []:
                 try:

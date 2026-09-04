@@ -116,6 +116,7 @@ def test_opensea_lister_paginates_and_parses():
 
     def http_get(url, headers):
         assert headers["X-API-KEY"] == "k"
+        assert headers["User-Agent"]          # measured: Cloudflare 1010 without
         seen_urls.append(url)
         cursor = url.split("&next=")[1] if "&next=" in url else ""
         return json.dumps(pages[cursor])
