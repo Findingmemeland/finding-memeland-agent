@@ -145,10 +145,12 @@ class ChainContractLister:
     RAISE on revert."""
 
     def __init__(self, *, eth_call, platform: str, contract: str,
-                 max_tokens: int = 200_000, probe_miss_budget: int = 25):
+                 chain: str = "ethereum", max_tokens: int = 200_000,
+                 probe_miss_budget: int = 25):
         self.name = platform
         self._call = eth_call
         self._contract = contract
+        self._chain = chain
         self._max = max_tokens
         self._miss_budget = probe_miss_budget
 
@@ -188,8 +190,8 @@ class ChainContractLister:
             except Exception:  # noqa: BLE001 — sem enumeração afinal
                 yield from self._by_probe()
                 return
-            yield PlatformItem(platform=self.name, contract=self._contract,
-                               token_id=tid, name="")
+            yield PlatformItem(platform=self.name, chain=self._chain,
+                               contract=self._contract, token_id=tid, name="")
         # name="" de propósito: o nome CANÓNICO vem do resolvedor de
         # metadata do refresh (chain+gateway), nunca da listagem
 
@@ -200,8 +202,9 @@ class ChainContractLister:
             tid += 1
             if self._exists(tid):
                 misses = 0
-                yield PlatformItem(platform=self.name, contract=self._contract,
-                                   token_id=tid, name="")
+                yield PlatformItem(platform=self.name, chain=self._chain,
+                                   contract=self._contract, token_id=tid,
+                                   name="")
             else:
                 misses += 1
 
@@ -213,28 +216,40 @@ class RegistryStratumLister:
     or any log-facing field."""
 
     def __init__(self, *, eth_call, stratum: str, registry: ContractRegistry,
-                 per_contract_cap: int = 2_000):
+                 chain: str = "ethereum", per_contract_cap: int = 2_000):
         self.name = stratum
         self._eth_call = eth_call
         self._registry = registry
+        self._chain = chain
         self._cap = per_contract_cap
 
     def items(self) -> Iterator[PlatformItem]:
         for contract in self._registry.contracts(self.name):
             lister = ChainContractLister(
                 eth_call=self._eth_call, platform=self.name,
-                contract=contract, max_tokens=self._cap)
+                contract=contract, chain=self._chain, max_tokens=self._cap)
             yield from lister.items()
 
 
+# The 2021 era scan (discovery.py) runs over Ethereum — the registry strata
+# inherit that chain until some epoch scans another era on another chain.
+EPOCH1_REGISTRY_CHAIN = "ethereum"
+
+
 def epoch1_listers(*, eth_call, registry: ContractRegistry) -> tuple:
-    """The ratified epoch-1 composition, as refresh-ready listers."""
+    """The ratified epoch-1 composition, as refresh-ready listers. `eth_call`
+    is the ETHEREUM adapter — every epoch-1 stratum lives there; a future
+    multi-chain epoch passes one adapter per chain to its listers. The chain
+    column of EPOCH1_CLASSIC rides with each item into the snapshot (Opus
+    review, 05/09: the chain is DATA per candidate, never a constant)."""
     classic = tuple(
-        ChainContractLister(eth_call=eth_call, platform=slug, contract=addr)
-        for slug, _chain, addr in EPOCH1_CLASSIC
+        ChainContractLister(eth_call=eth_call, platform=slug, contract=addr,
+                            chain=chain)
+        for slug, chain, addr in EPOCH1_CLASSIC
     )
     reserved = tuple(
-        RegistryStratumLister(eth_call=eth_call, stratum=s, registry=registry)
+        RegistryStratumLister(eth_call=eth_call, stratum=s, registry=registry,
+                              chain=EPOCH1_REGISTRY_CHAIN)
         for s in EPOCH1_REGISTRY_STRATA
     )
     return classic + reserved

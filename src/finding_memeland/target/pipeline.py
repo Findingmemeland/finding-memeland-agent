@@ -40,10 +40,15 @@ class PipelineReport:
     snapshot_size: int
     gate: StratumGateReport | None
     note: str = ""
+    blocks_failed: int = 0
 
     def render(self) -> str:
+        scan_bit = f"scan: +{self.blocks_scanned} blocos"
+        if self.blocks_failed:
+            scan_bit += (f" ({self.blocks_failed} falharam por transporte — "
+                         "ficam por varrer, retry no próximo run)")
         lines = [
-            f"scan: +{self.blocks_scanned} blocos | registo: "
+            scan_bit + " | registo: "
             + ", ".join(f"{s}={n}" for s, n in sorted(self.registry_counts.items()))
         ]
         lines.append(
@@ -97,7 +102,7 @@ class SnapshotPipeline:
             rng: random.Random | None = None) -> PipelineReport:
         # 1) descoberta incremental
         state: DiscoveryState = self._dstore.load()
-        scanned = self._discovery.scan(state, scan_blocks, rng)
+        outcome = self._discovery.scan(state, scan_blocks, rng)
         self._dstore.save(state)
 
         # 2) registo reservado
@@ -124,16 +129,21 @@ class SnapshotPipeline:
             note = str(e)[:160]
             snapshot = self._sstore.load()
 
-        # 4) gate por estrato — sobre o pool que REALMENTE se serve
+        # 4) gate por estrato — sobre o pool que REALMENTE se serve, com a
+        # época e o relógio (Opus review, 05/09: o gate verifica o snapshot
+        # que lhe dão — época errada é RED, snapshot velho trava o GREEN)
         if snapshot is None:
-            return PipelineReport(blocks_scanned=scanned,
+            return PipelineReport(blocks_scanned=outcome.scanned,
                                   registry_counts=registry.counts(),
                                   snapshot_is_fresh=False, snapshot_size=0,
-                                  gate=None, note=note or "sem snapshot")
+                                  gate=None, note=note or "sem snapshot",
+                                  blocks_failed=outcome.failed)
         gate = stratum_gate(snapshot, self._rates,
-                            cap_exempt=self._cap_exempt)
-        return PipelineReport(blocks_scanned=scanned,
+                            cap_exempt=self._cap_exempt,
+                            epoch=epoch, now_iso=self._now_iso())
+        return PipelineReport(blocks_scanned=outcome.scanned,
                               registry_counts=registry.counts(),
                               snapshot_is_fresh=fresh,
                               snapshot_size=snapshot.size(),
-                              gate=gate, note=note)
+                              gate=gate, note=note,
+                              blocks_failed=outcome.failed)

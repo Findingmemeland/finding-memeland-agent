@@ -19,9 +19,10 @@ from finding_memeland.target.selector import CurationEpoch, metadata_hash
 EPOCH = CurationEpoch(epoch_id="e1")
 
 
-def item(i: int, name: str, platform: str = "plat") -> PlatformItem:
-    return PlatformItem(platform=platform, contract=f"0x{i:040x}",
-                        token_id=i, name=name)
+def item(i: int, name: str, platform: str = "plat",
+         chain: str = "ethereum") -> PlatformItem:
+    return PlatformItem(platform=platform, chain=chain,
+                        contract=f"0x{i:040x}", token_id=i, name=name)
 
 
 def meta_for(name: str) -> dict:
@@ -32,9 +33,9 @@ def make_job(items, *, meta=None, eoa=None, unique=None, listers=None):
     metas = meta or {}
     return RefreshJob(
         listers=listers or (FakeLister("plat", items),),
-        fetch_metadata=lambda c, t: metas.get(t, meta_for("Salt Harbor")),
-        owner_is_eoa=lambda c, t: (eoa or {}).get(t, True),
-        name_is_unique=lambda n, c, t: (unique or {}).get(t, True),
+        fetch_metadata=lambda ch, c, t: metas.get(t, meta_for("Salt Harbor")),
+        owner_is_eoa=lambda ch, c, t: (eoa or {}).get(t, True),
+        name_is_unique=lambda n, ch, c, t: (unique or {}).get(t, True),
         now_iso=lambda: "2026-09-04T20:00:00Z",
     )
 
@@ -49,6 +50,7 @@ def test_happy_path_builds_entries_with_chain_metadata():
     assert by_id[1].name == "Salt Harbor"            # base name
     assert by_id[1].name_onchain == "Salt Harbor #7"  # canonical, from chain
     assert by_id[1].metadata_sha256 == metadata_hash(metas[1])
+    assert by_id[1].chain == "ethereum"       # a cadeia viaja com o item
 
 
 def test_one_word_base_names_die_locally():
@@ -84,15 +86,15 @@ def test_quota_priced_uniqueness_runs_last():
     """A candidate killed by cheap filters must not spend a marketplace call."""
     calls = []
 
-    def unique(n, c, t):
+    def unique(n, ch, c, t):
         calls.append(t)
         return True
 
     items = [item(1, "Punk #1"), item(2, "Quiet Meridian")]
     job = RefreshJob(
         listers=(FakeLister("plat", items),),
-        fetch_metadata=lambda c, t: meta_for("Quiet Meridian"),
-        owner_is_eoa=lambda c, t: True,
+        fetch_metadata=lambda ch, c, t: meta_for("Quiet Meridian"),
+        owner_is_eoa=lambda ch, c, t: True,
         name_is_unique=unique,
         now_iso=lambda: "t",
     )

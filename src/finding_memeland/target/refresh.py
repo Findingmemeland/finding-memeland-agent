@@ -72,9 +72,13 @@ def uri_is_content_addressed(uri: str | None) -> bool:
 @dataclass(frozen=True)
 class PlatformItem:
     """One token as a platform lists it. `name` here is only a pre-filter
-    hint — the canonical name/metadata come from the chain resolver."""
+    hint — the canonical name/metadata come from the chain resolver. `chain`
+    is PER ITEM (Opus review, 05/09): the pool is multi-chain, so the chain
+    travels with the candidate from listing to snapshot to Target.id() —
+    a constant would seal wrong commitments."""
 
     platform: str
+    chain: str
     contract: str
     token_id: int
     name: str
@@ -112,9 +116,11 @@ class RefreshFailed(RuntimeError):
 class RefreshJob:
     """Builds a Snapshot for one epoch from the epoch's platform listers.
 
-    fetch_metadata(contract, token_id) -> dict | None   (tokenURI, resolved)
-    owner_is_eoa(contract, token_id)   -> bool | None
-    name_is_unique(base, contract, token_id) -> bool | None   (marketplace)
+    Collaborators take the CHAIN first — a multi-chain pool means each
+    lookup must know which chain's RPC/marketplace view to consult:
+    fetch_metadata(chain, contract, token_id) -> dict | None
+    owner_is_eoa(chain, contract, token_id)   -> bool | None
+    name_is_unique(base, chain, contract, token_id) -> bool | None
     now_iso() -> str                                     (built_at stamp)
     """
 
@@ -122,9 +128,9 @@ class RefreshJob:
         self,
         *,
         listers: tuple[PlatformLister, ...],
-        fetch_metadata: Callable[[str, int], dict | None],
-        owner_is_eoa: Callable[[str, int], bool | None],
-        name_is_unique: Callable[[str, str, int], bool | None],
+        fetch_metadata: Callable[[str, str, int], dict | None],
+        owner_is_eoa: Callable[[str, str, int], bool | None],
+        name_is_unique: Callable[[str, str, str, int], bool | None],
         now_iso: Callable[[], str],
     ):
         self._listers = listers
@@ -162,7 +168,7 @@ class RefreshJob:
         # -- 2. canonical metadata + canonical base name -------------------- #
         resolved: list[tuple[PlatformItem, str, dict]] = []
         for it in prefiltered:
-            meta = self._fetch_metadata(it.contract, it.token_id)
+            meta = self._fetch_metadata(it.chain, it.contract, it.token_id)
             if not (isinstance(meta, dict) and meta.get("image")):
                 continue
             base = normalize_name(str(meta.get("name") or "").strip())
@@ -183,20 +189,21 @@ class RefreshJob:
         # -- 4..5 per candidate, quota-priced check last -------------------- #
         entries: list[SnapshotEntry] = []
         for it, base, meta in resolved:
-            eoa = self._owner_is_eoa(it.contract, it.token_id)
+            eoa = self._owner_is_eoa(it.chain, it.contract, it.token_id)
             if eoa is None:
                 report.unverifiable += 1
                 continue
             if eoa is not True:
                 continue
             report.after_eoa += 1
-            uniq = self._name_is_unique(base, it.contract, it.token_id)
+            uniq = self._name_is_unique(base, it.chain, it.contract, it.token_id)
             if uniq is None:
                 report.unverifiable += 1
                 continue
             if uniq is not True:
                 continue
             entries.append(SnapshotEntry(
+                chain=it.chain,
                 contract=it.contract.lower(),
                 token_id=it.token_id,
                 name=base,
@@ -267,6 +274,7 @@ class OpenSeaContractLister:
                     continue
                 yield PlatformItem(
                     platform=self.name,
+                    chain=self._chain,
                     contract=self._contract,
                     token_id=token_id,
                     name=str(nft.get("name") or ""),

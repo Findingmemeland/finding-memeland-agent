@@ -143,10 +143,18 @@ class CurationEpoch:
     epoch_id: str
     min_age_days: int = 180
     min_words: int = 2
+    # Gate freshness (Opus review, 05/09): the mutation-void window is only
+    # small because the cadence is weekly — a snapshot older than this makes
+    # the stratum gate refuse GREEN (AMBER: refresh before launching).
+    max_snapshot_age_days: int = 14
 
 
 class CandidateSource(Protocol):
-    """Yields (contract, token_id) pairs from the curated stratum.
+    """Yields (chain, contract, token_id) triples from the curated stratum.
+    The chain is PER CANDIDATE (Opus review, 05/09): the pool is multi-chain
+    — 'the prize is always on Base, the treasure can be anywhere onchain' —
+    so a constant chain would seal wrong commitments and refuse legitimate
+    winners.
 
     Contract obligations, both load-bearing:
       · RANDOM ORDER — the stream must already be uniformly shuffled, because
@@ -155,7 +163,7 @@ class CandidateSource(Protocol):
         exchangeable
       · AGE — only tokens minted >= the epoch's min_age_days ago"""
 
-    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, int]]: ...
+    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, str, int]]: ...
 
 
 class SelectionRefused(RuntimeError):
@@ -172,27 +180,27 @@ class TargetSelector:
     """Draws one target from the curated stratum, applying the hard filters
     with production (fail-closed) semantics.
 
-    All effectful collaborators are injected:
-      fetch_metadata(contract, token_id) -> dict | None  (resolved tokenURI)
-      owner_is_eoa(contract, token_id)   -> bool | None  (None = indeterminate)
-      name_is_unique(base_name, contract, token_id) -> bool | None
+    All effectful collaborators are injected, and every one takes the CHAIN
+    first — a multi-chain pool means the adapter must know which chain's RPC
+    or marketplace view to consult (Opus review, 05/09):
+      fetch_metadata(chain, contract, token_id) -> dict | None
+      owner_is_eoa(chain, contract, token_id)   -> bool | None
+      name_is_unique(base_name, chain, contract, token_id) -> bool | None
     """
 
     def __init__(
         self,
         *,
         source: CandidateSource,
-        fetch_metadata: Callable[[str, int], dict | None],
-        owner_is_eoa: Callable[[str, int], bool | None],
-        name_is_unique: Callable[[str, str, int], bool | None],
-        chain: str = "base",
+        fetch_metadata: Callable[[str, str, int], dict | None],
+        owner_is_eoa: Callable[[str, str, int], bool | None],
+        name_is_unique: Callable[[str, str, str, int], bool | None],
         max_attempts: int = 400,
     ):
         self._source = source
         self._fetch_metadata = fetch_metadata
         self._owner_is_eoa = owner_is_eoa
         self._name_is_unique = name_is_unique
-        self._chain = chain
         self._max_attempts = max_attempts
 
     def select(self, epoch: CurationEpoch) -> Target:
@@ -202,11 +210,11 @@ class TargetSelector:
         cannot produce a qualifier inside `max_attempts` random draws is not
         a stratum we launch on."""
         seen = 0
-        for contract, token_id in self._source.candidates(epoch):
+        for chain, contract, token_id in self._source.candidates(epoch):
             seen += 1
             if seen > self._max_attempts:
                 break
-            target = self._qualify(contract, token_id, epoch)
+            target = self._qualify(chain, contract, token_id, epoch)
             if target is not None:
                 return target
         raise SelectionRefused(
@@ -218,9 +226,9 @@ class TargetSelector:
 
     # -- filters, in cost order (cheapest first) ---------------------------- #
 
-    def _qualify(self, contract: str, token_id: int,
+    def _qualify(self, chain: str, contract: str, token_id: int,
                  epoch: CurationEpoch) -> Target | None:
-        meta = self._fetch_metadata(contract, token_id)
+        meta = self._fetch_metadata(chain, contract, token_id)
         if not (isinstance(meta, dict) and meta.get("image")):
             return None
         name_onchain = str(meta.get("name") or "").strip()
@@ -229,12 +237,12 @@ class TargetSelector:
             return None
         # Fail-closed: None (indeterminate) rejects, unlike the measurement
         # scripts, which pass-with-warning. Production never launches on hope.
-        if self._owner_is_eoa(contract, token_id) is not True:
+        if self._owner_is_eoa(chain, contract, token_id) is not True:
             return None
-        if self._name_is_unique(base, contract, token_id) is not True:
+        if self._name_is_unique(base, chain, contract, token_id) is not True:
             return None
         return Target(
-            chain=self._chain,
+            chain=chain,
             contract=contract.lower(),
             token_id=token_id,
             name=base,
@@ -252,10 +260,14 @@ class TargetSelector:
 
 
 class FakeSource:
-    """A CandidateSource over a fixed, pre-shuffled list (tests)."""
+    """A CandidateSource over a fixed, pre-shuffled list (tests). Accepts
+    (chain, contract, token_id) triples, or legacy (contract, token_id)
+    pairs which default to 'base'."""
 
-    def __init__(self, pairs: Iterable[tuple[str, int]]):
-        self._pairs = list(pairs)
+    def __init__(self, pairs: Iterable[tuple]):
+        self._triples = [
+            p if len(p) == 3 else ("base", p[0], p[1]) for p in pairs
+        ]
 
-    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, int]]:
-        return iter(self._pairs)
+    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, str, int]]:
+        return iter(self._triples)

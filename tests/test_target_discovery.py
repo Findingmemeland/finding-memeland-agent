@@ -31,14 +31,41 @@ def test_scan_accumulates_and_skips_scanned():
     d = EraDiscovery(fetch_mints=fetch, get_code=code, era=(100, 200))
     st = DiscoveryState()
     rng = random.Random(1)
-    done = d.scan(st, 40, rng)          # era tem ~101 blocos; 40 novos
-    assert done == 40
+    out = d.scan(st, 40, rng)           # era tem ~101 blocos; 40 novos
+    assert out.scanned == 40 and out.failed == 0
     assert len(st.scanned) == 40
     before = dict(st.contracts["0xa"]) if "0xa" in st.contracts else None
     d.scan(st, 40, rng)                 # não re-varre os mesmos
     assert len(st.scanned) == 80
     if before:
         assert st.contracts["0xa"]["mints"] >= before["mints"]
+
+
+def test_get_code_failure_drops_whole_block_and_retries_later():
+    """P0-3 (revisão Opus 05/09): um blip de rede no get_code não pode
+    marcar o bloco como varrido e apagar o contrato para sempre — o bloco
+    cai inteiro (sem escrita parcial) e o run seguinte retenta-o."""
+    rpc = {"up": False}
+
+    def fetch(b):
+        return [("0xA", 1), ("0xB", 1)]
+
+    def flaky_code(c):
+        if c == "0xb" and not rpc["up"]:
+            raise RuntimeError("rpc blip")
+        return b"x" * 100 if c == "0xa" else b"y" * 200
+
+    d = EraDiscovery(fetch_mints=fetch, get_code=flaky_code, era=(1, 1))
+    st = DiscoveryState()
+    out1 = d.scan(st, 1, random.Random(0))
+    assert out1.scanned == 0 and out1.failed >= 1
+    assert st.scanned == set()          # bloco NÃO marcado
+    assert st.contracts == {}           # sem escrita parcial (nem 0xA)
+    rpc["up"] = True                    # RPC volta; run seguinte retenta
+    out2 = d.scan(st, 1, random.Random(0))
+    assert out2.scanned == 1
+    assert set(st.contracts) == {"0xa", "0xb"}
+    assert st.contracts["0xa"]["mints"] == 1    # sem dupla contagem
 
 
 def test_classification_manifold_tail_and_collections():
@@ -124,3 +151,16 @@ def test_empty_store_loads_fresh_state():
                                 read=lambda: None, write=lambda b: None)
     st = store.load()
     assert st.scanned == set() and st.contracts == {}
+
+
+def test_garbled_state_store_fails_closed_without_leaking():
+    """P2 (revisão Opus 05/09): o store mais sensível também tem guarda —
+    estado ilegível recusa, nunca vira 'vazio' em silêncio nem despeja
+    conteúdo no traceback."""
+    import pytest
+    from finding_memeland.target.discovery import DiscoveryIntegrityError
+    store = DiscoveryStateStore(cipher=XorCipher(),
+                                read=lambda: "garbled", write=lambda b: None)
+    with pytest.raises(DiscoveryIntegrityError) as e:
+        store.load()
+    assert SECRET not in str(e.value)

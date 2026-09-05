@@ -58,6 +58,11 @@ def test_zora_collect_url():
     assert ref == TargetRef("ethereum", ADDR.lower(), 42)
 
 
+def test_token_id_in_query_string():
+    ref = parse_link(f"https://etherscan.io/token/{ADDR}?tokenId=42#inventory")
+    assert ref == TargetRef("ethereum", ADDR.lower(), 42)
+
+
 def test_scan_domains_imply_chain():
     assert parse_link(f"https://etherscan.io/nft/{ADDR}/42").chain == "ethereum"
     assert parse_link(f"https://basescan.org/nft/{ADDR}/42").chain == "base"

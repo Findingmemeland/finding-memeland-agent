@@ -109,6 +109,7 @@ def test_lister_enumerates_by_index_when_available():
                                      contract="0xF").items())
     assert [i.token_id for i in items] == [7, 9, 42]
     assert all(i.platform == "foundation" and i.name == "" for i in items)
+    assert all(i.chain == "ethereum" for i in items)   # cadeia viaja no item
 
 
 def test_lister_probes_densely_when_no_enumeration():

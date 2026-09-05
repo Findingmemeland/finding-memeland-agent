@@ -64,9 +64,9 @@ def make_selector(pairs, *, meta=None, eoa=None, unique=None, **kw):
     unique = unique if unique is not None else {p: True for p in pairs}
     return TargetSelector(
         source=FakeSource(pairs),
-        fetch_metadata=lambda c, t: meta.get((c, t)),
-        owner_is_eoa=lambda c, t: eoa.get((c, t)),
-        name_is_unique=lambda n, c, t: unique.get((c, t)),
+        fetch_metadata=lambda ch, c, t: meta.get((c, t)),
+        owner_is_eoa=lambda ch, c, t: eoa.get((c, t)),
+        name_is_unique=lambda n, ch, c, t: unique.get((c, t)),
         **kw,
     )
 
@@ -76,10 +76,25 @@ def test_selects_first_qualifier_and_builds_target():
     target = make_selector(pairs).select(EPOCH)
     assert isinstance(target, Target)
     assert target.contract == "0xaaa"           # lower-cased
-    assert target.id() == "base:0xaaa:1"
+    assert target.id() == "base:0xaaa:1"        # FakeSource: pares = 'base'
     assert target.name == "Whispering Harbor"
     assert target.epoch == "e1"
     assert target.metadata_sha256 == metadata_hash(GOOD_META)
+
+
+def test_chain_comes_from_the_candidate_not_a_constant():
+    """P0-1 (revisão Opus 05/09): a cadeia é dado por candidato."""
+    triples = [("ethereum", "0xAAA", 1)]
+    meta = {("0xAAA", 1): GOOD_META}
+    sel = TargetSelector(
+        source=FakeSource(triples),
+        fetch_metadata=lambda ch, c, t: meta.get((c, t)),
+        owner_is_eoa=lambda ch, c, t: True,
+        name_is_unique=lambda n, ch, c, t: True,
+    )
+    target = sel.select(EPOCH)
+    assert target.chain == "ethereum"
+    assert target.id() == "ethereum:0xaaa:1"
 
 
 def test_serial_name_is_normalised_and_kept_onchain():

@@ -74,9 +74,9 @@ def build_world(*, classic_break=False):
         snapshot_store=SnapshotStore(
             cipher=XorCipher(), read=stores["s"].read, write=stores["s"].write),
         eth_call=eth_call,
-        fetch_metadata=lambda c, t: dict(meta),
-        owner_is_eoa=lambda c, t: True,
-        name_is_unique=lambda n, c, t: True,
+        fetch_metadata=lambda ch, c, t: dict(meta),
+        owner_is_eoa=lambda ch, c, t: True,
+        name_is_unique=lambda n, ch, c, t: True,
         now_iso=lambda: "2026-09-05T20:00:00Z",
         writability_rates={"manifold2021": 0.5},
         cap_exempt=frozenset({"tail2021"}),
@@ -97,6 +97,16 @@ def test_full_run_builds_snapshot_and_gate():
     out = rep.render()
     assert SECRET not in out                     # Telegram-safe
     assert "manifold2021" in out
+
+
+def test_snapshot_entries_carry_the_chain():
+    """P0-1: os listers da época tagam a cadeia e ela chega ao snapshot."""
+    pipeline, stores = build_world()
+    pipeline.run(EPOCH, scan_blocks=10, rng=random.Random(0))
+    store = SnapshotStore(cipher=XorCipher(), read=stores["s"].read,
+                          write=stores["s"].write)
+    snap = store.load()
+    assert [e.chain for e in snap.entries] == ["ethereum"]
 
 
 def test_refresh_failure_serves_previous_snapshot():

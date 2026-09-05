@@ -66,6 +66,13 @@ GATE_RED_MAX = 20_000
 # the measured epoch-1 composition it self-satisfies, but the counter
 # enforces it so a collapsed stratum can't silently concentrate the rest.
 GATE_MAX_STRATUM_SHARE = 0.40
+# HARD cap, binding on every stratum EXEMPT OR NOT (Opus, 05/09): the soft
+# cap's rationale is the attacker's prior, which non-enumerable strata don't
+# feed — but a second rationale survives exemption: MEASUREMENT. A stratum
+# that is almost the whole pool makes the gate total inherit that stratum's
+# error bar. At 70% it doesn't bite today (tail ~56%) and blocks the case
+# where it would.
+GATE_HARD_STRATUM_SHARE = 0.70
 
 
 @dataclass(frozen=True)
@@ -73,8 +80,11 @@ class SnapshotEntry:
     """One hard-filter survivor, frozen at refresh time. `metadata` is the
     FULL resolved token metadata — the commitment hash is recomputed from it
     and must match `metadata_sha256` (belt and braces against a corrupted
-    store)."""
+    store). `chain` is PER ENTRY (Opus review, 05/09): the pool is
+    multi-chain and Target.id() seals chain:contract:tokenId — a wrong chain
+    here means a commitment no honest winner can match."""
 
+    chain: str
     contract: str
     token_id: int
     name: str            # base name (serial stripped) — what clues cipher
@@ -118,10 +128,11 @@ class SnapshotStore:
 
     def save(self, snap: Snapshot) -> None:
         payload = json.dumps({
-            "v": 1,
+            "v": 2,
             "epoch_id": snap.epoch_id,
             "built_at": snap.built_at,
             "entries": [{
+                "chain": e.chain,
                 "contract": e.contract, "tokenId": e.token_id,
                 "name": e.name, "name_onchain": e.name_onchain,
                 "metadata": e.metadata, "metadata_sha256": e.metadata_sha256,
@@ -138,7 +149,11 @@ class SnapshotStore:
             doc = json.loads(self._cipher.decrypt(blob))
             entries = []
             for raw in doc["entries"]:
+                # chain is REQUIRED (v2) — a chainless payload is a v1
+                # store from before the multi-chain fix: fail closed and
+                # rebuild rather than guess a chain into the commitment.
                 entry = SnapshotEntry(
+                    chain=raw["chain"],
                     contract=raw["contract"], token_id=int(raw["tokenId"]),
                     name=raw["name"], name_onchain=raw["name_onchain"],
                     metadata=raw["metadata"],
@@ -167,8 +182,8 @@ class SnapshotStore:
 
 
 class SnapshotSource:
-    """CandidateSource over a snapshot: yields (contract, tokenId) in a fresh
-    uniform shuffle per call — the exchangeability the selector's
+    """CandidateSource over a snapshot: yields (chain, contract, tokenId) in
+    a fresh uniform shuffle per call — the exchangeability the selector's
     first-qualifier draw relies on. Age and the hard filters were the refresh
     job's obligation; the epoch must match, or the pool predates the current
     curation and drawing from it would silently undo a rotation."""
@@ -177,7 +192,7 @@ class SnapshotSource:
         self._snap = snapshot
         self._rng = rng or random.SystemRandom()
 
-    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, int]]:
+    def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, str, int]]:
         if epoch.epoch_id != self._snap.epoch_id:
             raise SelectionRefused(
                 f"snapshot is for epoch {self._snap.epoch_id!r} but selection "
@@ -187,28 +202,30 @@ class SnapshotSource:
         self._rng.shuffle(order)
         for i in order:
             e = self._snap.entries[i]
-            yield e.contract, e.token_id
+            yield e.chain, e.contract, e.token_id
 
 
-def snapshot_selector(snapshot: Snapshot, *, chain: str = "base",
+def snapshot_selector(snapshot: Snapshot, *,
                       rng: random.Random | None = None,
                       max_attempts: int = 400) -> TargetSelector:
     """A TargetSelector whose adapters read the snapshot instead of the
     network: NO live query touches any candidate at selection time. The
     hard-filter verdicts are the refresh job's (an entry exists only because
-    it passed), so the adapters answer from the store."""
-    index = {(e.contract.lower(), e.token_id): e for e in snapshot.entries}
+    it passed), so the adapters answer from the store. The index keys on
+    (chain, contract, tokenId): the same contract:tokenId CAN exist on two
+    chains (same-nonce deploys) and each is a distinct candidate."""
+    index = {(e.chain, e.contract.lower(), e.token_id): e
+             for e in snapshot.entries}
 
-    def fetch_metadata(contract: str, token_id: int) -> dict | None:
-        e = index.get((contract.lower(), token_id))
+    def fetch_metadata(chain: str, contract: str, token_id: int) -> dict | None:
+        e = index.get((chain, contract.lower(), token_id))
         return e.metadata if e else None
 
     return TargetSelector(
         source=SnapshotSource(snapshot, rng=rng),
         fetch_metadata=fetch_metadata,
-        owner_is_eoa=lambda c, t: (c.lower(), t) in index or None,
-        name_is_unique=lambda n, c, t: (c.lower(), t) in index or None,
-        chain=chain,
+        owner_is_eoa=lambda ch, c, t: (ch, c.lower(), t) in index or None,
+        name_is_unique=lambda n, ch, c, t: (ch, c.lower(), t) in index or None,
         max_attempts=max_attempts,
     )
 
@@ -309,16 +326,38 @@ class StratumGateReport:
         return "\n".join(lines)
 
 
+def _age_days(built_at: str, now_iso: str) -> float | None:
+    """Days between two ISO-8601 stamps; None when either won't parse —
+    which the gate treats as STALE (fail-closed, never fresh on hope)."""
+    from datetime import datetime
+    try:
+        built = datetime.fromisoformat(built_at.replace("Z", "+00:00"))
+        now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        return (now - built).total_seconds() / 86_400
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def stratum_gate(snapshot: Snapshot,
                  writability_rates: dict[str, float],
                  *,
-                 cap_exempt: frozenset[str] = frozenset()) -> StratumGateReport:
+                 cap_exempt: frozenset[str] = frozenset(),
+                 epoch: CurationEpoch | None = None,
+                 now_iso: str | None = None) -> StratumGateReport:
     """Count the REAL pool per stratum (entries carry the platform slug the
     refresh stamped) and apply the gate: total >= GATE_GREEN_MIN, no stratum
     above GATE_MAX_STRATUM_SHARE of the effective pool. `writability_rates`
     are the per-stratum sampled rates (measured 04-05/09; re-sampled per
     epoch); a stratum with no measured rate fails closed at 0.0 — an
     unmeasured stratum contributes nothing to a launch decision.
+
+    The gate also verifies the snapshot it was HANDED (Opus review, 05/09):
+    with `epoch` given, an epoch mismatch is RED — the selector would refuse
+    this pool, so a confident GREEN over it would be a lie. With `now_iso`
+    given, a snapshot older than the epoch's max_snapshot_age_days caps the
+    verdict at AMBER: the mutation-void window is only small because the
+    cadence is weekly, and four failed refreshes in a row must not keep
+    printing clean GREENs. An unparseable built_at counts as stale.
 
     `cap_exempt` names strata the concentration cap does NOT bind. The
     cap's threat model (Opus, 05/09) is that revealed hunts shrink the
@@ -346,10 +385,31 @@ def stratum_gate(snapshot: Snapshot,
         full.append(StratumRow(stratum=stratum, entries=n,
                                writability_rate=rate, effective=eff,
                                share=share))
-        if share > GATE_MAX_STRATUM_SHARE and stratum not in cap_exempt:
+        if share > GATE_HARD_STRATUM_SHARE:
+            over.append(f"{stratum} (hard {GATE_HARD_STRATUM_SHARE:.0%})")
+        elif share > GATE_MAX_STRATUM_SHARE and stratum not in cap_exempt:
             over.append(stratum)
 
-    if total >= GATE_GREEN_MIN and not over:
+    # -- the snapshot itself must be the one the selector would accept ------ #
+    if epoch is not None and snapshot.epoch_id != epoch.epoch_id:
+        return StratumGateReport(
+            rows=tuple(full), total_effective=total, verdict="RED",
+            detail=(f"snapshot é da época {snapshot.epoch_id!r}, não de "
+                    f"{epoch.epoch_id!r} — o selector recusaria este pool; "
+                    "refazer o refresh antes de qualquer decisão"))
+    stale = ""
+    if now_iso is not None:
+        max_age = (epoch.max_snapshot_age_days if epoch is not None
+                   else CurationEpoch("_").max_snapshot_age_days)
+        age = _age_days(snapshot.built_at, now_iso)
+        if age is None:
+            stale = ("built_at ilegível — idade desconhecida conta como "
+                     "velho (fail-closed)")
+        elif age > max_age:
+            stale = (f"snapshot com {age:.0f}d (> {max_age}d) — refresh "
+                     "antes de lançar; a janela de mutação cresce com a idade")
+
+    if total >= GATE_GREEN_MIN and not over and not stale:
         verdict, detail = "GREEN", "launchable"
     elif total <= GATE_RED_MAX:
         verdict = "RED"
@@ -359,9 +419,13 @@ def stratum_gate(snapshot: Snapshot,
         verdict = "AMBER"
         detail = (f"stratum share cap {GATE_MAX_STRATUM_SHARE:.0%} exceeded "
                   f"by: {', '.join(over)} — widen the OTHER strata")
+    elif stale:
+        verdict, detail = "AMBER", stale
     else:
         verdict = "AMBER"
         detail = (f"total below {GATE_GREEN_MIN:,} — widen sourcing and "
                   "re-measure before launching")
+    if stale and verdict != "RED" and stale not in detail:
+        detail = f"{detail}; {stale}"
     return StratumGateReport(rows=tuple(full), total_effective=total,
                              verdict=verdict, detail=detail)

@@ -64,8 +64,16 @@ class DiscoveryState:
     __str__ = __repr__
 
 
+class DiscoveryIntegrityError(RuntimeError):
+    """Discovery state unreadable/corrupted. The message NEVER carries
+    contracts — this store holds the registry's raw material."""
+
+
 class DiscoveryStateStore:
-    """Encrypted persistence (PoolCipher port + injected read/write)."""
+    """Encrypted persistence (PoolCipher port + injected read/write).
+    Fail-closed on load like RegistryStore/SnapshotStore (Opus review,
+    05/09): a state that cannot be trusted is a state we rescan, not one we
+    silently replace with 'empty' or crash over with contents in the trace."""
 
     def __init__(self, *, cipher, read: Callable[[], str | None],
                  write: Callable[[str], None]):
@@ -85,9 +93,26 @@ class DiscoveryStateStore:
         blob = self._read()
         if blob is None:
             return DiscoveryState()
-        doc = json.loads(self._cipher.decrypt(blob))
-        return DiscoveryState(scanned=set(doc["scanned"]),
-                              contracts=doc["contracts"])
+        try:
+            doc = json.loads(self._cipher.decrypt(blob))
+            return DiscoveryState(scanned=set(doc["scanned"]),
+                                  contracts=doc["contracts"])
+        except Exception as e:  # noqa: BLE001 — fail closed, no contents
+            raise DiscoveryIntegrityError(
+                f"discovery state unreadable ({type(e).__name__}) — wrong "
+                "key or corrupted store; rescan the era") from e
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    """One scan run's outcome. `failed` counts blocks ATTEMPTED but not
+    committed because a transport call failed mid-block — they stay
+    unscanned and a later run retries them. Surfacing this number is part
+    of the fix (Opus review, 05/09): an RPC blip must show up in the
+    operator report, never erase contracts in silence."""
+
+    scanned: int
+    failed: int
 
 
 @dataclass(frozen=True)
@@ -123,12 +148,18 @@ class EraDiscovery:
         self._pinned = pinned_manifold_hashes
 
     def scan(self, state: DiscoveryState, n_blocks: int,
-             rng: random.Random | None = None) -> int:
-        """Scan n random era blocks not yet in state. Returns blocks scanned
-        this run. Failures skip silently per block (the block stays
-        unscanned and a later run retries it)."""
+             rng: random.Random | None = None) -> ScanOutcome:
+        """Scan n random era blocks not yet in state.
+
+        A block commits ATOMICALLY (Opus review, 05/09): fetch the mints,
+        resolve EVERY unseen contract's code, and only then write mint
+        counts and mark the block scanned. If any call fails the block is
+        dropped whole — no partial writes, nothing marked scanned — so a
+        later run retries it and an RPC blip can never erase a contract
+        from the registry's raw material in silence."""
         rng = rng or random.SystemRandom()
         done = 0
+        failed = 0
         attempts = 0
         while done < n_blocks and attempts < n_blocks * 4:
             attempts += 1
@@ -138,23 +169,32 @@ class EraDiscovery:
             try:
                 mints = self._fetch(b)
             except Exception:  # noqa: BLE001 — bloco fica por varrer
+                failed += 1
                 continue
-            state.scanned.add(b)
-            done += 1
+            # resolve every unseen contract BEFORE touching state
+            new_recs: dict[str, dict] = {}
+            ok = True
             for contract, _tid in mints:
                 c = contract.lower()
-                rec = state.contracts.get(c)
-                if rec is None:
-                    try:
-                        code = self._code(c)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    rec = {"mints": 0,
-                           "fam": hashlib.sha256(code).hexdigest()[:16],
-                           "len": len(code)}
-                    state.contracts[c] = rec
-                rec["mints"] += 1
-        return done
+                if c in state.contracts or c in new_recs:
+                    continue
+                try:
+                    code = self._code(c)
+                except Exception:  # noqa: BLE001 — transporte: bloco cai todo
+                    ok = False
+                    break
+                new_recs[c] = {"mints": 0,
+                               "fam": hashlib.sha256(code).hexdigest()[:16],
+                               "len": len(code)}
+            if not ok:
+                failed += 1
+                continue
+            state.contracts.update(new_recs)
+            for contract, _tid in mints:
+                state.contracts[contract.lower()]["mints"] += 1
+            state.scanned.add(b)
+            done += 1
+        return ScanOutcome(scanned=done, failed=failed)
 
     def classify_into(self, state: DiscoveryState,
                       registry: ContractRegistry) -> DiscoveryReport:

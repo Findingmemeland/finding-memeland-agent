@@ -69,6 +69,7 @@ _MARKET_HOSTS = (
 
 _URL_RE = re.compile(r"https?://\S+")
 _ADDR_TID_RE = re.compile(r"(0x[0-9a-fA-F]{40})[:/](\d+)\b")
+_QUERY_TID_RE = re.compile(r"[?&](?:tokenId|token_id)=(\d+)\b")
 _ADDR_RE = re.compile(r"0x[0-9a-fA-F]{40}\b")
 _EXPLICIT_RE = re.compile(
     r"\b([A-Za-z]{2,12}):(0x[0-9a-fA-F]{40}):(\d+)\b")
@@ -119,9 +120,16 @@ def parse_link(url: str) -> TargetRef | None:
     adjacent tokenId AND a chain (URL segment, else domain implication)."""
     url = (url or "").strip().rstrip(")>.,;!?'\"")
     m = _ADDR_TID_RE.search(url)
-    if not m:
-        return None
-    addr, tid = m.group(1), int(m.group(2))
+    if m:
+        addr, tid = m.group(1), int(m.group(2))
+    else:
+        # contract in the path, tokenId in the query (?tokenId=42) — the
+        # other shape marketplaces use (Opus review, 05/09)
+        ma = _ADDR_RE.search(url)
+        mq = _QUERY_TID_RE.search(url)
+        if not (ma and mq):
+            return None
+        addr, tid = ma.group(0), int(mq.group(1))
 
     chain: str | None = None
     parts = urlsplit(url)

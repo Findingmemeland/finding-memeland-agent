@@ -23,11 +23,12 @@ from finding_memeland.target.selector import metadata_hash
 EPOCH = CurationEpoch(epoch_id="e1")
 
 
-def entry(i: int, name: str = "Whispering Harbor") -> SnapshotEntry:
+def entry(i: int, name: str = "Whispering Harbor",
+          chain: str = "ethereum") -> SnapshotEntry:
     meta = {"name": f"{name} #{i}", "image": f"ipfs://img{i}",
             "description": "quiet"}
     return SnapshotEntry(
-        contract=f"0x{i:040x}", token_id=i, name=name,
+        chain=chain, contract=f"0x{i:040x}", token_id=i, name=name,
         name_onchain=f"{name} #{i}", metadata=meta,
         metadata_sha256=metadata_hash(meta), platform="testplat",
     )
@@ -101,6 +102,33 @@ def test_garbled_blob_fails_closed():
         make_store(mem).load()
 
 
+def test_chain_round_trips_through_store():
+    mem = MemStore()
+    store = make_store(mem)
+    s = Snapshot(epoch_id="e1", built_at="2026-09-04T00:00:00Z",
+                 entries=[entry(1, chain="ethereum"),
+                          entry(2, "Salt Harbor", chain="base")])
+    store.save(s)
+    loaded = store.load()
+    assert [e.chain for e in loaded.entries] == ["ethereum", "base"]
+
+
+def test_chainless_v1_payload_fails_closed():
+    """Um store de antes do fix multi-chain não tem 'chain' — recusar e
+    reconstruir, nunca adivinhar uma cadeia para dentro do compromisso."""
+    import json
+    mem = MemStore()
+    store = make_store(mem)
+    s = snap(1)
+    store.save(s)
+    doc = json.loads(XorCipher().decrypt(mem.blob))
+    for e in doc["entries"]:
+        del e["chain"]
+    mem.blob = XorCipher().encrypt(json.dumps(doc, ensure_ascii=False))
+    with pytest.raises(SnapshotIntegrityError):
+        store.load()
+
+
 # --------------------------------------------------------------------------- #
 # Drawing                                                                      #
 # --------------------------------------------------------------------------- #
@@ -123,6 +151,33 @@ def test_snapshot_selector_draws_offline_and_uniformly():
     t = snapshot_selector(s, rng=random.Random(1)).select(EPOCH)
     assert t.name == "Whispering Harbor"          # base name from the store
     assert t.metadata_sha256 == s.entries[t.token_id - 1].metadata_sha256
+    assert t.chain == "ethereum"                  # da ENTRADA, não constante
+    assert t.id().startswith("ethereum:")
+
+
+def test_target_chain_is_per_entry_two_chains_same_pair():
+    """P0-1 (revisão Opus 05/09): o mesmo contract:tokenId em duas cadeias
+    são dois candidatos distintos, e Target.id() sela a cadeia da entrada —
+    uma constante teria selado 'base:' para uma peça de Ethereum e recusado
+    o vencedor legítimo."""
+    e_eth = entry(1, "North Signal", chain="ethereum")
+    e_base = SnapshotEntry(
+        chain="base", contract=e_eth.contract, token_id=e_eth.token_id,
+        name="South Signal", name_onchain="South Signal #1",
+        metadata={"name": "South Signal #1", "image": "ipfs://b"},
+        metadata_sha256=metadata_hash(
+            {"name": "South Signal #1", "image": "ipfs://b"}),
+        platform="baseplat")
+    s = Snapshot(epoch_id="e1", built_at="2026-09-04T00:00:00Z",
+                 entries=[e_eth, e_base])
+    ids = set()
+    for seed in range(20):
+        t = snapshot_selector(s, rng=random.Random(seed)).select(EPOCH)
+        ids.add(t.id())
+        # o nome tem de ser o da entrada DA MESMA cadeia (índice por triplo)
+        assert t.name == ("North Signal" if t.chain == "ethereum"
+                          else "South Signal")
+    assert ids == {f"ethereum:{e_eth.contract}:1", f"base:{e_eth.contract}:1"}
 
 
 def test_select_writable_skips_unwritable_draws():
@@ -214,9 +269,64 @@ def test_stratum_gate_unmeasured_stratum_fails_closed():
     assert rep.total_effective == 50_000
 
 
+def test_stratum_gate_hard_cap_binds_even_exempt_strata():
+    """70% duro (Opus 05/09): a isenção mata o argumento do prior, não o da
+    MEDIÇÃO — um estrato quase-pool-inteiro faz o total herdar a barra de
+    erro dele."""
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"tail": 400_000, "foundation": 60_000})
+    rep = stratum_gate(s, {"tail": 0.5, "foundation": 0.5},
+                       cap_exempt=frozenset({"tail"}))
+    assert rep.verdict == "AMBER"
+    assert "hard" in rep.detail and "tail" in rep.detail
+
+
 def test_stratum_gate_red_when_tiny():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 30_000})
     rep = stratum_gate(s, {"foundation": 0.5})
     assert rep.verdict == "RED"
     assert "never loosen quality filters" in rep.detail
+
+
+def test_stratum_gate_epoch_mismatch_is_red():
+    """P1 (revisão Opus 05/09): um GREEN sobre um pool que o selector vai
+    recusar é mentira — época errada é RED."""
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 500_000})
+    rep = stratum_gate(s, {"foundation": 0.5},
+                       epoch=CurationEpoch(epoch_id="e2"))
+    assert rep.verdict == "RED"
+    assert "época" in rep.detail
+
+
+def test_stratum_gate_stale_snapshot_blocks_green():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 500_000})
+    s.built_at = "2026-08-01T00:00:00Z"
+    rep = stratum_gate(s, {"foundation": 0.5},
+                       epoch=CurationEpoch(epoch_id="e1"),
+                       now_iso="2026-09-05T00:00:00Z")   # 35 dias > 14
+    assert rep.verdict == "AMBER"
+    assert "refresh" in rep.detail
+
+
+def test_stratum_gate_fresh_snapshot_stays_green():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 200_000, "superrare": 200_000,
+                          "makersplace": 200_000})
+    s.built_at = "2026-09-01T00:00:00Z"
+    rep = stratum_gate(s, {"foundation": 0.5, "superrare": 0.5,
+                           "makersplace": 0.5},
+                       epoch=CurationEpoch(epoch_id="e1"),
+                       now_iso="2026-09-05T00:00:00Z")   # 4 dias < 14
+    assert rep.verdict == "GREEN"
+
+
+def test_stratum_gate_unparseable_built_at_counts_as_stale():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 500_000})    # built_at="t"
+    rep = stratum_gate(s, {"foundation": 0.5},
+                       now_iso="2026-09-05T00:00:00Z")
+    assert rep.verdict == "AMBER"
+    assert "ilegível" in rep.detail
