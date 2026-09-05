@@ -146,8 +146,10 @@ def test_opensea_lister_paginates_and_parses():
         return json.dumps(pages[cursor])
 
     lister = OpenSeaContractLister(http_get=http_get, api_key="k",
-                                   contract="0xabc", platform="plat")
+                                   contract="0xabc", platform="plat",
+                                   chain="base")
     got = list(lister.items())
     assert [(i.token_id, i.name) for i in got] == [(1, "A B"), (2, "C D")]
+    assert all(i.chain == "base" for i in got)
     assert "/chain/base/contract/0xabc/nfts" in seen_urls[0]
     assert len(seen_urls) == 2

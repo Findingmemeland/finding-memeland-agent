@@ -58,12 +58,17 @@ GOOD_META = {"name": "Whispering Harbor", "image": "ipfs://img",
              "description": "a quiet place"}
 
 
+CHAIN = "ethereum"
+
+
 def make_selector(pairs, *, meta=None, eoa=None, unique=None, **kw):
+    """Os testes falam em pares (contract, token); a cadeia é EXPLÍCITA
+    aqui — o FakeSource já não carimba nenhuma por omissão."""
     meta = meta if meta is not None else {p: GOOD_META for p in pairs}
     eoa = eoa if eoa is not None else {p: True for p in pairs}
     unique = unique if unique is not None else {p: True for p in pairs}
     return TargetSelector(
-        source=FakeSource(pairs),
+        source=FakeSource([(CHAIN, c, t) for c, t in pairs]),
         fetch_metadata=lambda ch, c, t: meta.get((c, t)),
         owner_is_eoa=lambda ch, c, t: eoa.get((c, t)),
         name_is_unique=lambda n, ch, c, t: unique.get((c, t)),
@@ -76,7 +81,7 @@ def test_selects_first_qualifier_and_builds_target():
     target = make_selector(pairs).select(EPOCH)
     assert isinstance(target, Target)
     assert target.contract == "0xaaa"           # lower-cased
-    assert target.id() == "base:0xaaa:1"        # FakeSource: pares = 'base'
+    assert target.id() == "ethereum:0xaaa:1"    # cadeia do candidato
     assert target.name == "Whispering Harbor"
     assert target.epoch == "e1"
     assert target.metadata_sha256 == metadata_hash(GOOD_META)
@@ -95,6 +100,13 @@ def test_chain_comes_from_the_candidate_not_a_constant():
     target = sel.select(EPOCH)
     assert target.chain == "ethereum"
     assert target.id() == "ethereum:0xaaa:1"
+
+
+def test_fake_source_refuses_pairs():
+    """Sem forma legada: um fake que carimbasse a cadeia esconderia
+    regressões (revisão Opus 05/09)."""
+    with pytest.raises(ValueError):
+        FakeSource([("0xAAA", 1)])
 
 
 def test_serial_name_is_normalised_and_kept_onchain():

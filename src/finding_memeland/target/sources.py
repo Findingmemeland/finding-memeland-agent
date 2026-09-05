@@ -145,8 +145,10 @@ class ChainContractLister:
     RAISE on revert."""
 
     def __init__(self, *, eth_call, platform: str, contract: str,
-                 chain: str = "ethereum", max_tokens: int = 200_000,
+                 chain: str, max_tokens: int = 200_000,
                  probe_miss_budget: int = 25):
+        # `chain` has NO default on purpose (Opus re-review, 05/09): a chain
+        # with a default value is the exact shape of the bug just removed.
         self.name = platform
         self._call = eth_call
         self._contract = contract
@@ -216,7 +218,7 @@ class RegistryStratumLister:
     or any log-facing field."""
 
     def __init__(self, *, eth_call, stratum: str, registry: ContractRegistry,
-                 chain: str = "ethereum", per_contract_cap: int = 2_000):
+                 chain: str, per_contract_cap: int = 2_000):
         self.name = stratum
         self._eth_call = eth_call
         self._registry = registry

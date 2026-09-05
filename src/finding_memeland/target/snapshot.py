@@ -417,8 +417,12 @@ def stratum_gate(snapshot: Snapshot,
                   "sourcing (never loosen quality filters)")
     elif over:
         verdict = "AMBER"
-        detail = (f"stratum share cap {GATE_MAX_STRATUM_SHARE:.0%} exceeded "
-                  f"by: {', '.join(over)} — widen the OTHER strata")
+        hard_hit = any("(hard" in o for o in over)
+        cap_label = (f"HARD stratum share cap {GATE_HARD_STRATUM_SHARE:.0%}"
+                     if hard_hit else
+                     f"stratum share cap {GATE_MAX_STRATUM_SHARE:.0%}")
+        detail = (f"{cap_label} exceeded by: {', '.join(over)} — widen the "
+                  "OTHER strata")
     elif stale:
         verdict, detail = "AMBER", stale
     else:

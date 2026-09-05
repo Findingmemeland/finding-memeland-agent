@@ -106,7 +106,7 @@ def make_call(*, supply=None, ids=None, existing=None):
 def test_lister_enumerates_by_index_when_available():
     call = make_call(supply=3, ids=[7, 9, 42])
     items = list(ChainContractLister(eth_call=call, platform="foundation",
-                                     contract="0xF").items())
+                                     contract="0xF", chain="ethereum").items())
     assert [i.token_id for i in items] == [7, 9, 42]
     assert all(i.platform == "foundation" and i.name == "" for i in items)
     assert all(i.chain == "ethereum" for i in items)   # cadeia viaja no item
@@ -116,7 +116,7 @@ def test_lister_probes_densely_when_no_enumeration():
     # tokens 1..5 e 8 existem; buraco de 2 (burns) tolerado, pára no fim
     call = make_call(supply=None, existing={1, 2, 3, 4, 5, 8})
     items = list(ChainContractLister(eth_call=call, platform="tail2021",
-                                     contract="0xT",
+                                     contract="0xT", chain="ethereum",
                                      probe_miss_budget=3).items())
     assert [i.token_id for i in items] == [1, 2, 3, 4, 5, 8]
 
@@ -126,9 +126,19 @@ def test_registry_stratum_lister_tags_stratum_not_contract():
     reg.add("tail2021", ["0xa", "0xb"])
     call = make_call(supply=None, existing={1})
     items = list(RegistryStratumLister(eth_call=call, stratum="tail2021",
-                                       registry=reg).items())
+                                       registry=reg, chain="ethereum").items())
     assert len(items) == 2                    # token 1 de cada contrato
     assert all(i.platform == "tail2021" for i in items)
+
+
+def test_chain_is_a_required_keyword_on_every_lister():
+    """Uma cadeia com valor por omissão é a forma exacta do bug P0-1
+    (revisão Opus 05/09) — os listers recusam construir sem ela."""
+    import inspect
+    for cls in (ChainContractLister, RegistryStratumLister):
+        p = inspect.signature(cls.__init__).parameters["chain"]
+        assert p.default is inspect.Parameter.empty
+        assert p.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_epoch1_composition_matches_ratified_decision():

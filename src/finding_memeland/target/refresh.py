@@ -242,7 +242,7 @@ class OpenSeaContractLister:
     USER_AGENT = "fml-refresh-probe/1.0"   # measured: passes Cloudflare
 
     def __init__(self, *, http_get, api_key: str, contract: str,
-                 platform: str, chain: str = "base",
+                 platform: str, chain: str,
                  base_url: str = "https://api.opensea.io",
                  page_limit: int = 200, max_pages: int = 500):
         if not api_key:

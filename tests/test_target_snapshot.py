@@ -279,6 +279,7 @@ def test_stratum_gate_hard_cap_binds_even_exempt_strata():
                        cap_exempt=frozenset({"tail"}))
     assert rep.verdict == "AMBER"
     assert "hard" in rep.detail and "tail" in rep.detail
+    assert rep.detail.startswith("HARD stratum share cap 70%")   # manchete certa
 
 
 def test_stratum_gate_red_when_tiny():

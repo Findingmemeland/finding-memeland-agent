@@ -260,14 +260,17 @@ class TargetSelector:
 
 
 class FakeSource:
-    """A CandidateSource over a fixed, pre-shuffled list (tests). Accepts
-    (chain, contract, token_id) triples, or legacy (contract, token_id)
-    pairs which default to 'base'."""
+    """A CandidateSource over a fixed, pre-shuffled list of (chain,
+    contract, token_id) TRIPLES (tests). No pair form and no default chain
+    (Opus re-review, 05/09): a fake that stamps a chain would keep old tests
+    green with the wrong chain and hide regressions."""
 
-    def __init__(self, pairs: Iterable[tuple]):
-        self._triples = [
-            p if len(p) == 3 else ("base", p[0], p[1]) for p in pairs
-        ]
+    def __init__(self, triples: Iterable[tuple[str, str, int]]):
+        self._triples = []
+        for t in triples:
+            if len(t) != 3:
+                raise ValueError("FakeSource takes (chain, contract, token_id)")
+            self._triples.append(t)
 
     def candidates(self, epoch: CurationEpoch) -> Iterator[tuple[str, str, int]]:
         return iter(self._triples)
