@@ -149,27 +149,40 @@ class RefreshJob:
                 ) from e
         report.pulled = len(pulled)
 
-        # -- 1. base-name shape (local) ------------------------------------ #
-        named = [(it, normalize_name(it.name)) for it in pulled]
-        named = [(it, base) for it, base in named
-                 if name_qualifies(base, min_words=epoch.min_words)]
-        report.after_name = len(named)
+        # -- 1. cheap prefilter, ONLY for items whose lister supplied a
+        # name. Chain-native listers (sources.py) supply name="" by design
+        # — their canonical name comes from the metadata resolver — so an
+        # empty name defers to stage 2 instead of failing here.
+        prefiltered = [it for it in pulled
+                       if not it.name
+                       or name_qualifies(normalize_name(it.name),
+                                         min_words=epoch.min_words)]
+        report.after_name = len(prefiltered)
 
-        # -- 2. in-pool dedupe: a base name seen twice kills every bearer -- #
-        counts: dict[str, int] = {}
-        for _, base in named:
-            counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
-        named = [(it, base) for it, base in named
-                 if counts[base.casefold()] == 1]
-        report.after_pool_dedupe = len(named)
-
-        # -- 3..5 per candidate, quota-priced check last -------------------- #
-        entries: list[SnapshotEntry] = []
-        for it, base in named:
+        # -- 2. canonical metadata + canonical base name -------------------- #
+        resolved: list[tuple[PlatformItem, str, dict]] = []
+        for it in prefiltered:
             meta = self._fetch_metadata(it.contract, it.token_id)
             if not (isinstance(meta, dict) and meta.get("image")):
                 continue
-            report.after_metadata += 1
+            base = normalize_name(str(meta.get("name") or "").strip())
+            if not name_qualifies(base, min_words=epoch.min_words):
+                continue
+            resolved.append((it, base, meta))
+        report.after_metadata = len(resolved)
+
+        # -- 3. in-pool dedupe on the CANONICAL base name: a base name seen
+        # twice kills every bearer (what clues cipher must be unique) ------ #
+        counts: dict[str, int] = {}
+        for _, base, _m in resolved:
+            counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
+        resolved = [(it, base, meta) for it, base, meta in resolved
+                    if counts[base.casefold()] == 1]
+        report.after_pool_dedupe = len(resolved)
+
+        # -- 4..5 per candidate, quota-priced check last -------------------- #
+        entries: list[SnapshotEntry] = []
+        for it, base, meta in resolved:
             eoa = self._owner_is_eoa(it.contract, it.token_id)
             if eoa is None:
                 report.unverifiable += 1

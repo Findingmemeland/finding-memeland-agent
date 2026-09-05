@@ -49,6 +49,15 @@ EPOCH1_CAP_EXEMPT = frozenset({"tail2021"})   # ratified 05/09; falls on leak
 # --------------------------------------------------------------------------- #
 
 
+class ChainUnavailable(RuntimeError):
+    """Transport failure (RPC down, timeout) — NOT a revert. The production
+    eth_call adapter raises THIS for network trouble and any other
+    exception for reverts. Listers let it propagate so a broken platform
+    fails the refresh loudly (previous snapshot keeps serving) instead of
+    being swallowed as 'zero tokens' — the silently-smaller-pool failure
+    the refresh exists to refuse."""
+
+
 class RegistryIntegrityError(RuntimeError):
     """Registry unreadable/corrupted. The message NEVER carries contracts."""
 
@@ -153,7 +162,9 @@ class ChainContractLister:
     def _try_total_supply(self) -> int | None:
         try:
             return int(self._call(self._contract, SEL_TOTAL), 16)
-        except Exception:  # noqa: BLE001
+        except ChainUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 — revert = sem enumeração
             return None
 
     def _exists(self, tid: int) -> bool:
@@ -161,7 +172,9 @@ class ChainContractLister:
             data = self._call(self._contract,
                               SEL_OWNEROF + tid.to_bytes(32, "big").hex())
             return bool(data and data != "0x")
-        except Exception:  # noqa: BLE001
+        except ChainUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 — revert = token não existe
             return False
 
     def _by_index(self, total: int) -> Iterator[PlatformItem]:
@@ -170,6 +183,8 @@ class ChainContractLister:
                 tid = int(self._call(
                     self._contract,
                     SEL_TOKENBYINDEX + idx.to_bytes(32, "big").hex()), 16)
+            except ChainUnavailable:
+                raise
             except Exception:  # noqa: BLE001 — sem enumeração afinal
                 yield from self._by_probe()
                 return
