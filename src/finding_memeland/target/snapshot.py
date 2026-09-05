@@ -62,6 +62,10 @@ from .selector import (
 # 20x safety factor. Between the two bounds: widen sourcing, re-measure.
 GATE_GREEN_MIN = 100_000
 GATE_RED_MAX = 20_000
+# No platform/stratum may exceed this share of the pool (Opus, 05/09) — in
+# the measured epoch-1 composition it self-satisfies, but the counter
+# enforces it so a collapsed stratum can't silently concentrate the rest.
+GATE_MAX_STRATUM_SHARE = 0.40
 
 
 @dataclass(frozen=True)
@@ -261,3 +265,103 @@ def gate_verdict(pool_size: int, writability_rate: float) -> GateVerdict:
         detail = (f"effective {effective:,} between bounds — widen sourcing "
                   "and re-measure before launching")
     return GateVerdict(effective=effective, verdict=verdict, detail=detail)
+
+
+# --------------------------------------------------------------------------- #
+# The stratum counter — the definitive gate (Opus, 05/09)                      #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class StratumRow:
+    stratum: str
+    entries: int
+    writability_rate: float
+    effective: int
+    share: float
+
+
+@dataclass(frozen=True)
+class StratumGateReport:
+    """The launch decision, PER STRATUM (Opus, 05/09: the 04-05/09 census
+    green rests on its weakest leg — the tail — so a total alone is blind:
+    'se vier a 80k, precisamos de saber se foi a cauda que colapsou ou o
+    Manifold que era optimista, senão não sabemos onde ir buscar sourcing').
+    Also enforces the concentration cap the census showed self-satisfying:
+    a collapsed stratum must not silently concentrate the rest."""
+
+    rows: tuple[StratumRow, ...]
+    total_effective: int
+    verdict: str          # "GREEN" | "AMBER" | "RED"
+    detail: str
+
+    def render(self) -> str:
+        """Operator-log table. Stratum names are labels, never target
+        names — safe for Telegram."""
+        lines = [f"{'stratum':14} {'entries':>9} {'writ.':>6} "
+                 f"{'effective':>10} {'share':>6}"]
+        for r in self.rows:
+            lines.append(f"{r.stratum:14} {r.entries:>9,} "
+                         f"{r.writability_rate:>6.0%} {r.effective:>10,} "
+                         f"{r.share:>6.0%}")
+        lines.append(f"TOTAL effective: {self.total_effective:,} — "
+                     f"{self.verdict}: {self.detail}")
+        return "\n".join(lines)
+
+
+def stratum_gate(snapshot: Snapshot,
+                 writability_rates: dict[str, float],
+                 *,
+                 cap_exempt: frozenset[str] = frozenset()) -> StratumGateReport:
+    """Count the REAL pool per stratum (entries carry the platform slug the
+    refresh stamped) and apply the gate: total >= GATE_GREEN_MIN, no stratum
+    above GATE_MAX_STRATUM_SHARE of the effective pool. `writability_rates`
+    are the per-stratum sampled rates (measured 04-05/09; re-sampled per
+    epoch); a stratum with no measured rate fails closed at 0.0 — an
+    unmeasured stratum contributes nothing to a launch decision.
+
+    `cap_exempt` names strata the concentration cap does NOT bind. The
+    cap's threat model (Opus, 05/09) is that revealed hunts shrink the
+    attacker's prior to the dominant platform's SEARCH BOX — so it applies
+    to endpoint-enumerable strata. A stratum third parties cannot enumerate
+    (the 2021 tail of one-off artist contracts: 'ninguém consegue enumerar
+    contratos avulsos de 2021 como consulta um endpoint curated') is where
+    'o risco e a defesa estão no mesmo sítio' — exempting it is Opus's own
+    side-note made mechanical. Exemptions are epoch configuration, decided
+    by humans, never inferred."""
+    counts: dict[str, int] = {}
+    for e in snapshot.entries:
+        counts[e.platform or "unknown"] = counts.get(e.platform or "unknown", 0) + 1
+    rows = []
+    total = 0
+    for stratum, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        rate = writability_rates.get(stratum, 0.0)
+        eff = int(n * rate)
+        total += eff
+        rows.append((stratum, n, rate, eff))
+    full = []
+    over = []
+    for stratum, n, rate, eff in rows:
+        share = eff / total if total else 0.0
+        full.append(StratumRow(stratum=stratum, entries=n,
+                               writability_rate=rate, effective=eff,
+                               share=share))
+        if share > GATE_MAX_STRATUM_SHARE and stratum not in cap_exempt:
+            over.append(stratum)
+
+    if total >= GATE_GREEN_MIN and not over:
+        verdict, detail = "GREEN", "launchable"
+    elif total <= GATE_RED_MAX:
+        verdict = "RED"
+        detail = (f"total <= {GATE_RED_MAX:,} — do not launch; widen "
+                  "sourcing (never loosen quality filters)")
+    elif over:
+        verdict = "AMBER"
+        detail = (f"stratum share cap {GATE_MAX_STRATUM_SHARE:.0%} exceeded "
+                  f"by: {', '.join(over)} — widen the OTHER strata")
+    else:
+        verdict = "AMBER"
+        detail = (f"total below {GATE_GREEN_MIN:,} — widen sourcing and "
+                  "re-measure before launching")
+    return StratumGateReport(rows=tuple(full), total_effective=total,
+                             verdict=verdict, detail=detail)

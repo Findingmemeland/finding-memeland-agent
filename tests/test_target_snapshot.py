@@ -161,3 +161,62 @@ def test_gate_thresholds(pool, rate, verdict):
 
 def test_gate_red_detail_carries_the_anticircularity_rule():
     assert "never loosen quality filters" in gate_verdict(10_000, 0.5).detail
+
+
+# --------------------------------------------------------------------------- #
+# Stratum counter (the definitive gate)                                        #
+# --------------------------------------------------------------------------- #
+
+
+def snap_with_strata(counts: dict[str, int]) -> Snapshot:
+    entries = []
+    i = 0
+    for platform, n in counts.items():
+        for _ in range(n):
+            i += 1
+            e = entry(i)
+            object.__setattr__(e, "platform", platform)
+            entries.append(e)
+    return Snapshot(epoch_id="e1", built_at="t", entries=entries)
+
+
+def test_stratum_gate_green_and_per_stratum_rows():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 60_000, "superrare": 50_000,
+                          "tail": 200_000})
+    # a cauda domina (56%) mas é isenta do tecto: não-enumerável por
+    # terceiros (racional do Opus 05/09) — isenção é configuração de época
+    rep = stratum_gate(s, {"foundation": 0.5, "superrare": 0.7, "tail": 0.35},
+                       cap_exempt=frozenset({"tail"}))
+    assert rep.verdict == "GREEN"
+    by = {r.stratum: r for r in rep.rows}
+    assert by["foundation"].effective == 30_000
+    assert by["tail"].effective == 70_000
+    assert rep.total_effective == 135_000
+    assert abs(by["tail"].share - 70_000 / 135_000) < 1e-6
+    assert "foundation" in rep.render() and "GREEN" in rep.render()
+
+
+def test_stratum_gate_concentration_cap_bites():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 300_000, "tail": 40_000})
+    rep = stratum_gate(s, {"foundation": 0.5, "tail": 0.5})
+    assert rep.verdict == "AMBER"
+    assert "foundation" in rep.detail and "cap" in rep.detail
+
+
+def test_stratum_gate_unmeasured_stratum_fails_closed():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 100_000, "mystery": 900_000})
+    rep = stratum_gate(s, {"foundation": 0.5})
+    by = {r.stratum: r for r in rep.rows}
+    assert by["mystery"].effective == 0        # sem taxa medida = 0, nunca +
+    assert rep.total_effective == 50_000
+
+
+def test_stratum_gate_red_when_tiny():
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 30_000})
+    rep = stratum_gate(s, {"foundation": 0.5})
+    assert rep.verdict == "RED"
+    assert "never loosen quality filters" in rep.detail

@@ -32,11 +32,41 @@ this codebase, is exercised against the live API before production use.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Protocol
 
 from .selector import metadata_hash, name_qualifies, normalize_name
 from .snapshot import CurationEpoch, Snapshot, SnapshotEntry
+
+
+_IPFS_GATEWAY_PATH = re.compile(r"^https?://[^/]+/ipfs/(qm[1-9a-z]{44}|baf[a-z0-9]{20,})",
+                                re.IGNORECASE)
+_BARE_CID = re.compile(r"^(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-zA-Z0-9]{20,})")
+
+
+def uri_is_content_addressed(uri: str | None) -> bool:
+    """Only content-addressed metadata enters the pool. Three shapes
+    qualify, all measured in the wild (2026-09-05 capture):
+      · ipfs:// and data: (the obvious ones)
+      · a BARE CID with no scheme (Async Art writes tokenURIs like
+        'QmWh59…')
+      · an http(s) GATEWAY URL whose path is /ipfs/<cid> (SuperRare's
+        ipfs.pixura.io — the CID seals the content; the gateway is mere
+        transport and can die, as pixura's DNS did, without the content
+        becoming unverifiable: any gateway serves the same bytes)
+    A plain http(s) URL without a CID serves whatever the host feels like
+    today and would fire the mutation-void rule on an honest hunt (Opus,
+    04/09) — excluded. The production resolver must return None for it."""
+    if not uri:
+        return False
+    u = uri.strip()
+    low = u.lower()
+    if low.startswith("ipfs://") or low.startswith("data:"):
+        return True
+    if _BARE_CID.match(u):
+        return True
+    return bool(_IPFS_GATEWAY_PATH.match(u))
 
 
 @dataclass(frozen=True)

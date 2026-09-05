@@ -93,6 +93,18 @@ class Rpc:
                 if "error" in out:
                     raise RuntimeError(out["error"].get("message", "rpc error"))
                 return out["result"]
+            except urllib.error.HTTPError as e:
+                # o corpo diz PORQUÊ (limites de janela, quota) — não o engolir
+                detail = ""
+                try:
+                    detail = e.read(300).decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt == tries - 1 or e.code == 400:
+                    raise RuntimeError(
+                        f"HTTP {e.code} {e.reason}: {detail[:200]}") from e
+                time.sleep(delay)
+                delay *= 2
             except Exception:  # noqa: BLE001 — retry tudo, é uma sonda
                 if attempt == tries - 1:
                     raise

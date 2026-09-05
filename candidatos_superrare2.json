@@ -9,9 +9,7 @@
   "image": "https://ipfs.pixura.io/ipfs/Qma3w5Kf4aTN4p6sd5UvRgv4UWXSoehrBB81VfqUcfwC6Z/fireworks_preview.jpg",
   "platform": "superrare2",
   "owner": "0x4d7a9529cc7892246c4dec006d9770ef8bdbe00c",
-  "name_unique": true,
-  "writable": true,
-  "reason": "The name splits into a well-known cultural event and a specific signal-processing/ML term, the artwork is a described firework neural-generation piece with concrete visual and technical hooks."
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -23,9 +21,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmUvmieAhFXbKbACT6qBZrJoJTvxgYS21U2HrxSmjDZcXW",
   "platform": "superrare2",
   "owner": "0xea9fb10809015cfc7712590c71cf1d8f8cc45890",
-  "name_unique": true,
-  "writable": true,
-  "reason": "Wiffle Ball has rich cultural, structural, and visual material: a trademarked backyard sport, a distinctive perforated hollow sphere, two semantically distinct words with phonetic and structural hooks"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -37,9 +33,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmQknyQeonWzrSh9kHhhAFu4jNBr1GGMDx52Vs8Be1FAqw",
   "platform": "superrare2",
   "owner": "0xb52343dbb87db123289ebbd6d8277ce9f1b71ca1",
-  "name_unique": true,
-  "writable": true,
-  "reason": "Rich visual and conceptual material: astronaut figure, dollar-sign helmet, crypto-to-moon narrative, layered text, color palette, and a structured name with operators and acronyms all yield distinct o"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -51,9 +45,7 @@
   "image": "https://ipfs.pixura.io/ipfs/Qmc44o5toVCwLYA4xUHkKsbTg9QJnkmyeogVb3Yf98PAzn/Unbenanntes_Projekt.png",
   "platform": "superrare2",
   "owner": "0xff2310ae4e2325ca0e60a4591d3e5c4aab0e3cf8",
-  "name_unique": true,
-  "writable": true,
-  "reason": "Three distinct words with rich angles: 'pile' (accumulation/stack), 'of' (relational connector), 'bricks' (British slang for banknote bundles, plus visual detail of stacked cash with drip effect and r"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -65,9 +57,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmcpWPhzS8AU3aKg8YaU3C8XgSKouYAxGDYFEFCoMjvXgx/output.gif",
   "platform": "superrare2",
   "owner": "0xee8dbe16568254450d890c1cb98180a770e82724",
-  "name_unique": true,
-  "writable": true,
-  "reason": "The four-word name has rich semantic layers (surface/exoplanet each carry strong distinct connotations) and the artwork shows a dramatic sunset-over-water scene that itself is a puzzle clue (it looks "
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -79,9 +69,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmWsVq7BC2RyCE8L2vcNHDSFcUfGfkn2b3GgD1TFHXue3Z/darkfractures-forest_growth_thumbnail.png",
   "platform": "superrare2",
   "owner": "0x3117dd3450148019db2350f64f9707f5b5fbbdec",
-  "name_unique": true,
-  "writable": false,
-  "reason": "'Forest Growth' is a generic two-word descriptive phrase with no cultural specificity, and both words are near-synonyms of what the image literally depicts, making it impossible to craft 7 oblique clu"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -93,9 +81,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmXZZRqYP6R1gBtdepM9kU4DpWkeW4bxVakKRUYXkn4Avn/Screenshot2024-04-16at12.57.21.png",
   "platform": "superrare2",
   "owner": "0xb823dc506011eedab6f8feecc88806dbfc55ea93",
-  "name_unique": true,
-  "writable": true,
-  "reason": "Three-word title with rich crypto/cultural/visual material: throne, glitch aesthetic, halving countdown, feminine figure, all yield distinct angles."
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -107,9 +93,7 @@
   "image": "https://ipfs.pixura.io/ipfs/Qmd74GaPaa7ma26meQcNLtpPQUSRKKsmAgKbD1V2gw9aGc/4.png",
   "platform": "superrare2",
   "owner": "0x5da7351a4cb03c33e11f51841bc614d985812821",
-  "name_unique": true,
-  "writable": true,
-  "reason": "The two-word name splits cleanly into a famous first name and a typographic/medium concept, the artwork has distinctive visual features (letterform mosaic, portrait, blue field, pixelation), giving en"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -121,9 +105,7 @@
   "image": "https://ipfs.pixura.io/ipfs/QmdgEAf6ZLdPhFJnfjgdNCmmRYVV9QhRQNWUa5Vwn1uzeR",
   "platform": "superrare2",
   "owner": "0xac16c631bf4d5e7e2a1f4bac92335820cf2774d6",
-  "name_unique": true,
-  "writable": false,
-  "reason": "The name has only two tokens ('The' and 'f@ll'), where 'The' is a trivial article offering no puzzle material, and 'f@ll' is a stylized synonym of its own concept (fall/collapse) already spelled out i"
+  "name_unique": true
  },
  {
   "chain": "ethereum",
@@ -134,9 +116,7 @@
   "description": "Her Lesbianism",
   "image": "https://ipfs.pixura.io/ipfs/QmYUjmhrGeWPWXfKftkaK2QhP5exU3q9ZePCKHqdCZw6Sg/HerLesbianism.gif",
   "platform": "superrare2",
-  "owner": "0x16592a9d006be96f35bc824af507cf4cbee02d6c",
-  "writable": false,
-  "reason": "The name is a blunt two-word label with no layered cultural, structural, or semantic angles distinct enough to yield 7 non-synonym, non-rhyme oblique clues that don't individually give the answer away"
+  "owner": "0x16592a9d006be96f35bc824af507cf4cbee02d6c"
  },
  {
   "chain": "ethereum",
@@ -147,9 +127,7 @@
   "description": "The plant life is abundant and there is much to be explored here…the lush landscape of the colony appears earth-like but the atmosphere is very different. Acclimation time is undetermined. ",
   "image": "https://ipfs.pixura.io/ipfs/QmZpczg3qpGY9sTTts87BdfJb3WJ3LSmUASTRzWVwTcNAx/Garden-1Larger-art-scale-2_00x.png",
   "platform": "superrare2",
-  "owner": "0x585d00ce0839c129cc0c14f7d24d6f1341faf302",
-  "writable": true,
-  "reason": "Rich artwork with surreal collision of classical/cosmic elements plus a historically loaded proper noun and a sociopolitical concept give ample distinct angles across all 7 pieces."
+  "owner": "0x585d00ce0839c129cc0c14f7d24d6f1341faf302"
  },
  {
   "chain": "ethereum",
@@ -160,9 +138,7 @@
   "description": "The power is in between, but the center should be avoided. \n",
   "image": "https://ipfs.pixura.io/ipfs/QmQNkueC2niYgfjuQnufx8KKPoF4gzPDKvsegV2fMabACp/SOLARCAGE.jpg",
   "platform": "superrare2",
-  "owner": "0x6eab20fba823777323112d772c30b3e9f0abedc5",
-  "writable": false,
-  "reason": "error: Expecting value: line 1 column 1 (char 0)"
+  "owner": "0x6eab20fba823777323112d772c30b3e9f0abedc5"
  },
  {
   "chain": "ethereum",
@@ -173,9 +149,7 @@
   "description": "Always within me and yet sometimes so far away.\n\n---------------------------\n\nStets in mir und mir doch manchmal so fern.",
   "image": "https://ipfs.pixura.io/ipfs/QmXpjCQdK14mmwQummcKrNhePhASqZgyPzWLJMFZpFfrZm/alterego_1920px_wo_watermark.jpg",
   "platform": "superrare2",
-  "owner": "0xbcb6e5e402badcef505baabd9cf9759cf3083636",
-  "writable": true,
-  "reason": "The name 'alter ego' offers rich material: Latin etymology, psychological concept, duality/shadow self semantics, structural contrast between the two words, and the description evokes inner distance —"
+  "owner": "0xbcb6e5e402badcef505baabd9cf9759cf3083636"
  },
  {
   "chain": "ethereum",
@@ -186,9 +160,7 @@
   "description": "The Idea of Saving Aesthetics employs data consisting of traditional carpets, rugs, and kilims. Processed and trained using the latest state-of-the-art machine learning algorithms. A neural network computing system that processed tens of thousands of archived ornamental images from museums and libraries. It creates new unlimited combinations based on their similarities. “The Idea of Saving Aesthetics“ creates imaginary rugs that didn’t exist so far.\n\nMore than 15,000 carpet compositions and sketches were collected by artist & processed by artificial intelligence. It was aimed to create the fee",
   "image": "https://ipfs.pixura.io/ipfs/QmfJS41jV5et6R52H7tW1XKGaYiFYUs9dVDx1ti5TiT7PW/TISAGANEDITION.gif",
   "platform": "superrare2",
-  "owner": "0xf1d9cce50ef656ab3d64d2e8b32bb19f93eb2dfc",
-  "writable": true,
-  "reason": "Rich multi-word title with conceptual depth (Idea, Saving, Aesthetics, Latent, GAN, Carpets) plus distinctive artwork (medallion motif, Islamic textile patterns, black field, AI-generated carpet) give"
+  "owner": "0xf1d9cce50ef656ab3d64d2e8b32bb19f93eb2dfc"
  },
  {
   "chain": "ethereum",
@@ -199,9 +171,7 @@
   "description": "(2000 × 1498 — 45 sec) Created in Photoshop and After Effects",
   "image": "https://ipfs.pixura.io/ipfs/QmPjuhbnMLK7eJodxi9hdsqZAGXoeKBB4fn3txo6L94vNs/bassheadsuperrare_gifred.gif",
   "platform": "superrare2",
-  "owner": "0x1353a78cb73ed3ea98b10ef739140ab4e1233e32",
-  "writable": true,
-  "reason": "Both words carry rich semantic/etymological depth (epiphany-rooted adjective, panopticon-derived portmanteau), and the artwork's vivid symmetrical psychedelic face with a prominent third eye gives str"
+  "owner": "0x1353a78cb73ed3ea98b10ef739140ab4e1233e32"
  },
  {
   "chain": "ethereum",
@@ -212,9 +182,7 @@
   "description": "fight the control.",
   "image": "https://ipfs.pixura.io/ipfs/QmfLqC753fFg2wp8WWNra76jLVB8anxbGpqGpBBETQKCBZ/Untitled_Artwork2.GIF",
   "platform": "superrare2",
-  "owner": "0x11bc0635499a0d9efb3d951ce1979d5dbe73d085",
-  "writable": false,
-  "reason": "The name is a generic political phrase with no distinctive cultural anchor, the description is a vague slogan, and without attached artwork there is insufficient concrete visual or semantic material t"
+  "owner": "0x11bc0635499a0d9efb3d951ce1979d5dbe73d085"
  },
  {
   "chain": "ethereum",
@@ -225,9 +193,7 @@
   "description": "26th of February 2022.\nDear Diary: It´s been a year since I did my first drop in this NFT madness. Exactly 365 days since I minted a video of a balloon popping out from a shitty hole. I was saying “hello” to this whole new world.\n\nSince then I haven't stopped creating for the Metaverse. I just couldn´t. I evolved more than once, I started poking around my chest to exorcize fears, anger, frustration, discover new flaws I wasn't aware of. I got to know myself better. It was chaos, catharsis, therapy . I needed that. I still do. But after a year I needed a piece that could work as the opposite of",
   "image": "https://ipfs.pixura.io/ipfs/QmPhr7spDLWMqS6DJHMb5hUrwXTd9SXcMvYBXhorZqJCYX/theOldMorty-LetMeDrinkMyTears1928x2500thumb.jpg",
   "platform": "superrare2",
-  "owner": "0x1a8c46095c4c44a0f4541d8f46962675378d27f2",
-  "writable": true,
-  "reason": "The five-word name is rich with emotional and linguistic layers, and the diary-style description grounds the artwork in a cathartic, introspective context that yields distinct angles across semantics,"
+  "owner": "0x1a8c46095c4c44a0f4541d8f46962675378d27f2"
  },
  {
   "chain": "ethereum",
@@ -238,9 +204,7 @@
   "description": "one sided escape (2023)\n\ncreated by akc",
   "image": "https://ipfs.pixura.io/ipfs/QmcnGmTfkd9xjQKxgjnvSeSHsr8oaMbYuRSteLTZoGRnQ5/onesidedescape.jpg",
   "platform": "superrare2",
-  "owner": "0x052564eb0fd8b340803df55def89c25c432f43f4",
-  "writable": false,
-  "reason": "No artwork image provided and the name 'one sided escape' is too abstract/generic to generate 7 distinct oblique constraints that would uniquely intersect on exactly this NFT without becoming synonyms"
+  "owner": "0x052564eb0fd8b340803df55def89c25c432f43f4"
  },
  {
   "chain": "ethereum",
@@ -251,9 +215,7 @@
   "description": "Even though it was cold at night we still got together for warmth with our fire buddy",
   "image": "https://ipfs.pixura.io/ipfs/QmQ8bRqA8HatE7ojmwFVhaLYWwE1dXG5kjmkZyxFkTMkNM/WarmUs.gif",
   "platform": "superrare2",
-  "owner": "0xfd364ce27f42bee7eb48f3f97e23f0eaaeba31bb",
-  "writable": false,
-  "reason": "The name is a full descriptive sentence (7+ words) requiring at least 2 clues per word, making 7 distinct non-synonymous oblique constraints mathematically impossible without overlap or direct revelat"
+  "owner": "0xfd364ce27f42bee7eb48f3f97e23f0eaaeba31bb"
  },
  {
   "chain": "ethereum",
@@ -264,9 +226,7 @@
   "description": "Its a tradition in Mexico to have in our offerings\nDay of the dead sugar skulls that is a sweet\nvery tasty ! and on their foreheads they carry the names of the people\nwho have passed away and we love.\nI have always liked them since I was a child´!\nIn this work, each skull has on its forehead a symbol of the cryptocoins\nthat are used and each one has its own personality.",
   "image": "https://ipfs.pixura.io/ipfs/QmRRi9EpoAuToqkiSxpDqxHzTH4zojEKoczJT2S3Kzcpch/fondo1.jpg",
   "platform": "superrare2",
-  "owner": "0x484409eaeec9b78fee6d352d087d4ac2e3f49e4b",
-  "writable": true,
-  "reason": "Rich material: Día de los Muertos tradition, Spanish diminutive grammar, sugar-skull visual iconography, Bitcoin forehead symbol, floral eye decorations, and the crypto/death fusion concept all yield "
+  "owner": "0x484409eaeec9b78fee6d352d087d4ac2e3f49e4b"
  },
  {
   "chain": "ethereum",
@@ -277,9 +237,7 @@
   "description": "Finally arrived at the entrance of the company. \nIt always feels like entering into a brutal dungeon of the jungle.🌴☠️💰\n*'정시출근' means 'Go to work at the right time' in Korean.\n-Animated version of Mr\nMisang's original series, [Modern Life Is Rubbish]",
   "image": "https://ipfs.pixura.io/ipfs/QmU1SYyDHGJFt93JUR7jgTq6DrpkptkfsXUkQVAAmyLEHq/entrance_for-gif_300.gif",
   "platform": "superrare2",
-  "owner": "0x461123fb3a23b5503c01afdb83b0e4387c98ed4b",
-  "writable": true,
-  "reason": "The name has a number-tag, a corporate concept, and an entry concept; the artwork is rich with Korean signage, cyberpunk cityscape, giant grotesque figures, and jungle/dungeon atmosphere—enough distin"
+  "owner": "0x461123fb3a23b5503c01afdb83b0e4387c98ed4b"
  },
  {
   "chain": "ethereum",
@@ -290,9 +248,7 @@
   "description": "HUGE BACKGROUND SUPPORT FOR THIS BRAVE RUNNER!\n\nChrono-Loops is a project that put in perspective Photography and Animation History through movement study. \nIt is the emergence of a story taking birth between two elements : subjects of an amazing 19th century Photographer and completely anonymous flea market pictures. \nThis is a serie of 33 Loops and they’re here to create a completely new story, from the origins of photography and motion to the metaverse galleries!",
   "image": "https://ipfs.pixura.io/ipfs/QmQNUSXMBb5sNW3SFqZgASpBhzvzDjLX56G6bVmcZFmTFq/05_One-LeggedRush.gif",
   "platform": "superrare2",
-  "owner": "0xd9c09af7b63bfeecc653548281a3ac726bc6fe3f",
-  "writable": true,
-  "reason": "The name has two distinct non-generic words ('One Legged' and 'Marathon') with rich semantic fields, and the grainy black-and-white photograph of a lone figure on a vast hillside provides concrete vis"
+  "owner": "0xd9c09af7b63bfeecc653548281a3ac726bc6fe3f"
  },
  {
   "chain": "ethereum",
@@ -303,9 +259,7 @@
   "description": "The muse of decentralization, her heartbeat pumps freedom into the world's economy.",
   "image": "https://ipfs.pixura.io/ipfs/Qmc9jS9pXzLBQvRedym6VR766gBWp13Nh19MHKNLRtJtyM/Venusofbitcoin.gif",
   "platform": "superrare2",
-  "owner": "0xbdd5eddb2ba46282cf971b751547cc7f16c099ca",
-  "writable": true,
-  "reason": "Rich material: 'Venus' ties to classical mythology/art history, 'Bitcoin' has distinct cultural/technical identity, and the goddess-of-love/decentralization fusion gives strong visual and conceptual a"
+  "owner": "0xbdd5eddb2ba46282cf971b751547cc7f16c099ca"
  },
  {
   "chain": "ethereum",
@@ -316,9 +270,7 @@
   "description": "This man has ridden at Las Luminarias each year without fail for 55 years. He moved through the fires completely unwavered. His courage seemed to translate to his horse who never seemed to flinch. The fires may as well not have been there. Truly incredible scenes. 'Old and Fearless' is the sixth and final photograph from the collection. 'Las Luminarias' is a visual documentation of my time spent at this surreal, 500-year-old, rural Spanish festival. On the 16th January, in the small mountain village of San Bartolomé de Pinares, Spain. In honour of San Anton, the patron saint of animals, horses",
   "image": "https://ipfs.pixura.io/ipfs/QmTiwU6LXYL4A2Dga7AAG2ycJCzuZ2UT47Ck52Hu9FcRsW/d006a397065012ab.jpg",
   "platform": "superrare2",
-  "owner": "0xc97705a8e073c9c0ba05d71aede57903a4a359f6",
-  "writable": true,
-  "reason": "Rich artwork (silhouetted horse and rider charging through blazing bonfire at night, green lamp overhead, ember sparks) plus a compound multi-word name with culturally specific, historically grounded "
+  "owner": "0xc97705a8e073c9c0ba05d71aede57903a4a359f6"
  },
  {
   "chain": "ethereum",
@@ -329,9 +281,7 @@
   "description": "A  little bit manic. A little bit dissociative. Synthetic AI audio. A look inside an artist's waking dream.",
   "image": "https://ipfs.pixura.io/ipfs/QmaoXqwV67urej8E8C5YvevPM6jgVvCydiq9whAy1k6uYN/CleanShot2022-05-08at18.04.162x.png",
   "platform": "superrare2",
-  "owner": "0xc7149e861a03454ccb66b552797a05c8d98994ba",
-  "writable": false,
-  "reason": "error: Expecting value: line 1 column 1 (char 0)"
+  "owner": "0xc7149e861a03454ccb66b552797a05c8d98994ba"
  },
  {
   "chain": "ethereum",
@@ -342,9 +292,7 @@
   "description": "Very few can stare at the Gods. \n\nLooping animation and accompanying original musical composition. \n2400 x 3000 pixels. ",
   "image": "https://ipfs.pixura.io/ipfs/QmRkuVdGAYm26wdZQngX8MU4CjAiUQaYsbL54Fb7SmMGPT/InitiationGiffers.gif",
   "platform": "superrare2",
-  "owner": "0xd9ff1fbd68e910392dc404f8df0fcd23a64921c3",
-  "writable": true,
-  "reason": "Rich classical imagery (arch, nude figure, flora, cracked stone, divine theme) plus a two-word name with clear semantic depth gives ample material for 7 distinct, non-synonymous constraints."
+  "owner": "0xd9ff1fbd68e910392dc404f8df0fcd23a64921c3"
  },
  {
   "chain": "ethereum",
@@ -355,9 +303,7 @@
   "description": "I am badly flooded with brain chemicals with this woman .... I started drawing her when she was sitting in front of the computer, I asked her I need an artwork title! after a while she answered me smiling ''Maria Rosa''. ©Yusaymon All Rights Reserved / created specifically for SuperRare.co",
   "image": "https://ipfs.pixura.io/ipfs/QmQtHXAvFqzXtUuUqQG95BzeHi46qYBJzepgpYm2nkdCGC",
   "platform": "superrare2",
-  "owner": "0x5da7351a4cb03c33e11f51841bc614d985812821",
-  "writable": true,
-  "reason": "Two-word name with clear cultural roots (Italian feminine name + color-flower), rich hand-painted artwork with distinct visual details, and a personal narrative giving oblique angles across both words"
+  "owner": "0x5da7351a4cb03c33e11f51841bc614d985812821"
  },
  {
   "chain": "ethereum",
@@ -368,9 +314,7 @@
   "description": "Who will win the game of Life and Death against the Devil?",
   "image": "https://ipfs.pixura.io/ipfs/QmYNPvYrFk3vPoyAKvcHb6SCEBZEofAepNfZwNP8BQCxCM/C0CD9695-61FE-47DA-A3B7-39BB3D930239.jpeg",
   "platform": "superrare2",
-  "owner": "0xe627ee6c6e31045f4315ca333926cbc9c8e1ad8f",
-  "writable": true,
-  "reason": "Rich iconography: a card-game scene with the Devil, plus multi-word name spanning game/competition, playing cards as objects, and theological antagonist — plenty of distinct angles."
+  "owner": "0xe627ee6c6e31045f4315ca333926cbc9c8e1ad8f"
  },
  {
   "chain": "ethereum",
@@ -381,8 +325,6 @@
   "description": "Allowing yourself to break past the confines of the unconscious human mind, into the trenches of the unknown, and discovering alternate realities that await your creation.",
   "image": "https://ipfs.pixura.io/ipfs/QmXYCc3AUkEfQ4APTgbiLvKxj6KfKwb3uwc8SBcRBZg3cC/mixedemotions35.png",
   "platform": "superrare2",
-  "owner": "0x6496039c9f0b4f3f8abff54b2a2e67788a9641b0",
-  "writable": true,
-  "reason": "Three distinct common words each with rich semantic hooks, plus the psychedelic/surreal concept gives strong artwork angles."
+  "owner": "0x6496039c9f0b4f3f8abff54b2a2e67788a9641b0"
  }
 ]

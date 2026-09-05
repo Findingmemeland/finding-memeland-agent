@@ -12,6 +12,7 @@ from finding_memeland.target.refresh import (
     PlatformItem,
     RefreshFailed,
     RefreshJob,
+    uri_is_content_addressed,
 )
 from finding_memeland.target.selector import CurationEpoch, metadata_hash
 
@@ -104,6 +105,27 @@ def test_unlistable_platform_fails_the_build_not_silently():
     with pytest.raises(RefreshFailed) as e:
         job.build(EPOCH)
     assert "previous" in str(e.value)
+
+
+@pytest.mark.parametrize("uri,ok", [
+    ("ipfs://QmX/1.json", True),
+    ("data:application/json;base64,e30=", True),
+    ("  IPFS://QmX ", True),                  # scheme case/space tolerant
+    # measured in the wild, 2026-09-05 capture:
+    ("QmWh59Pwr18bLWeAQp3EbmCHwAt7EUm4RwjcbGHe9TaYDo", True),   # Async: bare CID
+    ("https://ipfs.pixura.io/ipfs/QmZzQhdb6Qa44iyc26Lpk8JFmaSt3ART8vTV6V1mofLvQ7",
+     True),                                   # SuperRare: gateway URL, CID in path
+    ("https://gateway.pinata.cloud/ipfs/QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN",
+     True),
+    ("https://api.example.com/token/1", False),  # dynamic by nature
+    ("http://x/1.json", False),
+    ("Qmshort", False),                       # not a real CID
+    ("ar://tx123", False),                    # not accepted until measured
+    ("", False),
+    (None, False),
+])
+def test_uri_is_content_addressed(uri, ok):
+    assert uri_is_content_addressed(uri) is ok
 
 
 def test_opensea_lister_paginates_and_parses():

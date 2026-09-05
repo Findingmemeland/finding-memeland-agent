@@ -1,0 +1,22 @@
+[
+ {
+  "chain": "base",
+  "contract": "0x4d1b87a2587e2c0213a7b5f6f4a3da4fbcd2e614",
+  "tokenId": 1,
+  "name": "Playground Pic 1/",
+  "name_onchain": "Playground Pic 1/1",
+  "description": "Playground Powered by Playgotchi",
+  "image": "0xD46aE0b0097f91428d24C72b9A9029Df503b2207",
+  "platform": "zora-721-drop"
+ },
+ {
+  "chain": "base",
+  "contract": "0x6458804cd6868b1edf8e61f267e626ffd57d51ec",
+  "tokenId": 1,
+  "name": "Playground Pic 1/",
+  "name_onchain": "Playground Pic 1/1",
+  "description": "Made with Playground by Playgotchi (https://playground.playgotchi.com/).",
+  "image": "ipfs://QmVUPUf5Eb5dv9BitAAdTJiiCDXJ8Ghr2fyJ1df6ddcJGo",
+  "platform": "zora-721-drop"
+ }
+]

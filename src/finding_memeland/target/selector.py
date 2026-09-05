@@ -129,7 +129,16 @@ class CurationEpoch:
     cumulative stratum leakage (Opus, 2026-09-04): revealed targets age out of
     relevance because the criteria that produced them are no longer in force.
     Rotation changes THESE knobs (and/or the source configuration) — the hard
-    filters' fail-closed semantics never rotate."""
+    filters' fail-closed semantics never rotate.
+
+    Owner DORMANCY is deliberately NOT a knob here (demotion reaffirmed by
+    Opus 05/09: a mid-hunt transfer touches nothing mechanical, and escrow
+    custody is already caught by the owner-is-EOA filter). Its agreed use is
+    a TIE-BREAK at selection time: when the pool is abundant, prefer targets
+    whose owner wallet is dormant; when the pool is tight, accept active
+    owners without drama — a preference that never costs pool. Wire it in
+    the snapshot refresh (owner recorded per entry) once owner-activity is
+    instrumented; never as a qualify/reject filter."""
 
     epoch_id: str
     min_age_days: int = 180
