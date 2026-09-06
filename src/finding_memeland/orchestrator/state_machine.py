@@ -26,13 +26,7 @@ from enum import Enum
 
 from ..content.clue_engine import PersonaContext, clue_slot_for, next_clue_due
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
-from ..claims.parser import (
-    code_like,
-    contract_paste_like,
-    extract_candidates,
-    extract_wallet,
-    guess_like,
-)
+from ..claims.parser import extract_wallet
 from ..content.templates import (
     CLUE_FOLLOWUP_CLAIM_HINT,
     DM_REPLY_BAD_CODE,
@@ -138,6 +132,13 @@ class PreparedHunt:
     # and must never reach an operator message (blind mode).
     relic: object | None = None
     relic_name: str | None = None
+    # Target hunts (Option A, 2026-09-06): the target is an EXISTING third-
+    # party NFT. `target` is the SealedTarget (in memory; encrypted on the
+    # row) — it carries the answer and must never reach an operator message.
+    target: object | None = None
+    target_hold: object | None = None        # HoldLedger: freezes the void clock
+    target_pay_noted: bool = False           # mutated/burned AFTER a valid claim
+    target_live_hash: str | None = None
 
 
 def _theme_line(row: dict) -> str:
@@ -212,6 +213,12 @@ class Orchestrator:
         relic_clue_engine=None,
         trophy_port=None,
         launch_verifier=None,
+        # Target mode (Option A, config flag `target_launch`): /launch draws
+        # an existing third-party NFT from the curated snapshot. `target` is
+        # a target.integration.TargetPorts bundle. Takes precedence over
+        # relic mode when both are on (relic mode is the retired game).
+        target_launch: bool = False,
+        target=None,
     ):
         self._settings = settings
         self._clock = clock
@@ -287,6 +294,19 @@ class Orchestrator:
         self._relic_clue_engine = relic_clue_engine
         self._trophy_port = trophy_port
         self._launch_verifier = launch_verifier
+        self._target_launch = target_launch
+        self._target = target
+        if target_launch and target is None:
+            raise ValueError("target_launch=True needs target=TargetPorts(...)")
+
+    # ------------------------------------------------------------------
+    def _engine_for(self, hunt: PreparedHunt):
+        """The clue engine this hunt needs: target engine for target hunts,
+        else the relic/persona choice relic_integration already makes."""
+        if getattr(hunt, "target", None) is not None:
+            return self._target.clue_engine
+        from ..persona.relic_integration import engine_for
+        return engine_for(self, hunt)
 
     # ------------------------------------------------------------------
     def _submission_loop(self, hunt: PreparedHunt, **kw) -> Winner:
@@ -365,6 +385,15 @@ class Orchestrator:
         # Pre-dressed launch (Fase 2): consume the dressed pool + descriptor.
         # The old generate-at-launch flow below stays ONLY for simulation and
         # the live test — production never falls back to it.
+        if self._target_launch:
+            from ..target.integration import prepare_target_hunt
+            from ..target.hunt import HoldLedger
+            hunt = prepare_target_hunt(
+                self, prize_fmml, min_balance_fmml,
+                ladder_exempt=getattr(self, "_next_launch_ladder_exempt", False),
+            )
+            hunt.target_hold = HoldLedger()
+            return hunt
         if self._relic_launch:
             from ..persona.relic_integration import prepare_relic_hunt
             return prepare_relic_hunt(
@@ -800,7 +829,9 @@ class Orchestrator:
             )
         except Exception as e:  # noqa: BLE001
             self._notify(f"undress of aborted persona failed: {e!r} — reset it manually.")
-        if getattr(hunt, "relic", None) is not None:
+        if getattr(hunt, "target", None) is not None:
+            pass                       # nothing of ours to retire: the NFT is theirs
+        elif getattr(hunt, "relic", None) is not None:
             from ..persona.relic_integration import retire_relic
             retire_relic(self, hunt)   # relic -> 'revealed'; nada é destruído
         else:
@@ -808,23 +839,29 @@ class Orchestrator:
         self._transition(hunt, HuntState.DONE)
 
     def _go_live(self, hunt: PreparedHunt) -> None:
-        from ..persona.relic_integration import engine_for
-        draft = engine_for(self, hunt).next_clue(hunt.ctx, 1, [])
-        post = clue_one(
-            hunt_n=hunt.number,
-            clue_text=draft.text,
-            prize=f"{hunt.prize_fmml:,}",
-            integrity_hash=hunt.integrity_hash,
-            # Floor 0 = holding OFF for this hunt: omit the split line rather
-            # than advertise a rule that isn't enforced. Reactivates by itself
-            # the moment the floor is set again (Hunt #5).
-            non_holder_pct=(
-                self._non_holder_pct if hunt.min_balance_fmml > 0 else None
-            ),
-            # Numa hunt relic o explainer das personas é instrução ERRADA
-            # publicada (auditoria v3, P0-A).
-            relic=getattr(hunt, "relic", None) is not None,
-        )
+        draft = self._engine_for(hunt).next_clue(hunt.ctx, 1, [])
+        # Floor 0 = holding OFF for this hunt: omit the split line rather
+        # than advertise a rule that isn't enforced. Reactivates by itself
+        # the moment the floor is set again (Hunt #5).
+        pct = self._non_holder_pct if hunt.min_balance_fmml > 0 else None
+        if getattr(hunt, "target", None) is not None:
+            from ..target.templates import target_clue_one
+            post = target_clue_one(
+                hunt_n=hunt.number, clue_text=draft.text,
+                prize=f"{hunt.prize_fmml:,}", commitment=hunt.integrity_hash,
+                non_holder_pct=pct,
+            )
+        else:
+            post = clue_one(
+                hunt_n=hunt.number,
+                clue_text=draft.text,
+                prize=f"{hunt.prize_fmml:,}",
+                integrity_hash=hunt.integrity_hash,
+                non_holder_pct=pct,
+                # Numa hunt relic o explainer das personas é instrução ERRADA
+                # publicada (auditoria v3, P0-A).
+                relic=getattr(hunt, "relic", None) is not None,
+            )
         tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id
         hunt.clues.append(draft.text)
@@ -1184,22 +1221,43 @@ class Orchestrator:
         A failed clue is a skipped round, never a dead hunt."""
         if self._clock.now() < next_due:
             return clue_index, next_due
+        is_target = getattr(hunt, "target", None) is not None
+        if is_target:
+            # Decision 4 (06/09): read the target live BEFORE every clue,
+            # inside its sealed decoy batch; hold / relaunch / void-reveal.
+            from ..target.integration import (
+                PRE_CLUE_ENDED, PRE_CLUE_SKIP, pre_clue_live_check,
+            )
+            outcome = pre_clue_live_check(self, hunt, clue_index + 1)
+            if outcome == PRE_CLUE_ENDED:
+                return clue_index, None          # loop sees hunt.state VOIDED
+            if outcome == PRE_CLUE_SKIP:
+                return clue_index, self._clue_due_fn(self._clock.now())
         clue_index += 1
         try:
-            from ..persona.relic_integration import engine_for
-            draft = engine_for(self, hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
-            tweet_id = self._publisher.post(
-                clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
-            )
+            draft = self._engine_for(hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
+            if is_target:
+                from ..target.templates import target_clue_followup
+                text = target_clue_followup(clue_index, draft.text, draft.taunt or "")
+            else:
+                text = clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
+            tweet_id = self._publisher.post(text)
         except Exception as e:  # noqa: BLE001
             # Guardrails exhausted, X post failed, LLM down — skip this
             # round, alert the operator, try again next window.
             clue_index -= 1
+            if is_target:
+                from ..target.integration import clue_failed
+                if clue_failed(self, hunt, e):
+                    return clue_index, self._clue_due_fn(self._clock.now())
             self._notify(f"clue generation failed (skipping this round): {e}")
         else:
             # The clue IS on X now — bookkeeping failures must not make
             # us repeat it. Record best-effort.
             hunt.clues.append(draft.text)
+            if is_target:
+                from ..target.integration import clue_posted
+                clue_posted(self, hunt)
             try:
                 self._record_clue_audited(hunt, clue_index, draft.text, tweet_id)
             except Exception as e:  # noqa: BLE001
@@ -1454,6 +1512,18 @@ class Orchestrator:
                 f"(wallet due {pending['due_at']:%H:%M:%S}) — watching the thread."
             )
         banned = self._banned_reply_terms(hunt)
+        # What a claim IS for this hunt (code vs target identity) lives in the
+        # matcher; the loop stays shape-agnostic (claims/matcher.py).
+        from ..target.integration import claim_matcher_for, spray_check
+        matcher = claim_matcher_for(self, hunt)
+        is_target = getattr(hunt, "target", None) is not None
+        spray_log: list[tuple[str, str]] = []  # (author, label) of wrong guesses, puzzle phase
+        spray_state: dict = {}
+        if is_target:
+            from ..target.templates import POST_REPLY_WRONG_DOOR_TARGET
+            wrong_door_reply = POST_REPLY_WRONG_DOOR_TARGET
+        else:
+            wrong_door_reply = POST_REPLY_WRONG_DOOR
         judged: set[str] = set()               # authors whose chatter was LLM-judged
         taunt_budget = {"used": len(taunted)}  # global per-hunt cost cap
         ask_attempts: dict[str, int] = {}      # per-claim failed public asks
@@ -1494,11 +1564,19 @@ class Orchestrator:
                 pause_notified = False
 
             # ---- Phase 0b: unclaimed-hunt deadline ----
+            # Target hunts: the deadline is FROZEN for every second spent on
+            # hold (live check / guard unavailable) — never a void over our
+            # own outage (HoldLedger, decision 4).
+            held_s = (
+                hunt.target_hold.held_seconds(self._clock.now().timestamp())
+                if getattr(hunt, "target_hold", None) is not None else 0.0
+            )
             if (
                 win_cand is None and pending is None and not wait_queue
                 and self._hunt_timeout_h is not None
                 and hunt.started_at is not None
-                and self._clock.now() >= hunt.started_at + timedelta(hours=self._hunt_timeout_h)
+                and self._clock.now() >= hunt.started_at
+                + timedelta(hours=self._hunt_timeout_h, seconds=held_s)
             ):
                 self._void_unclaimed(hunt)
                 return None
@@ -1551,7 +1629,6 @@ class Orchestrator:
             tag = f"[hunt#{hunt.number}/db{hunt.id}]"
             if batch:
                 print(f"{tag} processing {len(batch)} post(s), marker={since or 'start'}")
-            code_len = len(hunt.claim_code)
 
             def _done(post) -> None:
                 """Mark a post fully processed: dedupe + advance the mentions
@@ -1578,7 +1655,7 @@ class Orchestrator:
                 # Window 2 — prep window: a code-like post is logged 'early' +
                 # answered once; chatter is just skipped. Never able to win.
                 if live_boundary is not None and post.created_at < live_boundary:
-                    if code_like(post.text, code_len):
+                    if matcher.looks_like_claim(post.text):
                         try:
                             self._repo.log_submission(
                                 hunt_id=hunt.id, dm_id=post.tweet_id,
@@ -1628,15 +1705,12 @@ class Orchestrator:
                     hunt.reshare_post_id is not None
                     and post.replied_to_id == hunt.reshare_post_id
                 )
-                candidates = extract_candidates(post.text, code_len)
-                # The code path must open for the CORRECT code in any casing —
-                # "matching is generous" (parser.py) has to hold on this gate
-                # too, or a lowercase-typed winner would be judged as chatter
-                # and silently lost (Hunt #4 post-mortem, latent bug). Wrong
-                # lowercase words stay chatter: only the exact code opens it.
-                looks_like_code = (
-                    code_like(post.text, code_len) or hunt.claim_code in candidates
-                )
+                # The claim path must open for the CORRECT answer in any casing
+                # — "matching is generous" (parser.py) has to hold on this
+                # gate too, or a lowercase-typed winner would be judged as
+                # chatter and silently lost (Hunt #4 post-mortem, latent bug).
+                # The matcher owns that rule per hunt kind.
+                looks_like_code = matcher.looks_like_claim(post.text)
 
                 # Wrong door — a code-like post anywhere but the Clue 1 thread.
                 if looks_like_code and not is_claim_location:
@@ -1649,7 +1723,7 @@ class Orchestrator:
                         )
                     except Exception as e:  # noqa: BLE001
                         self._notify(f"wrong_door post {post.tweet_id} not logged: {e!r}")
-                    self._sys_reply("wrong_door", post, POST_REPLY_WRONG_DOOR, sys_sent)
+                    self._sys_reply("wrong_door", post, wrong_door_reply, sys_sent)
                     _done(post)
                     continue
 
@@ -1663,6 +1737,16 @@ class Orchestrator:
 
                 # ---- Replies to Clue 1 (the claim window) ----
                 if not looks_like_code:
+                    # Target hunts: a claim-shaped post that CAN'T match by
+                    # format (contract:tokenId without the chain; a link
+                    # nobody could resolve) gets the public format rule —
+                    # a system reply, NOT a guess: a format slip must never
+                    # burn one of the five attempts.
+                    hint = matcher.format_hint(post.text)
+                    if hint:
+                        self._sys_reply("format", post, hint, sys_sent)
+                        _done(post)
+                        continue
                     # Wrong-shape guesses ('TSU19'), lone shouted name guesses
                     # ('MEWTWO' — Hunt #5) and pasted contracts jeer directly —
                     # no humor judge, works without an LLM (pool), same
@@ -1674,10 +1758,7 @@ class Orchestrator:
                     # oracle's voice is the product).
                     self._maybe_taunt_chatter(
                         hunt, post, taunted, judged, taunt_budget, banned,
-                        skip_judge=(
-                            guess_like(post.text, code_len)
-                            or contract_paste_like(post.text)
-                        ),
+                        skip_judge=matcher.skip_judge(post.text),
                     )
                     _done(post)
                     continue
@@ -1702,18 +1783,26 @@ class Orchestrator:
                     _done(post)
                     continue
 
-                if hunt.claim_code not in candidates:
-                    # Wrong code — the oracle jeers (once per profile).
+                label = matcher.submitted_label(post.text)
+                if not matcher.matches(post.text):
+                    # Wrong answer — the oracle jeers (once per profile).
                     try:
                         self._repo.log_submission(
                             hunt_id=hunt.id, dm_id=post.tweet_id,
                             sender_x_id=post.author_id, wallet=None,
                             sender_handle=post.author_handle,
-                            submitted_claim_code=(candidates[0] if candidates else None),
+                            submitted_claim_code=label,
                             outcome="bad_code", x_created_at=post.created_at,
                         )
                     except Exception as e:  # noqa: BLE001
                         self._notify(f"bad_code post {post.tweet_id} not logged: {e!r}")
+                    if is_target:
+                        # only a PARSED TargetRef feeds the detector, keyed
+                        # by its canonical id (Opus, 06/09, P1-A)
+                        key = matcher.spray_key(post.text)
+                        if key:
+                            spray_log.append((post.author_id, key))
+                            spray_check(self, hunt, clue_index, spray_log, spray_state)
                     if (
                         post.author_id not in taunted
                         and self._taunt_engine is not None
@@ -1748,7 +1837,7 @@ class Orchestrator:
                             hunt_id=hunt.id, dm_id=post.tweet_id,
                             sender_x_id=post.author_id, wallet=None,
                             sender_handle=post.author_handle,
-                            submitted_claim_code=hunt.claim_code,
+                            submitted_claim_code=label or hunt.claim_code,
                             outcome="no_reshare", x_created_at=post.created_at,
                         )
                     except Exception as e:  # noqa: BLE001
@@ -1777,7 +1866,7 @@ class Orchestrator:
                             hunt_id=hunt.id, dm_id=post.tweet_id,
                             sender_x_id=post.author_id, wallet=None,
                             sender_handle=post.author_handle,
-                            submitted_claim_code=hunt.claim_code,
+                            submitted_claim_code=label or hunt.claim_code,
                             outcome="bot_disqualified", x_created_at=post.created_at,
                         )
                     except Exception as e:  # noqa: BLE001
@@ -1789,13 +1878,25 @@ class Orchestrator:
                     _done(post)
                     continue
 
+                # Target hunts: read the target live once more, inside its
+                # sealed batch (decision 4 + Opus Q1). Unavailable => do not
+                # decide, retry next cycle (like the reshare-check outage);
+                # mutated/burned after a valid claim => pay, noted in reveal.
+                if is_target:
+                    from ..target.integration import claim_time_live_check
+                    if claim_time_live_check(self, hunt) == "retry":
+                        self._notify(
+                            f"live check unavailable at claim {post.tweet_id} "
+                            "(retrying next cycle)")
+                        break
+
                 # A VALID claim.
                 try:
                     outcome_row_id = self._repo.log_submission(
                         hunt_id=hunt.id, dm_id=post.tweet_id,
                         sender_x_id=post.author_id, wallet=None,
                         sender_handle=post.author_handle,
-                        submitted_claim_code=hunt.claim_code,
+                        submitted_claim_code=label or hunt.claim_code,
                         outcome="pending", x_created_at=post.created_at,
                     )
                 except Exception as e:  # noqa: BLE001
@@ -1888,6 +1989,10 @@ class Orchestrator:
             clue_index, next_due = self._maybe_post_clue(
                 hunt, clue_index, next_due, CLUE_FOLLOWUP_CLAIM_HINT
             )
+            if next_due is None or hunt.state in (
+                HuntState.VOIDED, HuntState.RETIRING, HuntState.DONE
+            ):
+                return None          # target voided by the live check (reveal posted)
 
             self._clock.sleep(self._poll_interval_s)
 
@@ -2082,6 +2187,13 @@ class Orchestrator:
         hours = self._hunt_timeout_h
         is_relic = getattr(hunt, "relic", None) is not None
         self._notify(f"hunt #{hunt.number} expired unclaimed after {hours}h — voiding.")
+        if getattr(hunt, "target", None) is not None:
+            # Target hunt: the void is as verifiable as a win — publish the
+            # ingredients (target/integration.void_target handles the
+            # transitions to DONE).
+            from ..target.integration import void_target
+            void_target(self, hunt, cause="unclaimed", live=None, relaunching=False)
+            return
         self._transition(hunt, HuntState.VOIDED)
         try:
             self._publisher.post(
@@ -2260,7 +2372,14 @@ class Orchestrator:
         )
         from ..persona.relic_integration import deliver_trophy
 
-        text = winner_announcement(data)
+        if getattr(hunt, "target", None) is not None:
+            from ..target.integration import reveal_text
+            text = reveal_text(
+                self, hunt, winner, receipt,
+                time_to_win=data.time_to_win, prize_amount=data.prize_amount,
+            )
+        else:
+            text = winner_announcement(data)
         # The prize is already paid; the trophy is a bonus and never blocks.
         deliver_trophy(self, hunt, winner)
         for attempt in range(3):
@@ -2302,7 +2421,8 @@ class Orchestrator:
                     f"⚠️ could not undress persona {hunt.persona.handle}: {e!r} — "
                     "reset the profile manually; the hunt itself is complete."
                 )
-        self._persona_source.mark_retired(hunt.persona.id)
+        if getattr(hunt, "target", None) is None:
+            self._persona_source.mark_retired(hunt.persona.id)
         log = self._repo.submissions_for_hunt(hunt.id)
         self._publisher.post(
             f"Hunt #{hunt.number} closed. {len(log)} submissions logged for public audit."
@@ -2469,7 +2589,15 @@ class Orchestrator:
         # ao SQL à mão (auditoria v3, P0-B). Um `git push` durante a hunt
         # bastava. O placeholder abaixo é substituído pela persona sintética
         # real dentro de `resume_relic_hunt`.
-        if row.get("relic_id"):
+        if row.get("target_sealed"):
+            # Target hunt: no personas row; a synthetic placeholder here, the
+            # real one (and the unsealed target) in resume_target_hunt below.
+            from .ports import ReadyPersona
+            persona = ReadyPersona(
+                id=f"target-{row.get('hunt_number') or row['id']}", handle="target:resume",
+                x_user_id="", access_token="", access_secret="",
+            )
+        elif row.get("relic_id"):
             from ..persona.relic_integration import relic_label
             from .ports import ReadyPersona
 
@@ -2536,7 +2664,10 @@ class Orchestrator:
             # fallback than a hardcoded 1 (at least it's unique and traceable).
             number=_as_int(row.get("hunt_number")) or int(row["id"]),
         )
-        if row.get("relic_id"):
+        if row.get("target_sealed"):
+            from ..target.integration import resume_target_hunt
+            hunt = resume_target_hunt(self, row, hunt)
+        elif row.get("relic_id"):
             from ..persona.relic_integration import resume_relic_hunt
             hunt = resume_relic_hunt(self, row, hunt)
         return hunt

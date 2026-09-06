@@ -149,6 +149,10 @@ class FakeRepo:
         row = self.hunts.get(hunt_id)
         return dict(row) if row else None
 
+    # --- target hunts (Option A) ---
+    def recent_target_voids(self) -> list[str]:
+        return [r["target_void_id"] for r in self.hunts.values() if r.get("target_void_id")]
+
     def update_hunt(self, hunt_id, **fields) -> None:
         self.hunts[hunt_id].update(fields)
 

@@ -158,3 +158,26 @@ def test_verdict_and_judge_never_leak_target():
 def test_token_id_leading_zeros_canonicalise():
     judge = ClaimJudge(target_id=TARGET_ID)
     assert judge.judge(f"ethereum:{ADDR}:042").matched
+
+
+# --------------------------------------------------------------------------- #
+# One token per reply (Opus 06/09, P0)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_shotgun_reply_is_malformed_even_when_it_contains_the_target():
+    """Um post com 3 links testa 3 alvos por um palpite e cega o detector.
+    Mais de um token = malformado: nunca faz match, nem com o alvo lá."""
+    judge = ClaimJudge(target_id=TARGET_ID)
+    others = [f"https://opensea.io/assets/ethereum/0x{i:040x}/1" for i in range(2)]
+    text = " ".join(others + [f"https://opensea.io/assets/ethereum/{ADDR}/42"])
+    v = judge.judge(text)
+    assert v.malformed and not v.matched
+    assert "MALFORMED" in v.render() and ADDR.lower() not in v.render().lower()
+    # o mesmo alvo repetido em duas formas é UM token — não é malformado
+    same = (f"https://opensea.io/assets/ethereum/{ADDR}/42 "
+            f"ethereum:{ADDR}:42")
+    assert judge.judge(same).matched
+    # um ref + um link por resolver = 2 tokens → malformado
+    mixed = f"ethereum:{ADDR}:42 https://foundation.app/@x/piece/1"
+    assert judge.judge(mixed).malformed

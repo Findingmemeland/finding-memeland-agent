@@ -436,26 +436,45 @@ def live_policy(status: str, *, phase: str, valid_claim: bool = False) -> str:
 
 
 class HoldLedger:
-    """Freezes the void deadline while we are on HOLD (guard or live check
-    unverifiable): every second held is added to the deadline, so a hunt is
-    never voided over our own outage. Times are epoch seconds."""
+    """Freezes the void deadline while we are on HOLD (live check or search
+    guard unverifiable): every second held is added to the deadline, so a
+    hunt is never voided over our own outage. Times are epoch seconds.
 
-    def __init__(self):
-        self._held = 0.0
+    `held` seeds the ledger from the hunt row on resume (Opus, 06/09): a
+    crash DURING an outage is exactly when the accumulated time matters
+    most — losing it would shorten the deadline against the player, in
+    silence. `last_notice` lets the caller re-notify periodically: a hold
+    without a ceiling and without a second notice is a void in slow motion
+    with nobody watching."""
+
+    def __init__(self, held: float = 0.0):
+        self._held = float(held)
         self._since: float | None = None
+        self.last_notice: float | None = None
+        self.reason: str = ""
 
-    def start(self, now: float) -> None:
+    def is_holding(self) -> bool:
+        return self._since is not None
+
+    def start(self, now: float, *, reason: str = "") -> None:
         if self._since is None:
             self._since = now
+            self.last_notice = now
+            self.reason = reason
 
     def stop(self, now: float) -> None:
         if self._since is not None:
             self._held += max(0.0, now - self._since)
             self._since = None
+            self.last_notice = None
+            self.reason = ""
 
     def held_seconds(self, now: float) -> float:
         open_span = (now - self._since) if self._since is not None else 0.0
         return self._held + max(0.0, open_span)
+
+    def current_hold_seconds(self, now: float) -> float:
+        return (now - self._since) if self._since is not None else 0.0
 
     def effective_deadline(self, base_deadline: float, now: float) -> float:
         return base_deadline + self.held_seconds(now)

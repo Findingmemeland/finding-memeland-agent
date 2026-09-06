@@ -243,6 +243,13 @@ POST_REPLY_UNRESOLVED_LINK = (
     f"(like {CLAIM_FORMAT_EXAMPLE}) and it counts."
 )
 
+# More than one token in a reply (P0, 06/09): malformed — no guess spent,
+# never a match. Public rule: name one token per reply.
+POST_REPLY_ONE_TOKEN = (
+    "one token per reply. name exactly one chain:contract:tokenId (or one "
+    "link) and it counts — this one didn't."
+)
+
 POST_REPLY_WRONG_DOOR_TARGET = (
     "the claim goes in the replies of the Clue 1 post — drop the "
     "chain:contract:tokenId (or link) there and it counts. \U0001F438"

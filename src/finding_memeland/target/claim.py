@@ -11,6 +11,15 @@ Ratified rules (Opus, 05/09) this module implements:
     explicit paste WITHOUT a chain ("0x…:12") is claim-shaped (the oracle
     may answer with the public format rule) but can never match. The format
     is a pre-committed public rule, not a judgment call.
+  · ONE TOKEN PER REPLY (Opus, 06/09, P0). The guess cap counts posts; a
+    judge that accepted `any(ref matches)` would let one post carry 200
+    links — five posts, a thousand candidates, one account, no sybils — and
+    blind the spray detector at the same time (one post = one guess = one
+    "distinct target"). So a post naming more than one token (distinct refs
+    plus unresolved links > 1) is MALFORMED: it can never match, even if
+    one of its refs is the target, it costs no guess, and the oracle answers
+    with the format rule. Closing the door beats counting it. Public rule:
+    "name one token per reply".
 
 Secrecy discipline (same as the whole target package): nothing here ever
 formats the hunt's target id into a repr, log line or verdict — verdicts
@@ -36,7 +45,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable
 from urllib.parse import urlsplit
 
 # Canonical chain slugs — Target.id() vocabulary. Aliases map what players
@@ -194,19 +203,32 @@ def claim_shaped(text: str) -> bool:
 
 @dataclass(frozen=True)
 class ClaimVerdict:
-    """Counts only — never the target, never the refs."""
+    """Counts only — never the target, never the refs. `malformed`: the post
+    named more than one token — refused before any comparison."""
 
     matched: bool
     checked: int
     unresolved: int
+    malformed: bool = False
 
     def render(self) -> str:
+        if self.malformed:
+            return "claim: MALFORMED (more than one token in the reply)"
         if self.matched:
             return "claim: MATCH"
         bits = [f"claim: no match ({self.checked} verificado(s)"]
         if self.unresolved:
             bits.append(f", {self.unresolved} link(s) por resolver")
         return "".join(bits) + ")"
+
+
+MAX_TOKENS_PER_REPLY = 1
+
+
+def tokens_named(ext: ClaimExtraction) -> int:
+    """How many tokens a post names: distinct parsed refs + links still to
+    resolve (each could become a ref)."""
+    return len({r.id() for r in ext.refs}) + len(ext.unresolved_links)
 
 
 class ClaimJudge:
@@ -220,6 +242,10 @@ class ClaimJudge:
               resolve_link: Callable[[str], TargetRef | None] | None = None,
               ) -> ClaimVerdict:
         ext = extract_target_refs(text)
+        if tokens_named(ext) > MAX_TOKENS_PER_REPLY:
+            return ClaimVerdict(matched=False, checked=0,
+                                unresolved=len(ext.unresolved_links),
+                                malformed=True)
         refs: list[TargetRef] = list(ext.refs)
         unresolved = 0
         for url in ext.unresolved_links:
