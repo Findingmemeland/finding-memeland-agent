@@ -11,7 +11,11 @@ from finding_memeland.target.discovery import (
 )
 from finding_memeland.target.pipeline import SnapshotPipeline
 from finding_memeland.target.snapshot import CurationEpoch, SnapshotStore
-from finding_memeland.target.sources import ChainUnavailable, RegistryStore
+from finding_memeland.target.sources import (
+    ChainRpc,
+    ChainUnavailable,
+    RegistryStore,
+)
 
 EPOCH = CurationEpoch(epoch_id="e1")
 SECRET = "0xfeedfacefeedfacefeedfacefeedfacefeedface"
@@ -42,7 +46,7 @@ def build_world(*, classic_break=False):
     meta = {"name": "Salt Harbor", "image": "ipfs://img"}
 
     def fetch_mints(b):
-        return [(SECRET, 1)]
+        return [(SECRET, 1)]                 # inclui o bloco-canário
 
     def get_code(c):
         return b"m" * MANIFOLD_RUNTIME_LEN if c == SECRET else b""
@@ -62,8 +66,14 @@ def build_world(*, classic_break=False):
             raise RuntimeError("revert")
         raise RuntimeError("selector?")
 
-    discovery = EraDiscovery(fetch_mints=fetch_mints, get_code=get_code,
-                             era=(1, 400))
+    def rpc_code(addr):                          # canário R2: todos têm código
+        return "0x6001"
+
+    rpcs = {"ethereum": ChainRpc(chain="ethereum", eth_call=eth_call,
+                                 get_code=rpc_code)}
+    discovery = EraDiscovery(chain="ethereum", canary_block=999_999, canary_mints=1,
+                             fetch_mints=fetch_mints,
+                             get_code=get_code, era=(1, 400))
     stores = {k: MemStore() for k in ("d", "r", "s")}
     pipeline = SnapshotPipeline(
         discovery=discovery,
@@ -73,7 +83,7 @@ def build_world(*, classic_break=False):
             cipher=XorCipher(), read=stores["r"].read, write=stores["r"].write),
         snapshot_store=SnapshotStore(
             cipher=XorCipher(), read=stores["s"].read, write=stores["s"].write),
-        eth_call=eth_call,
+        rpcs=rpcs,
         fetch_metadata=lambda ch, c, t: dict(meta),
         owner_is_eoa=lambda ch, c, t: True,
         name_is_unique=lambda n, ch, c, t: True,
@@ -138,3 +148,28 @@ def test_second_run_accumulates_scan():
     rep2 = pipeline.run(EPOCH, scan_blocks=10, rng=random.Random(0))
     # mesmo rng semente: blocos repetidos são saltados, mas completa 10 novos
     assert rep2.blocks_scanned == 10
+
+
+def test_missing_rpc_is_reported_not_a_traceback():
+    """P1 (Opus 06/09): erro de configuração dos RPCs cai em RefreshFailed —
+    serve o snapshot anterior e imprime o gate com a nota, em vez de morrer
+    antes do relatório."""
+    good, stores = build_world()
+    good.run(EPOCH, scan_blocks=5, rng=random.Random(0))
+    prev_blob = stores["s"].blob
+
+    broken, bstores = build_world()
+    broken._rpcs = {}                        # nenhuma cadeia configurada
+    bstores["s"].blob = prev_blob
+    rep = broken.run(EPOCH, scan_blocks=5, rng=random.Random(1))
+    assert not rep.snapshot_is_fresh and rep.snapshot_size == 1
+    assert "configuração" in rep.note
+    assert rep.gate is not None
+
+
+def test_discovery_canary_failure_shows_in_report():
+    pipeline, stores = build_world()
+    pipeline._discovery._fetch = lambda b: []       # índice cego
+    rep = pipeline.run(EPOCH, scan_blocks=5, rng=random.Random(0))
+    assert rep.scan_canary_ok is False and rep.blocks_scanned == 0
+    assert "RECUSADO" in rep.render()

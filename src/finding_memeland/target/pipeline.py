@@ -41,12 +41,21 @@ class PipelineReport:
     gate: StratumGateReport | None
     note: str = ""
     blocks_failed: int = 0
+    scan_canary_ok: bool = True
+    zero_mint_blocks: int = 0
 
     def render(self) -> str:
-        scan_bit = f"scan: +{self.blocks_scanned} blocos"
-        if self.blocks_failed:
-            scan_bit += (f" ({self.blocks_failed} falharam por transporte — "
-                         "ficam por varrer, retry no próximo run)")
+        if not self.scan_canary_ok:
+            scan_bit = ("scan: RECUSADO — canário da descoberta falhou (o "
+                        "bloco fixado não devolveu mints: nó não-arquivo, "
+                        "cadeia errada ou filtro mal formado); nada varrido")
+        else:
+            scan_bit = f"scan: +{self.blocks_scanned} blocos"
+            if self.zero_mint_blocks:
+                scan_bit += f" ({self.zero_mint_blocks} sem mints)"
+            if self.blocks_failed:
+                scan_bit += (f" ({self.blocks_failed} falharam por transporte "
+                             "— ficam por varrer, retry no próximo run)")
         lines = [
             scan_bit + " | registo: "
             + ", ".join(f"{s}={n}" for s, n in sorted(self.registry_counts.items()))
@@ -78,7 +87,7 @@ class SnapshotPipeline:
         discovery_store,          # DiscoveryStateStore
         registry_store,           # RegistryStore
         snapshot_store,           # SnapshotStore
-        eth_call,                 # p/ os listers da época 1
+        rpcs: dict,               # chain -> ChainRpc (R1: nunca UM eth_call)
         fetch_metadata,
         owner_is_eoa,
         name_is_unique,
@@ -90,7 +99,7 @@ class SnapshotPipeline:
         self._dstore = discovery_store
         self._rstore = registry_store
         self._sstore = snapshot_store
-        self._eth_call = eth_call
+        self._rpcs = dict(rpcs)
         self._fetch_metadata = fetch_metadata
         self._owner_is_eoa = owner_is_eoa
         self._name_is_unique = name_is_unique
@@ -110,23 +119,34 @@ class SnapshotPipeline:
         self._discovery.classify_into(state, registry)
         self._rstore.save(registry)
 
-        # 3) refresh sobre a composição da época 1
-        listers = epoch1_listers(eth_call=self._eth_call, registry=registry)
-        job = RefreshJob(
-            listers=listers,
-            fetch_metadata=self._fetch_metadata,
-            owner_is_eoa=self._owner_is_eoa,
-            name_is_unique=self._name_is_unique,
-            now_iso=self._now_iso,
-        )
+        # 3) refresh sobre a composição da época 1. A CONSTRUÇÃO dos listers
+        # fica dentro do mesmo try (Opus, 06/09): um RPC em falta ou ligado
+        # à cadeia errada é erro de configuração — alto, sim, mas convertido
+        # em RefreshFailed para não perder o relatório: serve-se o snapshot
+        # anterior e o gate decide sobre o pool que está de facto a servir.
         fresh = True
         note = ""
         try:
+            try:
+                listers = epoch1_listers(rpcs=self._rpcs, registry=registry)
+            except Exception as e:  # noqa: BLE001 — configuração
+                raise RefreshFailed(
+                    f"listers unconstructible ({type(e).__name__}: "
+                    f"{str(e)[:80]}) — configuração das cadeias/RPCs; "
+                    "snapshot NOT rebuilt; keep serving the previous one"
+                ) from e
+            job = RefreshJob(
+                listers=listers,
+                fetch_metadata=self._fetch_metadata,
+                owner_is_eoa=self._owner_is_eoa,
+                name_is_unique=self._name_is_unique,
+                now_iso=self._now_iso,
+            )
             snapshot, _refresh_report = job.build(epoch)
             self._sstore.save(snapshot)
         except RefreshFailed as e:
             fresh = False
-            note = str(e)[:160]
+            note = str(e)[:200]
             snapshot = self._sstore.load()
 
         # 4) gate por estrato — sobre o pool que REALMENTE se serve, com a
@@ -137,7 +157,9 @@ class SnapshotPipeline:
                                   registry_counts=registry.counts(),
                                   snapshot_is_fresh=False, snapshot_size=0,
                                   gate=None, note=note or "sem snapshot",
-                                  blocks_failed=outcome.failed)
+                                  blocks_failed=outcome.failed,
+                                  scan_canary_ok=outcome.canary_ok,
+                                  zero_mint_blocks=outcome.zero_mint_blocks)
         gate = stratum_gate(snapshot, self._rates,
                             cap_exempt=self._cap_exempt,
                             epoch=epoch, now_iso=self._now_iso())
@@ -146,4 +168,6 @@ class SnapshotPipeline:
                               snapshot_is_fresh=fresh,
                               snapshot_size=snapshot.size(),
                               gate=gate, note=note,
-                              blocks_failed=outcome.failed)
+                              blocks_failed=outcome.failed,
+                              scan_canary_ok=outcome.canary_ok,
+                              zero_mint_blocks=outcome.zero_mint_blocks)

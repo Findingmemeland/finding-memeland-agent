@@ -190,6 +190,91 @@ class RaribleSearch:
         return {str(item.get("id", "")) for item in payload.get("items", []) or []}
 
 
+# --------------------------------------------------------------------------- #
+# Marketplace name-uniqueness — the refresh/selector filter, with R2 canary     #
+# --------------------------------------------------------------------------- #
+
+
+class NameSearch(Protocol):
+    """Full-text search returning (item_id, name) pairs ACROSS ALL CHAINS —
+    the shape the uniqueness filter needs (ids alone can't say whether
+    another item bears the same base name). Same id format as
+    MarketSearch ('CHAIN:0x…:tokenId'); raises on transport failure.
+
+    ⚠️ THE ASYMMETRY, written down because it is counter-intuitive and
+    someone will want to "harmonise" it (Opus re-review, 06/09):
+      · the CLUE guard (ClueSearchGuard) searches FILTERED to the target's
+        chain — less noise competing for the N result slots, so the target
+        surfaces more easily, so more clues get REJECTED: filtering makes
+        that guard MORE conservative
+      · the UNIQUENESS guard (below) searches UNFILTERED — it must see what
+        the HUNTER sees, and the hunter does not filter by chain. Measured
+        05/09 (Fecho_Condicao1_Foundation.md): OpenSea search returns
+        multi-chain results; a Solana homonym is a homonym the hunter finds,
+        submits, and burns a guess on — the Hunt #7 failure Option A exists
+        to bury. Filtering here would make the guard LESS conservative.
+    Different questions, opposite answers, same endpoint."""
+
+    def named_items(self, text: str) -> list[tuple[str, str]]: ...
+
+
+class MarketNameUniqueness:
+    """name_is_unique(base, chain, contract, token_id) -> bool | None — the
+    callable the refresh and the selector inject.
+
+    Approval is "no OTHER item, on ANY chain, carries this base name" — an
+    R2 guard, so it proves first that the index can see the target: the
+    target's own id must be among the results for its base name. One
+    unfiltered query serves both the canary and the verdict. If the target
+    is absent the answer is None — unverifiable, which the callers fail
+    closed on. Never True on an empty result set.
+
+    Two flavours of None, counted separately in `stats` (Opus, 06/09):
+      · blind   — target absent from a NON-full page: the index cannot see
+                  it (unindexed, key, request shape)
+      · crowded — target absent from a FULL page: the name has more bearers
+                  than `page_size`; conservative and correct, but it is a
+                  not-unique-shaped fact, not an outage — reporting it as
+                  'unverifiable' would misdiagnose the refresh
+    `stats` is counts only (never names) — safe for the operator log."""
+
+    def __init__(self, *, search: NameSearch, page_size: int,
+                 retries: int = 2, sleep_s: float = 2.0):
+        self._search = search
+        self._page = page_size
+        self._retries = retries
+        self._sleep = sleep_s
+        self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
+                      "crowded": 0, "transport": 0}
+
+    def __call__(self, base: str, chain: str, contract: str,
+                 token_id: int) -> bool | None:
+        from .selector import normalize_name
+        want = _canonical(f"{chain}:{contract}:{token_id}")
+        for attempt in range(self._retries + 1):
+            try:
+                rows = self._search.named_items(base)     # UNFILTERED
+                break
+            except Exception:  # noqa: BLE001 — retry, then unverifiable
+                if attempt < self._retries:
+                    time.sleep(self._sleep * (attempt + 1))
+                    continue
+                self.stats["transport"] += 1
+                return None
+        ids = {_canonical(i): n for i, n in rows}
+        if want not in ids:                   # canary failed
+            if len(rows) >= self._page:
+                self.stats["crowded"] += 1
+            else:
+                self.stats["blind"] += 1
+            return None
+        key = base.casefold()
+        others = [i for i, n in ids.items()
+                  if i != want and normalize_name(n or "").casefold() == key]
+        self.stats["not_unique" if others else "unique"] += 1
+        return not others
+
+
 class FakeSearch:
     """MarketSearch fake: maps query substrings to item-id sets (tests).
     Only items whose id starts with the queried chain are returned — the
@@ -210,4 +295,23 @@ class FakeSearch:
         for needle, ids in self._hits.items():
             if needle.lower() in text.lower():
                 out |= {i for i in ids if i.upper().startswith(chain.upper() + ":")}
+        return out
+
+
+class FakeNameSearch:
+    """NameSearch fake: maps query substrings to [(id, name)] rows across
+    all chains, like the real multi-chain index (tests)."""
+
+    def __init__(self, hits: dict[str, list[tuple[str, str]]] | None = None,
+                 *, raises: bool = False):
+        self._hits = hits or {}
+        self._raises = raises
+
+    def named_items(self, text: str) -> list[tuple[str, str]]:
+        if self._raises:
+            raise RuntimeError("marketplace unreachable")
+        out: list[tuple[str, str]] = []
+        for needle, rows in self._hits.items():
+            if needle.lower() in text.lower():
+                out += list(rows)
         return out

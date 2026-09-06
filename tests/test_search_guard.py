@@ -104,6 +104,70 @@ def test_verdict_detail_never_carries_the_clue_target_name_or_chain():
 
 
 # --------------------------------------------------------------------------- #
+# R2 — name uniqueness proves it can see the target before saying "unique"     #
+# --------------------------------------------------------------------------- #
+
+
+def uniq(hits, **kw):
+    from finding_memeland.target.search_guard import (
+        FakeNameSearch, MarketNameUniqueness)
+    kw.setdefault("retries", 0)
+    kw.setdefault("sleep_s", 0.0)
+    kw.setdefault("page_size", 25)
+    return MarketNameUniqueness(search=FakeNameSearch(hits), **kw)
+
+
+def test_uniqueness_true_when_only_the_target_bears_the_base_name():
+    u = uniq({"salt harbor": [(TARGET, "Salt Harbor #7"),
+                              ("ETHEREUM:0xbbb:1", "Salt Harbor Lights")]})
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is True
+
+
+def test_uniqueness_false_when_another_item_shares_the_base_name():
+    u = uniq({"salt harbor": [(TARGET, "Salt Harbor #7"),
+                              ("ETHEREUM:0xbbb:1", "salt harbor #12")]})
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is False
+
+
+def test_uniqueness_canary_never_true_on_blind_index():
+    """Índice que não vê o alvo devolve vazio — sem canário isto era
+    'único'. Com canário: None, contado como blind."""
+    u = uniq({"salt harbor": [("BASE:0xccc:9", "Salt Harbor Lights")]})
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert u.stats["blind"] == 1
+    assert uniq({})("Salt Harbor", "ethereum", "0xaaa", 7) is None
+
+
+def test_uniqueness_is_the_hunters_view_across_chains():
+    """A vista do caçador NÃO filtra por cadeia (medido 05/09: a pesquisa
+    devolve multi-chain; um homónimo em Solana/Base é um homónimo que o
+    caçador encontra e submete). Um filtro à cadeia do alvo tornava o
+    gémeo invisível e aprovava por engano — o P0-4 um andar ao lado."""
+    u = uniq({"salt harbor": [(TARGET, "Salt Harbor #7"),
+                              ("BASE:0xccc:9", "Salt Harbor #9")]})
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is False
+    assert u.stats["not_unique"] == 1
+
+
+def test_uniqueness_crowded_page_is_counted_separately():
+    """Alvo fora do top-N porque o nome tem mais bearers do que a página:
+    None (conservador), mas contado como crowded, não como cegueira."""
+    rows = [(f"ETHEREUM:0xbbb:{i}", f"Salt Harbor #{i}") for i in range(25)]
+    u = uniq({"salt harbor": rows}, page_size=25)
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert u.stats["crowded"] == 1 and u.stats["blind"] == 0
+
+
+def test_uniqueness_transport_failure_is_none():
+    from finding_memeland.target.search_guard import (
+        FakeNameSearch, MarketNameUniqueness)
+    u = MarketNameUniqueness(search=FakeNameSearch(raises=True),
+                             page_size=25, retries=0, sleep_s=0.0)
+    assert u("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert u.stats["transport"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # Real adapter shape                                                           #
 # --------------------------------------------------------------------------- #
 

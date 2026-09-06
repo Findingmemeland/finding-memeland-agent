@@ -18,12 +18,15 @@ carry COUNTS. Player-pasted addresses are the player's own public post and
 still don't get echoed by us.
 
 Link parsing is structural (find contract+tokenId+chain in the URL), so it
-covers OpenSea /assets/ and /item/, Rarible /token/, Zora /collect/, the
-*scan NFT pages, Blur and LooksRare without one parser per marketplace.
-Slug-only links (Foundation @artist pages, SuperRare artworks) carry NO
-contract — those go to `unresolved_links` for an injected resolver the
-production wiring provides (marketplace API → chain:contract:tokenId).
-Fail-closed: an unresolved or unresolvable link matches nothing.
+covers OpenSea /assets/ and /item/, Rarible /token/<chain>/, Zora
+/collect/ and the *scan NFT pages without one parser per marketplace. The
+chain must be IN the link (a path segment, or an explorer host whose
+identity is a chain) — never implied by a marketplace's usual chain (R1).
+Links with no chain, and slug-only links (Foundation @artist pages,
+SuperRare artworks, Blur/LooksRare paths), go to `unresolved_links` for an
+injected resolver the production wiring provides (marketplace API →
+chain:contract:tokenId). Fail-closed: an unresolved or unresolvable link
+matches nothing.
 
 ⚠️ Before Hunt #11's dry-run, exercise the link shapes against REAL
 marketplace URLs (the measured-adapter discipline) — URL formats drift.
@@ -47,16 +50,18 @@ CHAIN_ALIASES = {
     "zora": "zora",
 }
 
-# Domains that imply a chain when the URL itself names none.
+# Domains whose IDENTITY is a chain (block explorers): the host names the
+# chain, so this is data, not a default. Multi-chain marketplaces (Rarible,
+# Blur, LooksRare, OpenSea) are deliberately NOT here (R1, Opus re-review
+# 05/09): "rarible.com means Ethereum unless the path says otherwise" is a
+# default chain, and a default chain refuses a legitimate winner by the
+# side door. A marketplace link that names no chain goes to
+# `unresolved_links` for the injected resolver, which asks the marketplace.
 _DOMAIN_CHAIN = {
     "etherscan.io": "ethereum",
     "basescan.org": "base",
     "polygonscan.com": "polygon",
     "arbiscan.io": "arbitrum",
-    "blur.io": "ethereum",
-    "looksrare.org": "ethereum",
-    "rarible.com": "ethereum",   # rarible defaults to ethereum; other
-                                 # chains appear as a /token/<chain>/ segment
 }
 
 # Marketplace-ish hosts: a link here that we could NOT parse still counts

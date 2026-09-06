@@ -48,9 +48,23 @@ def test_opensea_base_chain_url():
     assert ref.chain == "base"
 
 
-def test_rarible_defaults_to_ethereum_and_takes_chain_segment():
-    assert parse_link(f"https://rarible.com/token/{ADDR}:42").chain == "ethereum"
+def test_rarible_chain_segment_is_data_no_default():
+    """R1: rarible.com NÃO implica Ethereum — sem segmento de cadeia o link
+    vai para o resolvedor (um default recusaria um vencedor em Base/Polygon
+    pela porta do lado — revisão Opus 05/09)."""
     assert parse_link(f"https://rarible.com/token/polygon/{ADDR}:42").chain == "polygon"
+    assert parse_link(f"https://rarible.com/token/base/{ADDR}:42").chain == "base"
+    chainless = f"https://rarible.com/token/{ADDR}:42"
+    assert parse_link(chainless) is None
+    ext = extract_target_refs(chainless)
+    assert ext.refs == () and ext.unresolved_links == (chainless,)
+
+
+def test_single_chain_marketplaces_have_no_implied_chain_either():
+    for url in (f"https://blur.io/asset/{ADDR}/42",
+                f"https://looksrare.org/collections/{ADDR}/42"):
+        assert parse_link(url) is None
+        assert extract_target_refs(url).unresolved_links == (url,)
 
 
 def test_zora_collect_url():
@@ -83,7 +97,7 @@ def test_slug_only_marketplace_link_goes_unresolved():
 
 
 def test_trailing_punctuation_stripped_and_no_double_count():
-    text = f"é isto: https://rarible.com/token/{ADDR}:42."
+    text = f"é isto: https://rarible.com/token/ethereum/{ADDR}:42."
     ext = extract_target_refs(text)
     assert len(ext.refs) == 1 and ext.refs[0].id() == TARGET_ID
 

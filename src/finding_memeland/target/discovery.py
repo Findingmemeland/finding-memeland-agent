@@ -24,6 +24,13 @@ Classification (rationale measured 05/09, familias_eth):
 Thresholds are constants with the measurement they came from; tuning them is
 epoch configuration, never silent code drift.
 
+R1 (Opus re-review, 05/09): a scan is OF ONE CHAIN, named at construction
+(keyword, no default), and every contract record carries that chain into
+the registry as a (chain, contract) entry — the registry is never told
+afterwards which chain it is on. The R2 backstop for this instrument is the
+stratum gate: a blind fetch_mints yields an empty registry, and an empty
+stratum counts zero — the gate fails loud, the pool never quietly grows.
+
 Effectful collaborators injected (fetch_mints, get_code, clock); logic
 tests offline.
 """
@@ -54,7 +61,7 @@ class DiscoveryState:
     """Accumulated scan state. SENSITIVE — see module docstring."""
 
     scanned: set[int] = field(default_factory=set)
-    # contract -> {"mints": int, "fam": str, "len": int}
+    # contract -> {"mints": int, "fam": str, "len": int, "chain": str}
     contracts: dict[str, dict] = field(default_factory=dict)
 
     def __repr__(self) -> str:  # counts only, never addresses
@@ -95,8 +102,12 @@ class DiscoveryStateStore:
             return DiscoveryState()
         try:
             doc = json.loads(self._cipher.decrypt(blob))
+            contracts = doc["contracts"]
+            for rec in contracts.values():        # R1: chainless = rescan
+                if not rec.get("chain"):
+                    raise ValueError("discovery record without chain")
             return DiscoveryState(scanned=set(doc["scanned"]),
-                                  contracts=doc["contracts"])
+                                  contracts=contracts)
         except Exception as e:  # noqa: BLE001 — fail closed, no contents
             raise DiscoveryIntegrityError(
                 f"discovery state unreadable ({type(e).__name__}) — wrong "
@@ -113,6 +124,8 @@ class ScanOutcome:
 
     scanned: int
     failed: int
+    canary_ok: bool = True        # False ⇒ the run refused to scan (R2)
+    zero_mint_blocks: int = 0     # second signal: low in the 2021 era
 
 
 @dataclass(frozen=True)
@@ -137,15 +150,52 @@ class DiscoveryReport:
 class EraDiscovery:
     """Scan + classify. `fetch_mints(block) -> [(contract, token_id)]`;
     `get_code(contract) -> bytes` (empty for EOA/none). Both raise on
-    transport failure — a failed block is simply not marked scanned."""
+    transport failure — a failed block is simply not marked scanned.
 
-    def __init__(self, *, fetch_mints, get_code,
+    R2 CANARY (Opus re-review, 06/09): the stratum gate catches an EMPTY
+    registry, not a DEGRADED one. A fetch_mints that returns [] for every
+    block — non-archive node for the 2021 era, wrong log filter, wrong
+    chain — marks blocks as scanned with zero contracts, the registry stops
+    growing, and the report shows 'blocos acumulados' rising happily: an
+    empty mint list is indistinguishable from 'we scanned and there were
+    none'. So every run starts by fetching `canary_block` — a PINNED era
+    block with KNOWN mints (epoch configuration, measured, never guessed)
+    — and refuses to scan unless it returns EXACTLY `canary_mints` mints,
+    the count measured when the block was pinned. Equality, not >= 1
+    (Opus, 06/09): a provider that caps logs per request and returns a
+    partial page in silence passes a >= 1 canary with room to spare — the
+    block has mints, just fewer — and the zero-mint signal never fires
+    either, because blocks come back incomplete, not empty. The registry
+    grows slowly and every number looks healthy: absence, partial instead
+    of total. Exact equality covers truncation, a partial filter and a
+    change in the provider's response shape, at the same cost — one call.
+    Second signal, reported: the count of zero-mint blocks in the run."""
+
+    def __init__(self, *, chain: str, canary_block: int, canary_mints: int,
+                 fetch_mints, get_code,
                  era: tuple[int, int] = (ERA_LO, ERA_HI),
                  pinned_manifold_hashes: frozenset[str] = frozenset()):
+        if not chain:
+            raise ValueError("EraDiscovery needs the chain it scans (R1)")
+        if not isinstance(canary_block, int) or canary_block <= 0:
+            raise ValueError("EraDiscovery needs a pinned canary block with "
+                             "known mints (R2)")
+        if not isinstance(canary_mints, int) or canary_mints <= 0:
+            raise ValueError("EraDiscovery needs the MEASURED mint count of "
+                             "the canary block (R2: equality, not >= 1)")
+        self._chain = chain
+        self._canary = canary_block
+        self._canary_mints = canary_mints
         self._fetch = fetch_mints
         self._code = get_code
         self._era = era
         self._pinned = pinned_manifold_hashes
+
+    def _canary_passes(self) -> bool:
+        try:
+            return len(self._fetch(self._canary)) == self._canary_mints
+        except Exception:  # noqa: BLE001 — transport counts as blind
+            return False
 
     def scan(self, state: DiscoveryState, n_blocks: int,
              rng: random.Random | None = None) -> ScanOutcome:
@@ -158,8 +208,11 @@ class EraDiscovery:
         later run retries it and an RPC blip can never erase a contract
         from the registry's raw material in silence."""
         rng = rng or random.SystemRandom()
+        if not self._canary_passes():
+            return ScanOutcome(scanned=0, failed=0, canary_ok=False)
         done = 0
         failed = 0
+        zero = 0
         attempts = 0
         while done < n_blocks and attempts < n_blocks * 4:
             attempts += 1
@@ -185,7 +238,8 @@ class EraDiscovery:
                     break
                 new_recs[c] = {"mints": 0,
                                "fam": hashlib.sha256(code).hexdigest()[:16],
-                               "len": len(code)}
+                               "len": len(code),
+                               "chain": self._chain}
             if not ok:
                 failed += 1
                 continue
@@ -194,7 +248,10 @@ class EraDiscovery:
                 state.contracts[contract.lower()]["mints"] += 1
             state.scanned.add(b)
             done += 1
-        return ScanOutcome(scanned=done, failed=failed)
+            if not mints:
+                zero += 1
+        return ScanOutcome(scanned=done, failed=failed, canary_ok=True,
+                           zero_mint_blocks=zero)
 
     def classify_into(self, state: DiscoveryState,
                       registry: ContractRegistry) -> DiscoveryReport:
@@ -209,21 +266,29 @@ class EraDiscovery:
 
         tail_cap = max(1, (len(state.scanned) // 150)
                        * TAIL_MINTS_PER_150_BLOCKS + 1)
-        manifold, tail, excluded = [], [], 0
+        # (chain, contract) per bucket — the chain is the RECORD's (R1),
+        # so a state merged from several scans classifies each on its own
+        manifold: dict[str, list[str]] = {}
+        tail: dict[str, list[str]] = {}
+        excluded = 0
         for c, rec in state.contracts.items():
+            chain = rec["chain"]
             if (rec["len"] == MANIFOLD_RUNTIME_LEN
                     or rec["fam"] in self._pinned):
-                manifold.append(c)
+                manifold.setdefault(chain, []).append(c)
                 continue
             fs = fam_stats[rec["fam"]]
             avg = fs["mints"] / fs["contracts"]
             if rec["mints"] <= tail_cap and avg <= FAMILY_COLLECTION_AVG_MINTS:
-                tail.append(c)
+                tail.setdefault(chain, []).append(c)
             else:
                 excluded += 1
 
-        new = registry.add("manifold2021", manifold)
-        new += registry.add("tail2021", tail)
+        new = 0
+        for chain, cs in manifold.items():
+            new += registry.add("manifold2021", cs, chain=chain)
+        for chain, cs in tail.items():
+            new += registry.add("tail2021", cs, chain=chain)
         counts = registry.counts()
         return DiscoveryReport(
             blocks_scanned=0,           # o caller preenche por run se quiser
