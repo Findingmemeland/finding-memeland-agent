@@ -11,6 +11,7 @@ from finding_memeland.target.commitment import verify_commitment_v2
 from finding_memeland.target.hunt import (
     ACT_CONTINUE,
     ACT_HOLD,
+    ACT_PAY_NOTED,
     ACT_RELAUNCH,
     ACT_VOID_REVEAL,
     LIVE_BURNED,
@@ -21,6 +22,7 @@ from finding_memeland.target.hunt import (
     PHASE_PUZZLE,
     PHASE_REVEAL,
     PUBLIC_SPRAY_RULE,
+    HoldLedger,
     JudgeVerdict,
     LaunchRefused,
     LiveCheck,
@@ -30,6 +32,7 @@ from finding_memeland.target.hunt import (
     SprayDetector,
     SprayParams,
     TargetHuntPreparer,
+    judge_in_batch,
     live_policy,
     select_judged,
     void_reveal_ingredients,
@@ -97,8 +100,8 @@ def store_with(snap):
     return st
 
 
-def ok_judge(t):
-    return JudgeVerdict(writable=True, content_ok=True)
+def ok_judge(batch):
+    return [JudgeVerdict(writable=True, content_ok=True) for _ in batch]
 
 
 def preparer(snap, judge=ok_judge, now="2026-09-06T00:00:00Z"):
@@ -143,26 +146,76 @@ def test_wrong_epoch_refuses_launch():
 
 
 def test_judge_needs_both_halves_and_none_rejects():
+    """O juiz vê LOTES (alvo escondido entre decoys); só o veredicto do
+    sorteado conta. Aqui o fake devolve o mesmo veredicto a todo o lote."""
     verdicts = iter([
         JudgeVerdict(writable=True, content_ok=False),    # arte roubada/NSFW
         JudgeVerdict(writable=False, content_ok=True),    # não escrevível
         None,                                             # juiz inalcançável
         JudgeVerdict(writable=True, content_ok=True),
     ])
-    seen = []
+    batches = []
 
-    def judge(t):
-        seen.append(t.id())
-        return next(verdicts)
+    def judge(batch):
+        batches.append([t.id() for t in batch])
+        v = next(verdicts)
+        return [v for _ in batch]
 
     sealed = preparer(big_snapshot(), judge=judge).prepare(EPOCH)
-    assert len(seen) == 4 and sealed.id() == seen[-1]
+    assert len(batches) == 4
+    assert all(len(b) == 8 for b in batches)             # 7 decoys + alvo
+    assert sealed.id() in batches[-1]
+    assert len(sealed.decoys) == 7
+
+
+def test_judge_batches_share_no_constant_member_across_draws():
+    """Regra dos decoys (Opus 06/09, espelho do P0-A): o candidato varia
+    entre chamadas ⇒ os decoys têm de variar. Com decoys fixos o membro
+    variável do último lote seria o alvo. Aqui: 4 lotes, intersecção
+    vazia — nenhum dos 8 se distingue."""
+    verdicts = iter([JudgeVerdict(False, True)] * 3 + [JudgeVerdict(True, True)])
+    batches = []
+
+    def judge(batch):
+        batches.append({t.id() for t in batch})
+        v = next(verdicts)
+        return [v for _ in batch]
+
+    preparer(big_snapshot(), judge=judge).prepare(EPOCH)
+    assert len(batches) == 4
+    assert set.intersection(*batches) == set()
+
+
+def test_sealed_decoys_are_drawn_after_the_target_and_exclude_it():
+    sealed = preparer(big_snapshot()).prepare(EPOCH)
+    decoy_ids = {f"{d.chain}:{d.contract.lower()}:{d.token_id}" for d in sealed.decoys}
+    assert sealed.id() not in decoy_ids and len(decoy_ids) == 7
+
+
+def test_judge_in_batch_uses_target_position_and_fails_closed_on_bad_shape():
+    from finding_memeland.target.snapshot import snapshot_selector
+    snap = big_snapshot()
+    sel = snapshot_selector(snap, rng=random.Random(5))
+    target = sel.select(EPOCH)
+    decoys = [snapshot_selector(snap, rng=random.Random(s_)).select(EPOCH)
+              for s_ in range(20, 24)]
+    decoys = [d for d in decoys if d.id() != target.id()]
+
+    def judge(batch):                          # reprova tudo excepto o alvo
+        return [JudgeVerdict(t.id() == target.id(), True) for t in batch]
+    v = judge_in_batch(judge, target, decoys, random.Random(0))
+    assert v is not None and v.writable
+    assert judge_in_batch(lambda b: [JudgeVerdict(True, True)], target, decoys,
+                          random.Random(0)) is None          # tamanho errado
+    assert judge_in_batch(lambda b: 1 / 0, target, decoys,
+                          random.Random(0)) is None          # juiz rebenta
 
 
 def test_judge_exhaustion_refuses():
     with pytest.raises(SelectionRefused):
         preparer(big_snapshot(),
-                 judge=lambda t: JudgeVerdict(False, True)).prepare(EPOCH)
+                 judge=lambda b: [JudgeVerdict(False, True) for _ in b]
+                 ).prepare(EPOCH)
 
 
 def test_relaunch_excludes_the_voided_target():
@@ -178,8 +231,8 @@ def test_select_judged_skips_excluded_then_accepts():
     snap = big_snapshot()
     sel = snapshot_selector(snap, rng=random.Random(3))
     first = snapshot_selector(snap, rng=random.Random(3)).select(EPOCH)
-    t = select_judged(sel, EPOCH, judge=ok_judge,
-                      exclude=frozenset({first.id()}))
+    t = select_judged(sel, EPOCH, judge=ok_judge, draw_decoys=lambda tid: [],
+                      rng=random.Random(0), exclude=frozenset({first.id()}))
     assert t.id() != first.id()
 
 
@@ -195,6 +248,7 @@ def test_sealed_round_trip_is_ciphered_and_verified():
     assert NAME not in blob and sealed.salt not in blob
     back = c.unseal(blob)
     assert back == sealed
+    assert back.decoys == sealed.decoys and len(back.decoys) == 7
 
 
 def test_sealed_tamper_fails_closed_without_contents():
@@ -244,15 +298,17 @@ def test_live_intact_mutated_burned_unavailable():
     for mode, status in (("intact", LIVE_INTACT), ("mutated", LIVE_MUTATED),
                          ("burned", LIVE_BURNED), ("down", LIVE_UNAVAILABLE)):
         v = LiveCheck(fetch_metadata_generic=world(mode),
-                      rng=random.Random(1)).check(sealed, pool)
+                      rng=random.Random(1)).check(sealed)
         assert v.status == status, mode
         assert t.name not in v.render()
     ok = LiveCheck(fetch_metadata_generic=world("intact"),
-                   rng=random.Random(1)).check(sealed, pool)
+                   rng=random.Random(1)).check(sealed)
     assert ok.live_metadata_sha256 == t.metadata_sha256
 
 
-def test_live_check_reads_target_inside_a_shuffled_decoy_batch():
+def test_live_check_reads_the_same_sealed_batch_every_time():
+    """P0-A: o lote é fixo por hunt (só a ordem muda) — a intersecção de
+    todas as leituras é o lote inteiro, nunca o alvo sozinho."""
     sealed, pool, snap = sealed_and_pool()
     t = sealed.target
     me = (t.chain, t.contract, t.token_id)
@@ -263,16 +319,19 @@ def test_live_check_reads_target_inside_a_shuffled_decoy_batch():
         reads.append((chain, contract, tid))
         return by[(chain, contract, tid)]
 
-    positions = set()
+    positions, sets = set(), []
     for seed in range(10):
         reads.clear()
-        v = LiveCheck(fetch_metadata_generic=fetch, decoys=7,
-                      rng=random.Random(seed)).check(sealed, pool)
+        v = LiveCheck(fetch_metadata_generic=fetch,
+                      rng=random.Random(seed)).check(sealed)
         assert v.reads == 8 and len(reads) == 8
         assert reads.count(me) == 1
-        assert len(set(reads)) == 8                 # decoys distintos
         positions.add(reads.index(me))
-    assert len(positions) > 1                       # nunca sempre no fim
+        sets.append(frozenset(reads))
+    assert len(positions) > 1                       # ordem embaralhada
+    assert len(set(sets)) == 1                      # MESMO conjunto sempre
+    intersection = frozenset.intersection(*sets)
+    assert len(intersection) == 8                   # intersecção = lote
 
 
 def test_decoy_outage_is_noise_not_a_hold():
@@ -285,18 +344,35 @@ def test_decoy_outage_is_noise_not_a_hold():
             raise ChainUnavailable("decoy rpc blip")
         return by[(chain, contract, tid)]
 
-    v = LiveCheck(fetch_metadata_generic=fetch, rng=random.Random(2)).check(
-        sealed, pool)
+    v = LiveCheck(fetch_metadata_generic=fetch, rng=random.Random(2)).check(sealed)
     assert v.status == LIVE_INTACT
 
 
-def test_live_policy_is_proportional():
+def test_live_policy_is_proportional_and_never_punishes_the_winner():
     assert live_policy(LIVE_INTACT, phase=PHASE_PUZZLE) == ACT_CONTINUE
     assert live_policy(LIVE_UNAVAILABLE, phase=PHASE_CLAIM) == ACT_HOLD
     assert live_policy(LIVE_MUTATED, phase=PHASE_PUZZLE) == ACT_RELAUNCH
     assert live_policy(LIVE_BURNED, phase=PHASE_PUZZLE) == ACT_RELAUNCH
     assert live_policy(LIVE_MUTATED, phase=PHASE_REVEAL) == ACT_VOID_REVEAL
     assert live_policy(LIVE_BURNED, phase=PHASE_CLAIM) == ACT_VOID_REVEAL
+    # claim válido já batido: paga-se, a mutação vai como nota no reveal
+    assert live_policy(LIVE_MUTATED, phase=PHASE_CLAIM, valid_claim=True) == ACT_PAY_NOTED
+    assert live_policy(LIVE_BURNED, phase=PHASE_CLAIM, valid_claim=True) == ACT_PAY_NOTED
+    assert live_policy(LIVE_UNAVAILABLE, phase=PHASE_CLAIM, valid_claim=True) == ACT_HOLD
+
+
+def test_hold_ledger_freezes_the_void_deadline():
+    led = HoldLedger()
+    base = 1_000.0
+    assert led.effective_deadline(base, now=100.0) == base
+    led.start(now=100.0)
+    assert led.effective_deadline(base, now=160.0) == base + 60   # em hold
+    led.stop(now=200.0)
+    assert led.effective_deadline(base, now=500.0) == base + 100  # congelado 100s
+    led.start(now=600.0)
+    led.start(now=650.0)                       # idempotente
+    led.stop(now=700.0)
+    assert led.held_seconds(now=900.0) == 200
 
 
 def test_void_reveal_publishes_every_ingredient():
@@ -316,38 +392,61 @@ def test_void_reveal_publishes_every_ingredient():
 # --------------------------------------------------------------------------- #
 
 
-def crowd(n_accounts, guesses_each):
-    return [(f"acc{a}", f"ethereum:0x{a:040x}:{g}")
-            for a in range(n_accounts) for g in range(guesses_each)]
+def crowd(n_accounts, guesses_each, *, distinct=True):
+    """distinct=True: cada palpite é um alvo novo (enumeração coordenada);
+    False: toda a gente arrisca os mesmos 20 nomes óbvios (multidão)."""
+    out = []
+    for a in range(n_accounts):
+        for g in range(guesses_each):
+            ref = (f"ethereum:0x{a:040x}:{g}" if distinct
+                   else f"ethereum:0x{'ab' * 20}:{(a * 7 + g) % 20}")
+            out.append((f"acc{a}", ref))
+    return out
 
 
-def test_popular_crowd_never_triggers_even_above_n():
-    """Larga e rasa: 300 contas a arriscar 1-2 vezes → 450 alvos distintos,
-    acima de N — e NÃO dispara, porque a mediana fica em 1-2."""
-    guesses = crowd(150, 1) + [(f"b{a}", f"ethereum:0x{a+500:040x}:{g}")
-                               for a in range(150) for g in range(2)]
-    v = SprayDetector(SprayParams(min_distinct_targets=200)).evaluate(guesses)
-    assert v.distinct_targets > 200 and not v.triggered
-    assert v.median_per_account < 4
+P = SprayParams(min_total_guesses=200, min_distinct_ratio=0.9)
 
 
-def test_sybil_farm_at_the_cap_triggers():
-    """Estreita e funda: 50 contas encostadas ao cap de 5 → 250 distintos,
-    mediana 5 → PAUSA."""
-    v = SprayDetector(SprayParams(min_distinct_targets=200)).evaluate(crowd(50, 5))
-    assert v.triggered and v.median_per_account == 5
+def test_popular_crowd_never_triggers_even_far_above_n():
+    """Multidão honesta converge nos mesmos nomes: 600 palpites, 20 alvos
+    distintos → rácio 3%. Não dispara, por mais popular que seja."""
+    v = SprayDetector(P).evaluate(crowd(300, 2, distinct=False))
+    assert v.total_guesses == 600 and v.distinct_targets == 20
+    assert not v.triggered
 
 
-def test_deep_but_small_farm_below_n_does_not_trigger():
-    v = SprayDetector(SprayParams(min_distinct_targets=200)).evaluate(crowd(20, 5))
-    assert not v.triggered                          # 100 distintos < N
+def test_spread_farm_that_evaded_the_median_now_triggers():
+    """P0-B: 250 contas × 2 palpites, todos distintos — mediana 2 (evadia o
+    critério antigo a custo zero); rácio 100% → PAUSA."""
+    v = SprayDetector(P).evaluate(crowd(250, 2))
+    assert v.median_per_account == 2 and v.distinct_ratio == 1.0
+    assert v.triggered
+
+
+def test_deep_farm_at_the_cap_also_triggers():
+    v = SprayDetector(P).evaluate(crowd(50, 5))
+    assert v.triggered
+
+
+def test_farm_that_burns_budget_on_duplicates_does_not_trigger():
+    """Baixar o rácio custa palpites repetidos — o orçamento que queremos
+    queimar. 250 distintos + 100 duplicados = 350 palpites, rácio 71%."""
+    dups = [(f"dup{i}", "ethereum:0x" + "cd" * 20 + ":1") for i in range(100)]
+    v = SprayDetector(P).evaluate(crowd(250, 1) + dups)
+    assert v.total_guesses == 350 and not v.triggered
+
+
+def test_small_enumeration_below_n_does_not_trigger():
+    v = SprayDetector(P).evaluate(crowd(60, 3))        # 180 < N
+    assert v.distinct_ratio == 1.0 and not v.triggered
 
 
 def test_spray_verdict_never_prints_thresholds_and_has_no_void():
     from finding_memeland.target import hunt
-    v = SprayDetector(SprayParams(min_distinct_targets=200)).evaluate(crowd(50, 5))
-    assert "200" not in v.render() and "4.0" not in v.render()
-    assert "PAUSE" in v.render()
+    v = SprayDetector(P).evaluate(crowd(250, 2))
+    out = v.render()
+    assert "200" not in out and "0.9" not in out and "90%" not in out.replace("100%", "")
+    assert "PAUSE" in out and "median" in out          # mediana: 3º sinal
     assert "void" not in PUBLIC_SPRAY_RULE.lower()
     assert "never cancelled" in PUBLIC_SPRAY_RULE
     assert not hasattr(hunt.SprayDetector, "void")
