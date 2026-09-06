@@ -12,13 +12,14 @@ Division of labour (invariants agreed 04/09):
 Filter order per candidate (cheapest first, all fail-closed — an entry that
 cannot be verified is an entry that does not enter the pool):
   1. base name (trailing serial stripped) has >= 2 real words       [local]
-  2. base name is unique WITHIN the pulled pool — a name seen twice
+  2. canonical metadata resolves, is content-addressed (the keyed
+     fetcher answers None for plain http) and has an image          [chain]
+  3. base name is unique WITHIN the pulled pool — a name seen twice
      across the platforms kills every bearer                        [local]
-  3. canonical metadata resolves and has an image                   [chain]
   4. owner is an EOA                                                [chain]
-  5. base name is unique on the marketplace                         [API]
-Global uniqueness runs LAST because it is the only quota-priced filter:
-everything the local and chain checks can kill dies before spending a call.
+Global marketplace uniqueness is NOT here (Opus, 06/09): quota-priced,
+it is checked at draw time on the drawn candidate (hunt.select_judged) and
+enters the gate as a sampled rate per stratum.
 
 The anti-circularity rule applies here above all (Opus, 04/09): when the
 pool comes back under the gate, the fix is MORE PLATFORMS in the epoch's
@@ -31,6 +32,7 @@ this codebase, is exercised against the live API before production use.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -69,6 +71,41 @@ def uri_is_content_addressed(uri: str | None) -> bool:
     return bool(_IPFS_GATEWAY_PATH.match(u))
 
 
+_CID_PATH = re.compile(r"(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-zA-Z0-9]{20,})((?:/[^?#]*)?)")
+
+
+def content_id(uri: str | None) -> str | None:
+    """The CANONICAL content identity of a token URI — what the live check
+    compares (Opus, 06/09): the CID plus the path inside it, with the
+    transport stripped. `ipfs://CID/x`, `https://any-gateway/ipfs/CID/x`
+    and the bare `CID/x` all yield 'ipfs:CID/x' — a gateway migration with
+    the same CID (what happened to SuperRare's pixura) is NOT a mutation.
+    `data:` URIs ARE their content: 'data:' + sha256 of the URI. None for
+    anything not content-addressed — which the refresh rejects and the
+    live check reads as MUTATED (the URI stopped being content-addressed)."""
+    if not uri:
+        return None
+    u = uri.strip()
+    low = u.lower()
+    if low.startswith("data:"):
+        return "data:" + hashlib.sha256(u.encode("utf-8")).hexdigest()
+    if low.startswith("ipfs://"):
+        rest = u[7:]
+        if rest.lower().startswith("ipfs/"):
+            rest = rest[5:]
+        m = _CID_PATH.match(rest.lstrip("/"))
+    elif _BARE_CID.match(u):
+        m = _CID_PATH.match(u)
+    elif _IPFS_GATEWAY_PATH.match(u):
+        m = _CID_PATH.search(u)
+    else:
+        return None
+    if not m:
+        return None
+    path = m.group(2).rstrip("/")
+    return f"ipfs:{m.group(1)}{path}"
+
+
 @dataclass(frozen=True)
 class PlatformItem:
     """One token as a platform lists it. `name` here is only a pre-filter
@@ -82,6 +119,16 @@ class PlatformItem:
     contract: str
     token_id: int
     name: str
+
+
+@dataclass(frozen=True)
+class TokenRead:
+    """What the refresh reads per token, in ONE chain round-trip: the raw
+    tokenURI (kept for the snapshot: the live check compares its content
+    id, the void post publishes it) and the resolved metadata."""
+
+    token_uri: str
+    metadata: dict | None
 
 
 class PlatformLister(Protocol):
@@ -106,6 +153,8 @@ class RefreshReport:
     after_eoa: int = 0
     pool_size: int = 0
     unverifiable: int = 0
+    transport: int = 0     # metadata fetches lost to RPC/gateway trouble (skipped)
+    not_content_addressed: int = 0   # tokenURI or image on a mutable host
 
 
 class RefreshFailed(RuntimeError):
@@ -118,28 +167,50 @@ class RefreshJob:
 
     Collaborators take the CHAIN first — a multi-chain pool means each
     lookup must know which chain's RPC/marketplace view to consult:
-    fetch_metadata(chain, contract, token_id) -> dict | None
+    fetch_token(chain, contract, token_id) -> TokenRead | None
+                                              (None = tokenURI reverts)
     owner_is_eoa(chain, contract, token_id)   -> bool | None
-    name_is_unique(base, chain, contract, token_id) -> bool | None
     now_iso() -> str                                     (built_at stamp)
+
+    CONTENT-ADDRESSED, TWICE (Opus, 06/09): the tokenURI must be
+    content-addressed (else the metadata is whatever the host serves
+    today), AND the metadata's `image` must be too — the commitment seals
+    the metadata hash, and a metadata whose image is a mutable https:// lets
+    the owner swap the picture with tokenURI and hash untouched: the live
+    check says intact while the artwork the clues describe is gone. Both
+    are checked here, both are rejections, both are counted.
+
+    GLOBAL name uniqueness is NOT a refresh filter any more (Opus, 06/09,
+    5/6 review): it is a quota-priced marketplace call per survivor —
+    60-80k calls per weekly refresh, millions a year, to reconfirm a
+    property that almost never changes and that is irrelevant for every
+    entry that is never drawn. It follows writability's path: the gate
+    certifies a SAMPLED uniqueness_rate per stratum, and select_judged
+    checks the drawn candidate lazily (hunt.py), at the moment it matters
+    rather than seven days before. The refresh keeps the IN-POOL dedupe
+    (local, free) — the part a marketplace cannot do for us.
     """
 
     def __init__(
         self,
         *,
         listers: tuple[PlatformLister, ...],
-        fetch_metadata: Callable[[str, str, int], dict | None],
+        fetch_token: Callable[[str, str, int], "TokenRead | None"],
         owner_is_eoa: Callable[[str, str, int], bool | None],
-        name_is_unique: Callable[[str, str, str, int], bool | None],
         now_iso: Callable[[], str],
+        max_transport_share: float = 0.02,
+        min_transport_failures: int = 20,
     ):
         self._listers = listers
-        self._fetch_metadata = fetch_metadata
+        self._fetch_token = fetch_token
         self._owner_is_eoa = owner_is_eoa
-        self._name_is_unique = name_is_unique
         self._now_iso = now_iso
+        self._max_transport_share = max_transport_share
+        self._min_transport = min_transport_failures
 
     def build(self, epoch: CurationEpoch) -> tuple[Snapshot, RefreshReport]:
+        from .sources import ChainUnavailable   # local: sources imports PlatformItem
+
         report = RefreshReport()
 
         # -- pull everything first: pool-wide dedupe needs the full view ---- #
@@ -166,29 +237,56 @@ class RefreshJob:
         report.after_name = len(prefiltered)
 
         # -- 2. canonical metadata + canonical base name -------------------- #
-        resolved: list[tuple[PlatformItem, str, dict]] = []
+        # A transport failure on ONE item (RPC blip, gateway 5xx) skips that
+        # item — it is retried next refresh — and is COUNTED. Past a share of
+        # the attempts the build fails as a whole (RefreshFailed → previous
+        # snapshot keeps serving): a systematic outage must never produce a
+        # pool that is merely, honestly, smaller — the gate would read it as
+        # a collapsed stratum and the operator would go widen sourcing that
+        # is not the problem. (Found 06/09 checking Foundation's gateway note.)
+        resolved: list[tuple[PlatformItem, str, TokenRead]] = []
         for it in prefiltered:
-            meta = self._fetch_metadata(it.chain, it.contract, it.token_id)
+            try:
+                read = self._fetch_token(it.chain, it.contract, it.token_id)
+            except ChainUnavailable:
+                report.transport += 1
+                continue
+            if read is None:
+                continue
+            meta = read.metadata
             if not (isinstance(meta, dict) and meta.get("image")):
+                continue
+            # content-addressed, twice: the URI and the image (see class doc)
+            if content_id(read.token_uri) is None \
+                    or not uri_is_content_addressed(str(meta.get("image"))):
+                report.not_content_addressed += 1
                 continue
             base = normalize_name(str(meta.get("name") or "").strip())
             if not name_qualifies(base, min_words=epoch.min_words):
                 continue
-            resolved.append((it, base, meta))
+            resolved.append((it, base, read))
         report.after_metadata = len(resolved)
+        if (report.transport >= self._min_transport
+                and report.transport > self._max_transport_share * max(len(prefiltered), 1)):
+            raise RefreshFailed(
+                f"{report.transport} of {len(prefiltered)} metadata fetches lost "
+                "to transport — outage, not a smaller pool; snapshot NOT "
+                "rebuilt; keep serving the previous one")
 
         # -- 3. in-pool dedupe on the CANONICAL base name: a base name seen
         # twice kills every bearer (what clues cipher must be unique) ------ #
         counts: dict[str, int] = {}
-        for _, base, _m in resolved:
+        for _, base, _r in resolved:
             counts[base.casefold()] = counts.get(base.casefold(), 0) + 1
-        resolved = [(it, base, meta) for it, base, meta in resolved
+        resolved = [(it, base, read) for it, base, read in resolved
                     if counts[base.casefold()] == 1]
         report.after_pool_dedupe = len(resolved)
 
-        # -- 4..5 per candidate, quota-priced check last -------------------- #
+        # -- 4. owner is an EOA (chain call, our RPC). Global uniqueness is
+        # deliberately NOT here — see the class docstring ------------------- #
         entries: list[SnapshotEntry] = []
-        for it, base, meta in resolved:
+        for it, base, read in resolved:
+            meta = read.metadata
             eoa = self._owner_is_eoa(it.chain, it.contract, it.token_id)
             if eoa is None:
                 report.unverifiable += 1
@@ -196,12 +294,6 @@ class RefreshJob:
             if eoa is not True:
                 continue
             report.after_eoa += 1
-            uniq = self._name_is_unique(base, it.chain, it.contract, it.token_id)
-            if uniq is None:
-                report.unverifiable += 1
-                continue
-            if uniq is not True:
-                continue
             entries.append(SnapshotEntry(
                 chain=it.chain,
                 contract=it.contract.lower(),
@@ -211,6 +303,8 @@ class RefreshJob:
                 metadata=meta,
                 metadata_sha256=metadata_hash(meta),
                 platform=it.platform,
+                token_uri=read.token_uri,
+                content_id=content_id(read.token_uri) or "",
             ))
         report.pool_size = len(entries)
 

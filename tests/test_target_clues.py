@@ -129,6 +129,37 @@ def test_describe_image_batched_decoy_failure_is_noise_target_failure_is_not():
             fetch_bytes_generic=lambda u: b"ok", describe=lambda b: "  ")
 
 
+def test_content_guard_runs_on_the_same_bytes_and_fails_closed():
+    """Opus 06/09: o content_ok corre na passagem de visão, sobre os bytes já
+    em mãos — zero leituras extra. False ⇒ ContentRefused com o id (o
+    chamador exclui e re-sorteia); None ⇒ ImageUnavailable (fail-closed);
+    a descrição só se pede depois do guarda aprovar."""
+    from finding_memeland.target.clues import ContentRefused
+    fetched: list[str] = []
+    described: list[bytes] = []
+
+    def fetch(url):
+        fetched.append(url)
+        return b"bytes-" + url.encode()
+
+    def run(verdict):
+        fetched.clear()
+        described.clear()
+        return describe_image_batched(
+            target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1", "ipfs://d2"],
+            fetch_bytes_generic=fetch,
+            describe=lambda b: described.append(b) or "fine",
+            content_ok=lambda b: verdict if b == b"bytes-ipfs://target" else None,
+            target_id="ethereum:0xabc:1", rng=random.Random(0))
+    assert run(True) == "fine" and len(fetched) == 3 and described == [b"bytes-ipfs://target"]
+    with pytest.raises(ContentRefused) as e:
+        run(False)
+    assert e.value.target_id == "ethereum:0xabc:1" and described == []
+    assert len(fetched) == 3                          # nenhuma leitura extra
+    with pytest.raises(ImageUnavailable):
+        run(None)
+
+
 # --------------------------------------------------------------------------- #
 # Engine loop with fakes                                                       #
 # --------------------------------------------------------------------------- #

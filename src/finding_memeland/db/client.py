@@ -94,6 +94,34 @@ class Repo:
         top = rows[0].get("hunt_number") if rows else 0
         return int(top or 0) + 1
 
+    # --- target hunts (Option A, soldadura 5/6) ---
+    def recent_target_voids(self, n: int = 10) -> list[str]:
+        """Target ids of hunts voided over the target's mutation/burn,
+        newest first — the next prepare EXCLUDES them (relaunch must never
+        redraw the piece that just got voided). Ids only; never names."""
+        resp = (
+            self._db.table("hunts").select("target_void_id")
+            .not_.is_("target_void_id", "null")
+            .order("id", desc=True).limit(n).execute()
+        )
+        return [str(r["target_void_id"]) for r in (resp.data or [])
+                if r.get("target_void_id")]
+
+    def get_blob(self, key: str) -> str | None:
+        """Encrypted target artefacts (discovery state, registry, snapshot):
+        one row per key in `target_blobs`; the payload is ciphertext — the
+        stores own the cipher, the DB never sees plaintext."""
+        resp = self._db.table("target_blobs").select("payload").eq("key", key).execute()
+        rows = resp.data or []
+        return str(rows[0]["payload"]) if rows and rows[0].get("payload") else None
+
+    def put_blob(self, key: str, payload: str) -> None:
+        from datetime import datetime, timezone
+        self._db.table("target_blobs").upsert(
+            {"key": key, "payload": payload,
+             "updated_at": datetime.now(timezone.utc).isoformat()}
+        ).execute()
+
     # --- clues ---
     def record_clue(self, **fields: Any) -> None:
         self._db.table("clues_history").insert(_clean(fields)).execute()

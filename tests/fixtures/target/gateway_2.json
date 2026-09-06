@@ -1,0 +1,10 @@
+{
+ "_meta": {
+  "url": "https://cf-ipfs.com/ipfs/QmcsepfMDFh2udUQWtvcnZeARNFFCPA1n2WRWUH1ysWv4W/metadata.json",
+  "status": 0,
+  "captured_at": "2026-09-06T22:16:24.221341+00:00",
+  "cid": "QmcsepfMDFh2udUQWtvcnZeARNFFCPA1n2WRWUH1ysWv4W/metadata.json",
+  "truncated": false
+ },
+ "body": "URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>"
+}

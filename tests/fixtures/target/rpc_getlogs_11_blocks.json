@@ -1,0 +1,16 @@
+{
+ "_meta": {
+  "url": "https://eth-mainnet.g.alchemy.com/v2/<key>",
+  "status": 400,
+  "captured_at": "2026-09-06T22:15:51.454955+00:00",
+  "block": 12965000
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+   "code": -32600,
+   "message": "Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range. Based on your parameters, this block range should work: [0xc5d488, 0xc5d491]. Upgrade to PAYG for expanded block range."
+  }
+ }
+}

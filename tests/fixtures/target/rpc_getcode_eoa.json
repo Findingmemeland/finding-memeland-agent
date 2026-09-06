@@ -1,0 +1,13 @@
+{
+ "_meta": {
+  "url": "https://eth-mainnet.g.alchemy.com/v2/<key>",
+  "status": 200,
+  "captured_at": "2026-09-06T22:15:52.369387+00:00",
+  "note": "vitalik.eth — 7702 em 06/09"
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0xef01005a7fc11397e9a8ad41bf10bf13f22b0a63f96f6d"
+ }
+}

@@ -27,6 +27,39 @@ class Agent:
     repo: object
 
 
+# Marketplace APIs sit behind Cloudflare, which answers the default urllib
+# signature with a bare 403 (measured twice on 2026-08-24/25). A browser UA
+# is the whole fix. Shared by the relic findability gate and target mode.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def _http_get_bytes(url: str, headers: dict | None = None) -> bytes:
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
+                                               **(headers or {})})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return r.read()
+
+
+def _http_get(url: str, headers: dict | None = None) -> str:
+    return _http_get_bytes(url, headers).decode("utf-8", "ignore")
+
+
+def _http_post(url: str, body: bytes, headers: dict) -> str:
+    import urllib.request
+
+    req = urllib.request.Request(url, data=body, headers={
+        "User-Agent": _BROWSER_UA, **headers,
+    }, method="POST")
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return r.read().decode("utf-8", "ignore")
+
+
+
 def build_agent(settings: Settings | None = None) -> Agent:
     s = settings or get_settings()
 
@@ -200,35 +233,6 @@ def build_agent(settings: Settings | None = None) -> Agent:
             RaribleFindability,
         )
 
-        def _http_get(url: str, headers: dict | None = None) -> str:
-            import urllib.request
-
-            req = urllib.request.Request(url, headers={
-                # Marketplace APIs sit behind Cloudflare, which answers the
-                # default urllib signature with a bare 403 (measured twice on
-                # 2026-08-24/25). A browser UA is the whole fix.
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-                ),
-                **(headers or {}),
-            })
-            with urllib.request.urlopen(req, timeout=25) as r:
-                return r.read().decode("utf-8", "ignore")
-
-        def _http_post(url: str, body: bytes, headers: dict) -> str:
-            import urllib.request
-
-            req = urllib.request.Request(url, data=body, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-                ),
-                **headers,
-            }, method="POST")
-            with urllib.request.urlopen(req, timeout=25) as r:
-                return r.read().decode("utf-8", "ignore")
-
         # Quorum: two INDEPENDENT marketplaces must agree the relic is findable.
         # One marketplace hiding a fresh 1/1 is plausible; two agreeing is
         # evidence. Falls back to a single surface when only one key exists —
@@ -285,6 +289,41 @@ def build_agent(settings: Settings | None = None) -> Agent:
         )
         if relic_wallets is not None:
             trophy_port = Web3NFTTransfer(web3=web3, wallets=relic_wallets)
+
+    # --- Target (Option A, soldadura 5/6) ---------------------------------
+    # Built whenever the config is COMPLETE (target_missing() empty), even
+    # with target_launch=False: /scan runs for weeks before the first target
+    # hunt, like relic minting runs before relic launches. target_launch
+    # only decides what /launch does. Composition lives in target/wiring.py;
+    # a missing piece disables the whole mode and says which piece.
+    target_wiring = None
+    if s.target_pool_key or s.target_launch:
+        from .target.wiring import build_target
+
+        # The blind solver, chosen once, shared with relic mode below: an
+        # INDEPENDENT model reads every puzzle piece (Hunt #7 post-mortem).
+        from .content.relic_clues import OpenAIBlindSolver
+
+        _target_solver = (
+            False if s.relic_solver_backend == "off"
+            else OpenAIBlindSolver(openai, s.relic_solver_model)
+            if s.relic_solver_backend == "openai" and s.openai_api_key
+            else None
+        )
+        try:
+            target_wiring = build_target(
+                s, anthropic=anthropic, repo=repo, http_get=_http_get,
+                http_post=_http_post, http_get_bytes=_http_get_bytes,
+                solver=_target_solver,
+            )
+            print("[target] mode wired (epoch "
+                  f"{s.target_epoch_id!r}; launch={'ON' if s.target_launch else 'off'})")
+        except Exception as e:  # noqa: BLE001 — the message names config keys only
+            print(f"[target] disabled — {e}")
+    if s.target_launch and target_wiring is None:
+        # Loud at boot, and refused again at /launch: never a silent fallback
+        # to the persona flow when the operator asked for target hunts.
+        print("[target] ⛔ target_launch is ON but target mode could not be built")
 
     x = XClient(
         api_key=s.x_api_key, api_secret=s.x_api_secret, bearer_token=s.x_bearer_token,
@@ -372,6 +411,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
         # clean refusal, never a fallback to an unindexed account.
         predressed_launch=True,
         launch_verifier=DressedProfileVerifier(x),
+        # Target mode (Option A): all None with target_launch=false.
+        target_launch=bool(s.target_launch and target_wiring is not None),
+        target=target_wiring.ports if target_wiring is not None else None,
     )
 
     # Admin/approval surface. /launch <prize in $FIND> fires a hunt in the BACKGROUND
@@ -426,6 +468,44 @@ def build_agent(settings: Settings | None = None) -> Agent:
         refusal = active_hunt_guard(repo)
         if refusal:
             return refusal
+
+        # Target mode (Option A) branches first: the gate over the STORED
+        # snapshot decides, and only GREEN reaches the confirmation. The
+        # prompt carries the gate table (strata, counts, rates — never a
+        # name) and the confirmation is bound to the snapshot fingerprint.
+        if s.target_launch:
+            if target_wiring is None:
+                return (
+                    "⛔ target_launch está ON mas o modo não foi construído "
+                    "(config em falta — ver o arranque / /status). Nada lançado."
+                )
+            try:
+                gate = target_wiring.gate_now()
+            except Exception as e:  # noqa: BLE001 — a refusal is the safe outcome
+                return f"⛔ launch alvo RECUSADO ({type(e).__name__}) — gate ilegível."
+            if gate is None:
+                return "⛔ sem snapshot — corre /scan e depois /snapshot. Nada lançado."
+            if gate.verdict != "GREEN":
+                return f"⛔ launch alvo RECUSADO — gate {gate.verdict}:\n{gate.render()}"
+            try:
+                number = repo.next_hunt_number()
+            except Exception:  # noqa: BLE001
+                number = "?"
+            floor = int(getattr(s, "holding_floor_fmml", 0) or 0)
+            floor_line = (
+                f"floor: {floor:,} $FIND no claim para 100% — non-holders "
+                f"ganham {s.non_holder_prize_pct}%." if floor
+                else "🚨 floor ZERO — qualquer wallet ganha 100% do pote."
+            )
+            pending_launch["ladder_exempt"] = ladder_exempt
+            launch_confirm.stage(prize_fmml, target_wiring.snapshot_fingerprint())
+            return (
+                f"Hunt #{number} (ALVO): {prize_fmml:,} $FIND. O alvo é sorteado "
+                "na confirmação — nem eu o vejo.\n"
+                f"{gate.render()}\n{floor_line}\n"
+                "⚠️ O launch é INSTANTÂNEO — Clue 1 sai em segundos, sem take-backs.\n"
+                "Confirmar? responde 'sim' ou 'não' (expira em 2 min)."
+            )
 
         # Relic mode branches BEFORE the persona pool is read: there are no
         # dressed personas in this world, so the checks below would refuse a
@@ -616,6 +696,19 @@ def build_agent(settings: Settings | None = None) -> Agent:
         Free text with nothing staged is ignored (None = no reply)."""
         res = launch_confirm.resolve(text)
         if res.outcome == "confirm":
+            # Target mode binds the prompt to the SNAPSHOT FINGERPRINT: a
+            # /snapshot between the prompt and the 'sim' changed the pool
+            # the operator was shown — run /launch again over the new one.
+            if s.target_launch:
+                if target_wiring is None:
+                    return "⛔ modo alvo indisponível — corre /launch de novo."
+                if target_wiring.snapshot_fingerprint() != res.expected_handle:
+                    return ("⛔ o snapshot mudou desde o prompt — corre /launch "
+                            "de novo.")
+                return _do_launch(
+                    res.prize_fmml,
+                    ladder_exempt=bool(pending_launch["ladder_exempt"]),
+                )
             # Relic mode binds the prompt to a RELIC ID, not a handle. The check
             # is the same one — never confirm one target and launch another —
             # but against the relic pool; reading the persona pool here would
@@ -797,6 +890,22 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 lines.append("dressed pool: VAZIA — /dress antes de /launch")
         except Exception:  # noqa: BLE001 — cosmetic, never breaks /status
             pass
+
+        # Target mode: what /launch will see — gate over the stored snapshot.
+        if s.target_launch or s.target_pool_key:
+            if target_wiring is None:
+                lines.append("target: ⛔ não construído — falta: "
+                             + (", ".join(s.target_missing()) or "?"))
+            else:
+                try:
+                    g = target_wiring.gate_now()
+                    lines.append(
+                        f"target: launch {'ON' if s.target_launch else 'off'} | "
+                        + ("sem snapshot — /scan, /snapshot" if g is None else
+                           f"gate {g.verdict} (efectivo {g.total_effective:,}) — {g.detail}")
+                    )
+                except Exception as e:  # noqa: BLE001 — cosmetic
+                    lines.append(f"target: gate ilegível ({type(e).__name__})")
 
         if s.fmml_usd_price:
             one_b = 1_000_000_000 * s.fmml_usd_price
@@ -1013,8 +1122,55 @@ def build_agent(settings: Settings | None = None) -> Agent:
             f"  wallets left: {free if free >= 0 else '?'}"
         )
 
+    # ------------------------------------------------------------------
+    # /scan [blocos] — descoberta incremental da era 2021 (registo reservado)
+    # /snapshot     — refaz o pool curado sobre o registo e corre o gate
+    # Ambos em background (minutos a horas), relatório no Telegram, NUNCA
+    # conteúdos (contagens e estratos apenas). Recusados durante uma hunt:
+    # a doutrina é não tocar no agente a meio (partilham RPC e chave).
+    # ------------------------------------------------------------------
+    target_flag = {"active": False}
+
+    def _target_job(label: str, fn) -> str:
+        if target_wiring is None:
+            return ("⛔ modo alvo não construído — config em falta: "
+                    + (", ".join(s.target_missing()) or "ver arranque"))
+        refusal = active_hunt_guard(repo)
+        if refusal:
+            return f"⛔ não corro /{label} durante uma hunt. {refusal}"
+        with hunt_lock:
+            if target_flag["active"]:
+                return "⛔ já há um /scan ou /snapshot a correr — espera pelo relatório."
+            target_flag["active"] = True
+
+        def _run():
+            try:
+                notifier.notify(f"[{label}] {fn()}")
+            except Exception as e:  # noqa: BLE001 — tipo apenas: mensagens podem citar contratos
+                import logging
+
+                logging.getLogger(__name__).exception("target %s failed", label)
+                notifier.notify(f"🚨 /{label} FALHOU ({type(e).__name__}) — detalhe nos logs.")
+            finally:
+                target_flag["active"] = False
+
+        threading.Thread(target=_run, daemon=True).start()
+        return f"/{label} a correr em background — relatório aqui quando terminar."
+
+    def _scan(arg: str = "") -> str:
+        try:
+            n = int(arg.strip()) if arg.strip() else None
+        except ValueError:
+            return "usage: /scan [blocos]"
+        return _target_job("scan", lambda: target_wiring.scan(n))
+
+    def _snapshot(arg: str = "") -> str:
+        return _target_job("snapshot", lambda: target_wiring.snapshot().render())
+
     actions = {
         "launch": _launch,
+        "scan": _scan,
+        "snapshot": _snapshot,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,
         "dress": _dress,

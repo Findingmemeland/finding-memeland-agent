@@ -152,6 +152,112 @@ class Settings(BaseSettings):
     # their code) would make the pool a bytecode class of one again.
     manifold_implementation_override_ok: bool = Field(default=False)
 
+    # ------------------------------------------------------------------
+    # Target hunts (Option A, 2026-09): the treasure is an EXISTING NFT that
+    # belongs to someone else. target_launch=False keeps every other mode
+    # exactly as is. Turning it on is an env var, not a deploy.
+    # ------------------------------------------------------------------
+    target_launch: bool = Field(default=False)
+    # Fernet key for the target artefacts (sealed target on the hunt row,
+    # snapshot/registry/discovery blobs). SEPARATE from relic_pool_key by
+    # decision (soldadura, decision 3): the registry is the most sensitive
+    # artefact of the game and does not share a key with anything else.
+    # ⚠️ Losing it loses the registry (weeks of era scans) and every sealed
+    # target; a LIVE hunt could not be resumed. Back it up before /scan.
+    target_pool_key: str = Field(default="")
+    # Ethereum RPC (epoch 1 sources are all Ethereum; base_rpc_url covers
+    # Base). R1: one named URL per chain, never a default chain.
+    eth_rpc_url: str = Field(default="")
+    # Curation epoch (selector.CurationEpoch): id + freshness ceiling.
+    target_epoch_id: str = Field(default="")
+    target_min_age_days: int = Field(default=180)
+    target_max_snapshot_age_days: int = Field(default=14)
+    # R2 canary for the era scan: a PINNED era block with KNOWN mints and its
+    # MEASURED mint count. Both required, both ≠ 0 — the exact-count canary
+    # is what catches truncation; one without the other is worth nothing.
+    target_canary_block: int = Field(default=0)
+    target_canary_mints: int = Field(default=0)
+    # Per-stratum SAMPLED rates for the gate ("foundation:0.52,tail2021:0.35").
+    # Unlisted strata count 0 (fail-closed). Re-measure per epoch.
+    target_writability_rates: str = Field(default="")
+    target_uniqueness_rates: str = Field(default="")
+    # Blocks scanned per /scan run (Alchemy free: one block per eth_getLogs).
+    target_scan_blocks: int = Field(default=300)
+    # GENERIC read paths for the live check and the image fetch — public RPCs
+    # and public IPFS gateways, NO KEY (they read the target inside its decoy
+    # batch; nothing carrying our identity may read it). Comma-separated,
+    # index-aligned: provider i = (ethereum[i], base[i], gateway[i]); rotation
+    # is PER BATCH (adapters.GenericMetadata).
+    target_public_rpcs_ethereum: str = Field(default="")
+    target_public_rpcs_base: str = Field(default="")
+    target_ipfs_gateways: str = Field(default="")
+    # KEYED gateway for the refresh (resolves everyone's metadata — no secret).
+    target_ipfs_gateway: str = Field(default="https://ipfs.io/ipfs/")
+    # Judge (batched, text) and vision models — Anthropic client.
+    target_judge_model: str = Field(default="claude-sonnet-4-6")
+    target_vision_model: str = Field(default="claude-sonnet-4-6")
+    # HOLD ceilings (R5): per episode and accumulated per hunt, seconds.
+    target_max_hold_s: int = Field(default=6 * 3600)
+    target_max_total_hold_s: int = Field(default=12 * 3600)
+    target_hold_renotify_s: int = Field(default=3600)
+
+    @staticmethod
+    def _rates(spec: str) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for part in (spec or "").split(","):
+            if ":" not in part:
+                continue
+            k, v = part.split(":", 1)
+            try:
+                out[k.strip()] = float(v)
+            except ValueError:
+                continue
+        return out
+
+    @property
+    def target_writability_rate_map(self) -> dict[str, float]:
+        return self._rates(self.target_writability_rates)
+
+    @property
+    def target_uniqueness_rate_map(self) -> dict[str, float]:
+        return self._rates(self.target_uniqueness_rates)
+
+    @staticmethod
+    def _csv(spec: str) -> list[str]:
+        return [x.strip() for x in (spec or "").split(",") if x.strip()]
+
+    @property
+    def target_public_rpc_map(self) -> dict[str, list[str]]:
+        return {"ethereum": self._csv(self.target_public_rpcs_ethereum),
+                "base": self._csv(self.target_public_rpcs_base)}
+
+    @property
+    def target_ipfs_gateway_list(self) -> list[str]:
+        return self._csv(self.target_ipfs_gateways)
+
+    def target_missing(self) -> list[str]:
+        """What a target launch still lacks — config names only. Used by
+        assert_ready_for_hunt and by /status."""
+        missing = []
+        if not self.target_pool_key:
+            missing.append("target_pool_key")
+        if not self.eth_rpc_url:
+            missing.append("eth_rpc_url")
+        if not self.target_epoch_id:
+            missing.append("target_epoch_id")
+        # search guard + uniqueness + chain probe all speak Rarible
+        if not self.rarible_api_key:
+            missing.append("rarible_api_key (search guard is mandatory)")
+        if not (self.target_canary_block and self.target_canary_mints):
+            missing.append("target_canary_block AND target_canary_mints (both ≠ 0)")
+        if not self.target_writability_rate_map:
+            missing.append("target_writability_rates")
+        if not self.target_uniqueness_rate_map:
+            missing.append("target_uniqueness_rates")
+        if not (self.target_public_rpc_map["ethereum"] and self.target_ipfs_gateway_list):
+            missing.append("target_public_rpcs_ethereum + target_ipfs_gateways (generic reads)")
+        return missing
+
     @property
     def relic_wallet_ref_list(self) -> list[str]:
         return [r.strip() for r in (self.relic_wallet_refs or "").split(",") if r.strip()]
@@ -198,6 +304,10 @@ class Settings(BaseSettings):
                     "opensea_api_key or rarible_api_key "
                     "(the findability gate needs at least one marketplace)"
                 )
+        # Target mode: same doctrine — everything a launch needs is checked
+        # BEFORE the confirmation, never halfway through run_hunt.
+        if self.target_launch:
+            missing += [f"{m} (target_launch is on)" for m in self.target_missing()]
         if missing:
             raise RuntimeError(f"Cannot start hunt — missing config: {', '.join(missing)}")
 

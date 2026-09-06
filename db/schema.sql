@@ -314,3 +314,25 @@ alter table hunts add column if not exists predressed boolean not null default f
 -- ground truth.
 alter table clues_history add column if not exists facet text;
 alter table clues_history add column if not exists obliqueness numeric;
+
+-- Migration 2026-09-06 — Opção A (jogo-alvo), soldadura 5/6.
+-- A hunt-alvo não tem código: o claim é a IDENTIDADE do token e o
+-- integrity_hash passa a ser o compromisso v2. O alvo, o sal e os decoys vivem
+-- CIFRADOS na linha (TARGET_POOL_KEY, chave própria — separada da do pool de
+-- relics); a descrição da obra (visão) idem, porque descreve a resposta.
+alter table hunts add column if not exists target_sealed text;        -- SealedTarget cifrado (alvo+sal+compromisso+decoys)
+alter table hunts add column if not exists target_ctx_sealed text;    -- descrição da imagem (visão), cifrada
+alter table hunts add column if not exists target_epoch text;         -- id da época de curadoria
+alter table hunts add column if not exists target_void_id text;       -- chain:contract:tokenId anulado (mutação/burn) — o launch seguinte exclui
+alter table hunts add column if not exists target_void_cause text;    -- 'mutated' | 'burned' | 'unclaimed'
+alter table hunts add column if not exists target_hold_s integer not null default 0;  -- segundos de hold acumulados (prazo congelado; R5)
+
+-- Artefactos do pipeline de snapshot, cifrados: estado da descoberta, registo
+-- reservado (o artefacto MAIS sensível — a lista de contratos da cauda 2021),
+-- snapshot curado. Uma linha por chave; o payload é texto cifrado (Fernet), a
+-- BD nunca vê claro. Sobrevive a deploys, como tudo o resto do agente.
+create table if not exists target_blobs (
+  key         text primary key,
+  payload     text not null,
+  updated_at  timestamptz not null default now()
+);

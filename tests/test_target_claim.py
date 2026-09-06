@@ -67,6 +67,16 @@ def test_single_chain_marketplaces_have_no_implied_chain_either():
         assert extract_target_refs(url).unresolved_links == (url,)
 
 
+def test_superrare_current_url_shape_measured_2026_09_06():
+    """URL REAL colada pelo Pedro 06/09: /artwork/eth/<contract>/<tokenId>.
+    A cadeia vai no path — estrutural, sem resolvedor de página. (A forma
+    antiga /artwork-v2/<slug> continua a ir para o resolvedor, fail-closed.)"""
+    url = "https://superrare.com/artwork/eth/0x63b34473C297CC2eA487ceA13871f0D4ce8b2c86/167"
+    ref = parse_link(url)
+    assert ref == TargetRef("ethereum", "0x63b34473c297cc2ea487cea13871f0d4ce8b2c86", 167)
+    assert extract_target_refs(f"é este {url}").refs == (ref,)
+
+
 def test_zora_collect_url():
     ref = parse_link(f"https://zora.co/collect/eth:{ADDR}/42")
     assert ref == TargetRef("ethereum", ADDR.lower(), 42)

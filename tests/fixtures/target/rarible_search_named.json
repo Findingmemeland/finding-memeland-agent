@@ -1,0 +1,12 @@
+{
+ "_meta": {
+  "url": "https://api.rarible.org/v0.1/items/search",
+  "status": 429,
+  "captured_at": "2026-09-06T22:06:18.935826+00:00",
+  "query": "Uncle Pump"
+ },
+ "body": {
+  "code": "UNAUTHORIZED",
+  "message": "Request limit reached, visit https://api.rarible.org/dashboard to increase your limit"
+ }
+}

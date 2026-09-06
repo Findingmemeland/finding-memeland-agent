@@ -26,6 +26,7 @@ from finding_memeland.target.hunt import (
     JudgeVerdict,
     LaunchRefused,
     LiveCheck,
+    LiveRead,
     SealedTarget,
     SealedTargetCipher,
     SealedTargetIntegrityError,
@@ -50,11 +51,22 @@ EPOCH = CurationEpoch(epoch_id="e1")
 NAME = "Whispering Harbor"
 
 
+def cid_of(i: int) -> str:
+    """A base58-valid CIDv0 shape per entry (no '0' in base58)."""
+    return "Qm" + str(i + 1).rjust(44, "1")
+
+
+def uri_of(i: int) -> str:
+    return f"ipfs://{cid_of(i)}/metadata.json"
+
+
 def entry(i, platform="foundation"):
+    from finding_memeland.target.refresh import content_id
     meta = {"name": f"{NAME} {i}", "image": f"ipfs://img{i}"}
     return SnapshotEntry(chain="ethereum", contract=f"0x{i:040x}", token_id=i,
                          name=NAME, name_onchain=f"{NAME} {i}", metadata=meta,
-                         metadata_sha256=metadata_hash(meta), platform=platform)
+                         metadata_sha256=metadata_hash(meta), platform=platform,
+                         token_uri=uri_of(i), content_id=content_id(uri_of(i)))
 
 
 def big_snapshot(built_at="2026-09-05T00:00:00Z"):
@@ -104,10 +116,19 @@ def ok_judge(batch):
     return [JudgeVerdict(writable=True, content_ok=True) for _ in batch]
 
 
-def preparer(snap, judge=ok_judge, now="2026-09-06T00:00:00Z"):
+UNIQ = {k: 1.0 for k in RATES}
+
+
+def all_unique(base, chain, contract, token_id):
+    return True
+
+
+def preparer(snap, judge=ok_judge, now="2026-09-06T00:00:00Z",
+             name_is_unique=all_unique):
     return TargetHuntPreparer(snapshot_store=store_with(snap),
-                              writability_rates=RATES,
+                              writability_rates=RATES, uniqueness_rates=UNIQ,
                               cap_exempt=frozenset(), judge=judge,
+                              name_is_unique=name_is_unique,
                               now_iso=lambda: now, rng=random.Random(0))
 
 
@@ -162,9 +183,12 @@ def test_judge_needs_both_halves_and_none_rejects():
         return [v for _ in batch]
 
     sealed = preparer(big_snapshot(), judge=judge).prepare(EPOCH)
-    assert len(batches) == 4
+    # 4 lotes reais + 1 lote-fantasma depois do aceite (Opus 06/09): o
+    # fornecedor deixa de saber qual foi o último; o alvo NÃO está no fantasma
+    assert len(batches) == 5
     assert all(len(b) == 8 for b in batches)             # 7 decoys + alvo
-    assert sealed.id() in batches[-1]
+    assert sealed.id() in batches[-2]
+    assert sealed.id() not in batches[-1]
     assert len(sealed.decoys) == 7
 
 
@@ -182,7 +206,7 @@ def test_judge_batches_share_no_constant_member_across_draws():
         return [v for _ in batch]
 
     preparer(big_snapshot(), judge=judge).prepare(EPOCH)
-    assert len(batches) == 4
+    assert len(batches) == 5                             # 4 reais + fantasma
     assert set.intersection(*batches) == set()
 
 
@@ -231,9 +255,144 @@ def test_select_judged_skips_excluded_then_accepts():
     snap = big_snapshot()
     sel = snapshot_selector(snap, rng=random.Random(3))
     first = snapshot_selector(snap, rng=random.Random(3)).select(EPOCH)
-    t = select_judged(sel, EPOCH, judge=ok_judge, draw_decoys=lambda tid: [],
+    t = select_judged(sel, EPOCH, judge=ok_judge, name_is_unique=all_unique,
+                      draw_decoys=lambda tid: [],
                       rng=random.Random(0), exclude=frozenset({first.id()}))
     assert t.id() != first.id()
+
+
+# --------------------------------------------------------------------------- #
+# Uniqueness at draw time (Opus 06/09, revisão 5/6) — preguiçosa, com decoys  #
+# --------------------------------------------------------------------------- #
+
+
+def _draw_from(snap, n=7):
+    """draw_decoys de teste: n entradas frescas à volta do id excluído."""
+    rng = random.Random(11)
+
+    def draw(exclude_id):
+        pool = [e for e in snap.entries
+                if f"{e.chain}:{e.contract}:{e.token_id}" != exclude_id]
+        return [Target(chain=e.chain, contract=e.contract, token_id=e.token_id,
+                       name=e.name, name_onchain=e.name_onchain, description="",
+                       image="", metadata_sha256=e.metadata_sha256,
+                       epoch=EPOCH.epoch_id)
+                for e in rng.sample(pool, n)]
+    return draw
+
+
+def test_uniqueness_is_checked_inside_a_fresh_decoy_batch_every_call():
+    """Cada verificação pesquisa n+1 nomes (alvo escondido, decoys frescos);
+    o marketplace nunca vê SÓ o nome do candidato."""
+    from finding_memeland.target.snapshot import snapshot_selector
+    snap = big_snapshot()
+    batches: list[list[str]] = [[]]
+    seen_judge: list[int] = []
+
+    def judge(batch):
+        seen_judge.append(len(batch))
+        batches.append([])          # a chamada ao juiz separa lotes
+        return [JudgeVerdict(True, True) for _ in batch]
+
+    def unique(base, chain, contract, tid):
+        batches[-1].append(f"{chain}:{contract}:{tid}")
+        return True
+
+    sel = snapshot_selector(snap, rng=random.Random(5))
+    t = select_judged(sel, EPOCH, judge=judge, name_is_unique=unique,
+                      draw_decoys=_draw_from(snap), rng=random.Random(0))
+    uniq_batches = [b for b in batches if b]
+    # o lote real + o lote-fantasma partilhado (juiz e unicidade, uma vez)
+    assert len(uniq_batches) == 2 and len(uniq_batches[0]) == 8
+    assert t.id() in uniq_batches[0]
+    assert len(set(uniq_batches[0])) == 8            # n+1 distintos
+    assert len(uniq_batches[1]) == 8 and t.id() not in uniq_batches[1]
+
+
+def test_uniqueness_failure_spends_a_draw_and_none_is_fail_closed():
+    """Não-único ⇒ gasta um sorteio (como a escrevibilidade); inverificável
+    (None / excepção no alvo) ⇒ também — nunca aprovado por 'não sei'."""
+    from finding_memeland.target.snapshot import snapshot_selector
+    snap = big_snapshot()
+
+    def judge(batch):
+        return [JudgeVerdict(True, True) for _ in batch]
+
+    answers = iter([False, None, True])
+
+    def unique(base, chain, contract, tid):
+        return None
+
+    # 1) só None: 12 sorteios e recusa
+    sel = snapshot_selector(snap, rng=random.Random(5))
+    with pytest.raises(SelectionRefused) as e:
+        select_judged(sel, EPOCH, judge=judge, name_is_unique=unique,
+                      draw_decoys=_draw_from(snap), rng=random.Random(0),
+                      max_draws=3)
+    assert "uniqueness" in str(e.value) and NAME not in str(e.value)
+
+    # 2) o alvo responde False, None, True por sorteio: aceita ao terceiro
+    picks: list[str] = []
+    sel2 = snapshot_selector(snap, rng=random.Random(5))
+    orig_select = sel2.select
+
+    def tracking_select(epoch):
+        t = orig_select(epoch)
+        picks.append(t.id())
+        return t
+    sel2.select = tracking_select
+    verdict_for: dict[str, object] = {}
+
+    def unique2(base, chain, contract, tid):
+        key = f"{chain}:{contract}:{tid}"
+        if key == picks[-1] and key not in verdict_for:
+            verdict_for[key] = next(answers)
+        return verdict_for.get(key, True)
+
+    t = select_judged(sel2, EPOCH, judge=judge, name_is_unique=unique2,
+                      draw_decoys=_draw_from(snap), rng=random.Random(0))
+    assert len(picks) == 3 and t.id() == picks[-1]
+    assert [verdict_for[p] for p in picks] == [False, None, True]
+
+
+def test_uniqueness_batch_never_stops_at_the_target():
+    """Sem saída antecipada: parar depois do alvo tornava-o 'o nome a seguir
+    ao qual as chamadas param'."""
+    from finding_memeland.target.hunt import uniqueness_in_batch
+    snap = big_snapshot()
+    draw = _draw_from(snap)
+    target = draw("nothing")[0]
+    decoys = draw(target.id())
+    calls: list[str] = []
+
+    def unique(base, chain, contract, tid):
+        calls.append(f"{chain}:{contract}:{tid}")
+        return True
+
+    for seed in range(5):
+        calls.clear()
+        assert uniqueness_in_batch(unique, target, decoys, random.Random(seed)) is True
+        assert len(calls) == 8 and target.id() in calls
+
+
+def test_uniqueness_exception_on_target_is_none_decoy_exception_is_noise():
+    from finding_memeland.target.hunt import uniqueness_in_batch
+    snap = big_snapshot()
+    draw = _draw_from(snap)
+    target = draw("nothing")[0]
+    decoys = draw(target.id())
+
+    def boom_target(base, chain, contract, tid):
+        if f"{chain}:{contract}:{tid}" == target.id():
+            raise RuntimeError("429")
+        return True
+    assert uniqueness_in_batch(boom_target, target, decoys, random.Random(0)) is None
+
+    def boom_decoy(base, chain, contract, tid):
+        if f"{chain}:{contract}:{tid}" != target.id():
+            raise RuntimeError("429")
+        return True
+    assert uniqueness_in_batch(boom_decoy, target, decoys, random.Random(0)) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -277,33 +436,39 @@ def sealed_and_pool():
 
 
 def test_live_intact_mutated_burned_unavailable():
+    """RPC-only, CID comparison (Opus 06/09): gateway migration with the
+    same CID is intact; a different CID or a non-content-addressed URI is
+    mutated; ownerOf reverting is burned EVEN IF tokenURI still answers."""
     sealed, pool, snap = sealed_and_pool()
-    by = {(e.chain, e.contract, e.token_id): e.metadata for e in snap.entries}
+    by = {(e.chain, e.contract, e.token_id): e.token_uri for e in snap.entries}
     t = sealed.target
     me = (t.chain, t.contract, t.token_id)
 
     def world(mode):
-        def fetch(chain, contract, tid):
+        def read(chain, contract, tid):
             key = (chain, contract, tid)
             if key == me:
+                if mode == "migrated":
+                    return LiveRead(by[key].replace("ipfs://", "https://gw.example/ipfs/"), "0xowner")
                 if mode == "mutated":
-                    return {**by[key], "image": "ipfs://swapped"}
+                    return LiveRead("ipfs://" + cid_of(99_999) + "/metadata.json", "0xowner")
+                if mode == "http":
+                    return LiveRead("https://api.example.com/token/1", "0xowner")
                 if mode == "burned":
-                    return None
+                    return LiveRead(by[key], None)      # URI still served, owner gone
                 if mode == "down":
                     raise ChainUnavailable("rpc")
-            return by.get(key)
-        return fetch
+            return LiveRead(by.get(key), "0xowner")
+        return read
 
-    for mode, status in (("intact", LIVE_INTACT), ("mutated", LIVE_MUTATED),
+    for mode, status in (("intact", LIVE_INTACT), ("migrated", LIVE_INTACT),
+                         ("mutated", LIVE_MUTATED), ("http", LIVE_MUTATED),
                          ("burned", LIVE_BURNED), ("down", LIVE_UNAVAILABLE)):
-        v = LiveCheck(fetch_metadata_generic=world(mode),
-                      rng=random.Random(1)).check(sealed)
+        v = LiveCheck(read_live=world(mode), rng=random.Random(1)).check(sealed)
         assert v.status == status, mode
         assert t.name not in v.render()
-    ok = LiveCheck(fetch_metadata_generic=world("intact"),
-                   rng=random.Random(1)).check(sealed)
-    assert ok.live_metadata_sha256 == t.metadata_sha256
+    ok = LiveCheck(read_live=world("migrated"), rng=random.Random(1)).check(sealed)
+    assert ok.live_content_id == t.content_id and ok.live_token_uri != t.token_uri
 
 
 def test_live_check_reads_the_same_sealed_batch_every_time():
@@ -313,17 +478,16 @@ def test_live_check_reads_the_same_sealed_batch_every_time():
     t = sealed.target
     me = (t.chain, t.contract, t.token_id)
     reads = []
-    by = {(e.chain, e.contract, e.token_id): e.metadata for e in snap.entries}
+    by = {(e.chain, e.contract, e.token_id): e.token_uri for e in snap.entries}
 
     def fetch(chain, contract, tid):
         reads.append((chain, contract, tid))
-        return by[(chain, contract, tid)]
+        return LiveRead(by[(chain, contract, tid)], "0xowner")
 
     positions, sets = set(), []
     for seed in range(10):
         reads.clear()
-        v = LiveCheck(fetch_metadata_generic=fetch,
-                      rng=random.Random(seed)).check(sealed)
+        v = LiveCheck(read_live=fetch, rng=random.Random(seed)).check(sealed)
         assert v.reads == 8 and len(reads) == 8
         assert reads.count(me) == 1
         positions.add(reads.index(me))
@@ -337,14 +501,14 @@ def test_live_check_reads_the_same_sealed_batch_every_time():
 def test_decoy_outage_is_noise_not_a_hold():
     sealed, pool, snap = sealed_and_pool()
     t = sealed.target
-    by = {(e.chain, e.contract, e.token_id): e.metadata for e in snap.entries}
+    by = {(e.chain, e.contract, e.token_id): e.token_uri for e in snap.entries}
 
     def fetch(chain, contract, tid):
         if (chain, contract, tid) != (t.chain, t.contract, t.token_id):
             raise ChainUnavailable("decoy rpc blip")
-        return by[(chain, contract, tid)]
+        return LiveRead(by[(chain, contract, tid)], "0xowner")
 
-    v = LiveCheck(fetch_metadata_generic=fetch, rng=random.Random(2)).check(sealed)
+    v = LiveCheck(read_live=fetch, rng=random.Random(2)).check(sealed)
     assert v.status == LIVE_INTACT
 
 
@@ -382,7 +546,8 @@ def test_void_reveal_publishes_every_ingredient():
     assert ing["target_id"] == sealed.id()
     assert ing["salt"] == sealed.salt and ing["commitment"] == sealed.commitment
     assert ing["metadata_sha256"] == sealed.target.metadata_sha256
-    assert ing["live_metadata_sha256"] is None and ing["cause"] == LIVE_BURNED
+    assert ing["token_uri"] == sealed.target.token_uri and ing["token_uri"]
+    assert ing["live_token_uri"] is None and ing["cause"] == LIVE_BURNED
     assert verify_commitment_v2(ing["target_id"], ing["metadata_sha256"],
                                 ing["salt"], ing["commitment"])
 

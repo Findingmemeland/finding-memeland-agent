@@ -9,6 +9,7 @@ from finding_memeland.target.discovery import (
     DiscoveryStateStore,
     EraDiscovery,
 )
+from finding_memeland.target.refresh import TokenRead
 from finding_memeland.target.pipeline import SnapshotPipeline
 from finding_memeland.target.snapshot import CurationEpoch, SnapshotStore
 from finding_memeland.target.sources import (
@@ -84,11 +85,12 @@ def build_world(*, classic_break=False):
         snapshot_store=SnapshotStore(
             cipher=XorCipher(), read=stores["s"].read, write=stores["s"].write),
         rpcs=rpcs,
-        fetch_metadata=lambda ch, c, t: dict(meta),
+        fetch_token=lambda ch, c, t: TokenRead(
+            "ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN", dict(meta)),
         owner_is_eoa=lambda ch, c, t: True,
-        name_is_unique=lambda n, ch, c, t: True,
         now_iso=lambda: "2026-09-05T20:00:00Z",
         writability_rates={"manifold2021": 0.5},
+        uniqueness_rates={"manifold2021": 1.0},
         cap_exempt=frozenset({"tail2021"}),
     )
     return pipeline, stores

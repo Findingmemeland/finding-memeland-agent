@@ -31,7 +31,19 @@ class _Query:
         self._filters.append(("gte", c, v))
         return self
 
-    def order(self, c):
+    def order(self, c, desc=False):
+        return self
+
+    def upsert(self, payload):
+        self._op, self._payload = "upsert", payload
+        return self
+
+    @property
+    def not_(self):
+        return self
+
+    def is_(self, c, v):
+        self._filters.append(("is", c, v))
         return self
 
     def limit(self, n):
@@ -90,3 +102,17 @@ def test_holding_samples_filters_by_wallet_and_since():
     assert entry["table"] == "holding_samples"
     assert ("eq", "wallet", "0xabc") in entry["filters"]
     assert ("gte", "sampled_at", since.isoformat()) in entry["filters"]
+
+
+def test_target_blobs_round_trip_shape_and_void_ids_query():
+    db = _FakeDB()
+    repo = Repo(db)
+    repo.put_blob("snapshot", "gAAAA-cipher")
+    assert db.log[-1]["table"] == "target_blobs" and db.log[-1]["op"] == "upsert"
+    assert db.log[-1]["payload"]["key"] == "snapshot"
+    assert db.log[-1]["payload"]["payload"] == "gAAAA-cipher"
+    assert repo.get_blob("snapshot") is None            # fake select: empty
+    assert db.log[-1]["filters"] == [("eq", "key", "snapshot")]
+    assert repo.recent_target_voids() == []
+    assert db.log[-1]["table"] == "hunts"
+    assert ("is", "target_void_id", "null") in db.log[-1]["filters"]

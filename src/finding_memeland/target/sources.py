@@ -48,10 +48,20 @@ SEL_TOTAL = "0x18160ddd"        # totalSupply()
 SEL_TOKENBYINDEX = "0x4f6ccce7"  # tokenByIndex(uint256)
 SEL_OWNEROF = "0x6352211e"      # ownerOf(uint256)
 SEL_TOKENURI = "0xc87b56dd"     # tokenURI(uint256)
+EIP7702_PREFIX = "0xef0100"      # delegation designator: still an EOA (custody)
 
 # Classic epoch-1 platforms — addresses verified 04-05/09 (Etherscan /
 # own census). These are PUBLIC knowledge; the registry strata are not.
 # (slug, chain, contract) — the chain column is DATA that rides each item.
+# ⚠️ Foundation THE MARKETPLACE shut down (site statement read 06/09/2026:
+# "we have made the decision not to resume operations"). The CONTRACT is
+# untouched — non-custodial, tokens in their owners' wallets — so it stays a
+# source; hunters find FND pieces on OpenSea/Rarible. Two consequences:
+# claim links can no longer be foundation.app pages (structural, nothing to
+# resolve), and Foundation's own IPFS gateway is promised only until April
+# 2027 — the CIDs must resolve on public gateways (scripts/capturar_target.py
+# `gateways` measures exactly that). If they stop resolving, the refresh
+# drops the stratum honestly (metadata unresolvable ⇒ excluded).
 EPOCH1_CLASSIC = (
     ("foundation",  "ethereum", "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405"),
     ("superrare2",  "ethereum", "0xb932a70a57673d89f4acffbe830e8ed7f75fb9e0"),
@@ -97,6 +107,17 @@ class ChainRpc:
     def has_code(self, addr: str) -> bool:
         code = (self.get_code(addr) or "").strip().lower()
         return code not in ("", "0x")
+
+    def is_eoa(self, addr: str) -> bool:
+        """An EOA for CUSTODY purposes: no code, or an EIP-7702 delegation
+        designator (0xef0100 + 20-byte address, measured 06/09 on
+        vitalik.eth's account: '0xef01005a7f…'). A 7702-delegated account is
+        still a person's key — `has_code` alone would file every upgraded
+        wallet as an escrow contract and shrink the pool for nothing."""
+        code = (self.get_code(addr) or "").strip().lower()
+        if code in ("", "0x"):
+            return True
+        return code.startswith(EIP7702_PREFIX) and len(code) == len(EIP7702_PREFIX) + 40
 
 
 def _rpc_for(rpcs: dict[str, ChainRpc], chain: str) -> ChainRpc:
@@ -360,7 +381,7 @@ class ChainEoaCheck:
             owner = _address_from_word(data)
             if owner is None:
                 return None
-            return not rpc.has_code(owner)
+            return rpc.is_eoa(owner)
         except Exception:  # noqa: BLE001 — revert or transport: unverifiable
             return None
 

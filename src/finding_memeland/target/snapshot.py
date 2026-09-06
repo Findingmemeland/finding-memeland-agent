@@ -5,7 +5,7 @@ marketplace as a single point of failure at /launch).
 How the pieces fit
 ==================
 A REFRESH (weekly, off the hunt path) queries the art platforms, applies the
-HARD filters (base name, uniqueness, EOA owner, age) and writes every
+HARD filters (base name, in-pool dedupe, EOA owner, age) and writes every
 survivor into the snapshot WITH its full metadata and the metadata hash
 computed right there. Hunts then draw from the snapshot alone:
 
@@ -29,6 +29,15 @@ stratum an attacker would need is "which snapshot entries pass OUR judge
 under OUR doctrine" — the API feed is raw material anyone can pull; the
 stratum is what survives our judgment, which is not reproducible from
 outside (Opus, 04/09, second bias).
+
+GLOBAL NAME UNIQUENESS follows the same path (Opus, 06/09, 5/6 review): a
+marketplace search per survivor is 60-80k quota-priced calls per weekly
+refresh — the free Rarible key died at 150 — to reconfirm, for entries that
+will never be drawn, a property that almost never changes. So the gate
+certifies effective = entries x writability_rate x uniqueness_rate, both
+SAMPLED per stratum (fail-closed: unmeasured = 0), and select_judged checks
+uniqueness on the drawn candidate only, inside a fresh decoy batch, at the
+moment it matters rather than seven days before.
 
 The snapshot is a SECRET artifact. It is not the target, but it is the
 attacker's dream prior: leak it and the candidate set collapses from "the
@@ -92,6 +101,11 @@ class SnapshotEntry:
     metadata: dict
     metadata_sha256: str
     platform: str        # which curated source produced it (for rotation)
+    # v3 (Opus, 06/09): the raw tokenURI and its canonical content id
+    # (refresh.content_id). The live check compares the CID — no gateway
+    # in the repeated path — and the void post publishes both.
+    token_uri: str = ""
+    content_id: str = ""
 
 
 @dataclass
@@ -128,7 +142,7 @@ class SnapshotStore:
 
     def save(self, snap: Snapshot) -> None:
         payload = json.dumps({
-            "v": 2,
+            "v": 3,
             "epoch_id": snap.epoch_id,
             "built_at": snap.built_at,
             "entries": [{
@@ -137,6 +151,7 @@ class SnapshotStore:
                 "name": e.name, "name_onchain": e.name_onchain,
                 "metadata": e.metadata, "metadata_sha256": e.metadata_sha256,
                 "platform": e.platform,
+                "token_uri": e.token_uri, "content_id": e.content_id,
             } for e in snap.entries],
         }, ensure_ascii=False)
         self._write(self._cipher.encrypt(payload))
@@ -147,11 +162,17 @@ class SnapshotStore:
             return None
         try:
             doc = json.loads(self._cipher.decrypt(blob))
+            if int(doc.get("v", 0)) < 3:
+                raise SnapshotIntegrityError(
+                    "snapshot payload predates v3 (no token_uri/content_id) "
+                    "— the live check cannot compare CIDs over it; rebuild "
+                    "with /snapshot")
             entries = []
             for raw in doc["entries"]:
                 # chain is REQUIRED (v2) — a chainless payload is a v1
                 # store from before the multi-chain fix: fail closed and
                 # rebuild rather than guess a chain into the commitment.
+                # token_uri/content_id REQUIRED (v3) for the same reason.
                 entry = SnapshotEntry(
                     chain=raw["chain"],
                     contract=raw["contract"], token_id=int(raw["tokenId"]),
@@ -159,6 +180,7 @@ class SnapshotStore:
                     metadata=raw["metadata"],
                     metadata_sha256=raw["metadata_sha256"],
                     platform=raw.get("platform", ""),
+                    token_uri=raw["token_uri"], content_id=raw["content_id"],
                 )
                 if metadata_hash(entry.metadata) != entry.metadata_sha256:
                     raise SnapshotIntegrityError(
@@ -221,11 +243,20 @@ def snapshot_selector(snapshot: Snapshot, *,
         e = index.get((chain, contract.lower(), token_id))
         return e.metadata if e else None
 
+    def token_uri(chain: str, contract: str, token_id: int) -> str | None:
+        e = index.get((chain, contract.lower(), token_id))
+        return e.token_uri if e else None
+
+    # name_is_unique answers "in the pool" only: GLOBAL uniqueness is not a
+    # refresh verdict any more — select_judged (hunt.py) checks it on the
+    # drawn candidate, with decoys. The selector's slot stays for the live
+    # (non-snapshot) selector and the measurement scripts.
     return TargetSelector(
         source=SnapshotSource(snapshot, rng=rng),
         fetch_metadata=fetch_metadata,
         owner_is_eoa=lambda ch, c, t: (ch, c.lower(), t) in index or None,
         name_is_unique=lambda n, ch, c, t: (ch, c.lower(), t) in index or None,
+        token_uri=token_uri,
         max_attempts=max_attempts,
     )
 
@@ -294,6 +325,7 @@ class StratumRow:
     stratum: str
     entries: int
     writability_rate: float
+    uniqueness_rate: float
     effective: int
     share: float
 
@@ -315,12 +347,12 @@ class StratumGateReport:
     def render(self) -> str:
         """Operator-log table. Stratum names are labels, never target
         names — safe for Telegram."""
-        lines = [f"{'stratum':14} {'entries':>9} {'writ.':>6} "
+        lines = [f"{'stratum':14} {'entries':>9} {'writ.':>6} {'uniq.':>6} "
                  f"{'effective':>10} {'share':>6}"]
         for r in self.rows:
             lines.append(f"{r.stratum:14} {r.entries:>9,} "
-                         f"{r.writability_rate:>6.0%} {r.effective:>10,} "
-                         f"{r.share:>6.0%}")
+                         f"{r.writability_rate:>6.0%} {r.uniqueness_rate:>6.0%} "
+                         f"{r.effective:>10,} {r.share:>6.0%}")
         lines.append(f"TOTAL effective: {self.total_effective:,} — "
                      f"{self.verdict}: {self.detail}")
         return "\n".join(lines)
@@ -341,15 +373,20 @@ def _age_days(built_at: str, now_iso: str) -> float | None:
 def stratum_gate(snapshot: Snapshot,
                  writability_rates: dict[str, float],
                  *,
+                 uniqueness_rates: dict[str, float],
                  cap_exempt: frozenset[str] = frozenset(),
                  epoch: CurationEpoch | None = None,
                  now_iso: str | None = None) -> StratumGateReport:
     """Count the REAL pool per stratum (entries carry the platform slug the
     refresh stamped) and apply the gate: total >= GATE_GREEN_MIN, no stratum
     above GATE_MAX_STRATUM_SHARE of the effective pool. `writability_rates`
-    are the per-stratum sampled rates (measured 04-05/09; re-sampled per
-    epoch); a stratum with no measured rate fails closed at 0.0 — an
-    unmeasured stratum contributes nothing to a launch decision.
+    and `uniqueness_rates` are the per-stratum SAMPLED rates (writability
+    measured 04-05/09, uniqueness 66% on Foundation; re-sampled per epoch);
+    effective = entries x writability x uniqueness. Both dicts fail closed:
+    a stratum with no measured rate counts 0.0 — an unmeasured stratum
+    contributes nothing to a launch decision. `uniqueness_rates` is
+    keyword-REQUIRED so no caller can forget the second factor and inherit
+    a gate that is silently 1/0.66 too generous.
 
     The gate also verifies the snapshot it was HANDED (Opus review, 05/09):
     with `epoch` given, an epoch mismatch is RED — the selector would refuse
@@ -374,17 +411,18 @@ def stratum_gate(snapshot: Snapshot,
     rows = []
     total = 0
     for stratum, n in sorted(counts.items(), key=lambda kv: -kv[1]):
-        rate = writability_rates.get(stratum, 0.0)
-        eff = int(n * rate)
+        w = writability_rates.get(stratum, 0.0)
+        u = uniqueness_rates.get(stratum, 0.0)
+        eff = int(n * w * u)
         total += eff
-        rows.append((stratum, n, rate, eff))
+        rows.append((stratum, n, w, u, eff))
     full = []
     over = []
-    for stratum, n, rate, eff in rows:
+    for stratum, n, w, u, eff in rows:
         share = eff / total if total else 0.0
         full.append(StratumRow(stratum=stratum, entries=n,
-                               writability_rate=rate, effective=eff,
-                               share=share))
+                               writability_rate=w, uniqueness_rate=u,
+                               effective=eff, share=share))
         if share > GATE_HARD_STRATUM_SHARE:
             over.append(f"{stratum} (hard {GATE_HARD_STRATUM_SHARE:.0%})")
         elif share > GATE_MAX_STRATUM_SHARE and stratum not in cap_exempt:

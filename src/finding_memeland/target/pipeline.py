@@ -21,9 +21,9 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from .discovery import DiscoveryState, EraDiscovery
+from .discovery import DiscoveryState, EraDiscovery, ScanOutcome
 from .refresh import RefreshFailed, RefreshJob
-from .snapshot import CurationEpoch, Snapshot, StratumGateReport, stratum_gate
+from .snapshot import CurationEpoch, StratumGateReport, stratum_gate
 from .sources import ContractRegistry, epoch1_listers
 
 
@@ -78,7 +78,10 @@ class SnapshotPipeline:
     """discovery -> registry -> refresh(epoch-1 listers) -> snapshot ->
     stratum gate. Stores are the encrypted ports built earlier; refresh
     collaborators are the production adapters (chain metadata resolver,
-    EOA check, marketplace uniqueness)."""
+    EOA check). Marketplace uniqueness is NOT a refresh collaborator any
+    more (Opus, 06/09): it is checked at draw time (hunt.select_judged) and
+    enters here only as the sampled `uniqueness_rates` the gate multiplies
+    in."""
 
     def __init__(
         self,
@@ -88,11 +91,11 @@ class SnapshotPipeline:
         registry_store,           # RegistryStore
         snapshot_store,           # SnapshotStore
         rpcs: dict,               # chain -> ChainRpc (R1: nunca UM eth_call)
-        fetch_metadata,
+        fetch_token,
         owner_is_eoa,
-        name_is_unique,
         now_iso,
         writability_rates: dict[str, float],
+        uniqueness_rates: dict[str, float],
         cap_exempt: frozenset[str],
     ):
         self._discovery = discovery
@@ -100,24 +103,48 @@ class SnapshotPipeline:
         self._rstore = registry_store
         self._sstore = snapshot_store
         self._rpcs = dict(rpcs)
-        self._fetch_metadata = fetch_metadata
+        self._fetch_token = fetch_token
         self._owner_is_eoa = owner_is_eoa
-        self._name_is_unique = name_is_unique
         self._now_iso = now_iso
         self._rates = dict(writability_rates)
+        self._uniq_rates = dict(uniqueness_rates)
         self._cap_exempt = cap_exempt
 
     def run(self, epoch: CurationEpoch, *, scan_blocks: int = 300,
             rng: random.Random | None = None) -> PipelineReport:
+        """scan + refresh in one go (the weekly cron shape; tests)."""
+        outcome, registry = self.scan(scan_blocks, rng=rng)
+        return self.refresh(epoch, outcome=outcome, registry=registry)
+
+    def scan(self, n_blocks: int, *, rng: random.Random | None = None
+             ) -> tuple[ScanOutcome, ContractRegistry]:
+        """/scan: incremental discovery + classification into the reserved
+        registry. Slow and resumable; touches no snapshot. Separated from
+        /snapshot (Pedro, 06/09) because the scan is what runs for weeks and
+        the snapshot is what /launch consumes."""
         # 1) descoberta incremental
         state: DiscoveryState = self._dstore.load()
-        outcome = self._discovery.scan(state, scan_blocks, rng)
+        outcome = self._discovery.scan(state, n_blocks, rng)
         self._dstore.save(state)
 
         # 2) registo reservado
         registry: ContractRegistry = self._rstore.load() or ContractRegistry()
         self._discovery.classify_into(state, registry)
         self._rstore.save(registry)
+        return outcome, registry
+
+    def refresh(self, epoch: CurationEpoch, *,
+                outcome: ScanOutcome | None = None,
+                registry: ContractRegistry | None = None) -> PipelineReport:
+        """/snapshot: rebuild the curated pool from the epoch's listers over
+        the CURRENT registry and run the gate. With no scan in this call the
+        report's scan fields are zero and the canary flag is True (no scan
+        was attempted, so none was refused)."""
+        if registry is None:
+            registry = self._rstore.load() or ContractRegistry()
+        if outcome is None:
+            outcome = ScanOutcome(scanned=0, failed=0, canary_ok=True,
+                                  zero_mint_blocks=0)
 
         # 3) refresh sobre a composição da época 1. A CONSTRUÇÃO dos listers
         # fica dentro do mesmo try (Opus, 06/09): um RPC em falta ou ligado
@@ -137,9 +164,8 @@ class SnapshotPipeline:
                 ) from e
             job = RefreshJob(
                 listers=listers,
-                fetch_metadata=self._fetch_metadata,
+                fetch_token=self._fetch_token,
                 owner_is_eoa=self._owner_is_eoa,
-                name_is_unique=self._name_is_unique,
                 now_iso=self._now_iso,
             )
             snapshot, _refresh_report = job.build(epoch)
@@ -161,6 +187,7 @@ class SnapshotPipeline:
                                   scan_canary_ok=outcome.canary_ok,
                                   zero_mint_blocks=outcome.zero_mint_blocks)
         gate = stratum_gate(snapshot, self._rates,
+                            uniqueness_rates=self._uniq_rates,
                             cap_exempt=self._cap_exempt,
                             epoch=epoch, now_iso=self._now_iso())
         return PipelineReport(blocks_scanned=outcome.scanned,

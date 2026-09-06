@@ -38,6 +38,8 @@ from .hunt import (
     ACT_HOLD,
     ACT_PAY_NOTED,
     ACT_RELAUNCH,
+    LIVE_BURNED,
+    LIVE_MUTATED,
     LIVE_UNAVAILABLE,
     PHASE_CLAIM,
     PHASE_PUZZLE,
@@ -77,6 +79,13 @@ class TargetPorts:
     live_check: LiveCheck | None = None       # None = no live checks (sim only)
     resolve_link: Callable[[str], object] | None = None
     spray: SprayDetector | None = None
+    # The live METADATA HASH for a void/pay-noted post — resolved ONCE, at
+    # that moment, through any gateway (the hunt is over or decided; the
+    # repeated live check never touches a gateway — hunt.LiveCheck). None
+    # = unresolvable, printed as such. Optional: sims and dry-runs omit it.
+    live_hash: Callable[[SealedTarget], "str | None"] | None = None
+    # How many redraws the content guard may force before /launch refuses.
+    max_content_redraws: int = 3
     # HOLD ceiling and cadence (Opus, 06/09, P1-B): a hold without a ceiling
     # and without a second notice is a void in slow motion with nobody
     # watching. Re-notify every `hold_renotify_s`; past `max_hold_s` the
@@ -130,8 +139,26 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
     # has no `recent_target_voids` yet.
     exclude = recent_void_ids(orch) | frozenset(
         [x for x in [getattr(orch, "_last_target_void_id", None)] if x])
-    sealed = ports.preparer.prepare(ports.epoch, exclude=exclude)
-    image_description = ports.describe_image(sealed)
+    # The content guard lives on the image pass (Opus, 06/09): a refused
+    # artwork excludes its id and the draw runs again — bounded, so a pool
+    # full of refusals refuses the launch instead of grinding.
+    from .clues import ContentRefused
+    from .hunt import LaunchRefused
+    refused = 0
+    while True:
+        sealed = ports.preparer.prepare(ports.epoch, exclude=exclude)
+        try:
+            image_description = ports.describe_image(sealed)
+            break
+        except ContentRefused as e:
+            refused += 1
+            exclude = exclude | frozenset({e.target_id})
+            orch._notify(f"content guard refused a drawn artwork ({refused}) "
+                         "— redrawing (id excluded, never named)")
+            if refused >= ports.max_content_redraws:
+                raise LaunchRefused(
+                    f"content guard refused {refused} draws in a row — "
+                    "launch refused; review the judge/pool before retrying")
     ctx = TargetClueContext.from_target(sealed.target,
                                         image_description=image_description)
 
@@ -324,11 +351,22 @@ def claim_time_live_check(orch, hunt) -> str:
     manage_hold(orch, hunt, holding=False, reason="")
     if action == ACT_PAY_NOTED:
         hunt.target_pay_noted = True
-        hunt.target_live_hash = verdict.live_metadata_sha256
+        hunt.target_live_hash = _live_hash(orch, hunt.target)
+        hunt.target_live_token_uri = verdict.live_token_uri
         orch._notify("⚠️ target mutated/burned AFTER the winning claim — paying "
                      "anyway (identity binds, not ownership); noted in the reveal.")
         return "pay_noted"
     return "ok"
+
+
+def _live_hash(orch, sealed: SealedTarget) -> str | None:
+    ports: TargetPorts = orch._target
+    if ports.live_hash is None:
+        return None
+    try:
+        return ports.live_hash(sealed)
+    except Exception:  # noqa: BLE001 — unresolvable is a valid answer here
+        return None
 
 
 def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
@@ -339,12 +377,17 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
 
     sealed: SealedTarget = hunt.target
     ing = (void_reveal_ingredients(sealed, live) if live is not None
-           else {"live_metadata_sha256": None})
+           else {"live_token_uri": None})
+    # the live hash: once, now, through any gateway — the hunt is over
+    live_hash = (_live_hash(orch, sealed)
+                 if cause in (LIVE_MUTATED, LIVE_BURNED) else None)
     text = void_reveal(VoidRevealData(
         hunt_n=hunt.number, cause=cause,
         target_name_onchain=sealed.target.name_onchain,
         target_id=sealed.id(), metadata_sha256=sealed.target.metadata_sha256,
-        salt=sealed.salt, live_metadata_sha256=ing.get("live_metadata_sha256"),
+        salt=sealed.salt, live_metadata_sha256=live_hash,
+        token_uri=sealed.target.token_uri,
+        live_token_uri=ing.get("live_token_uri"),
         relaunching=relaunching,
     ))
     orch._notify(f"hunt #{hunt.number} VOID ({cause})"
@@ -416,6 +459,8 @@ def reveal_text(orch, hunt, winner, receipt, *, time_to_win: str,
         non_holder_pct=orch._non_holder_pct,
         live_metadata_sha256=getattr(hunt, "target_live_hash", None),
         mutated_after_claim=bool(getattr(hunt, "target_pay_noted", False)),
+        token_uri=sealed.target.token_uri,
+        live_token_uri=getattr(hunt, "target_live_token_uri", None),
     ))
 
 

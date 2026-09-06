@@ -1,0 +1,10 @@
+{
+ "_meta": {
+  "url": "https://ipfs.4everland.io/ipfs/QmcsepfMDFh2udUQWtvcnZeARNFFCPA1n2WRWUH1ysWv4W/metadata.json",
+  "status": 0,
+  "captured_at": "2026-09-06T22:16:24.165181+00:00",
+  "cid": "QmcsepfMDFh2udUQWtvcnZeARNFFCPA1n2WRWUH1ysWv4W/metadata.json",
+  "truncated": false
+ },
+ "body": "TimeoutError: The read operation timed out"
+}

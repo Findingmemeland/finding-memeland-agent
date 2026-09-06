@@ -37,12 +37,17 @@ here:
    we don't need. Here: the cipher is injected, and the sealed target's
    repr never shows contents.
 
-4. LIVE CHECK PER CLUE, NEVER SINGLING THE TARGET OUT. One tokenURI read
-   per published clue buys days of warning instead of a claim-time
-   surprise — but a lone read of THAT token tells the RPC and the gateway
-   which one it is, exactly when that is worth money. So the read goes in
-   a BATCH with decoys, via generic RPC and public IPFS gateway, never an
-   API carrying our key. THE DECOYS ARE DRAWN ONCE, AT SEAL TIME, AND
+4. LIVE CHECK PER CLUE, NEVER SINGLING THE TARGET OUT. One tokenURI +
+   ownerOf read per published clue buys days of warning instead of a
+   claim-time surprise — but a lone read of THAT token tells the RPC which
+   one it is, exactly when that is worth money. So the read goes in a
+   BATCH with decoys, via PUBLIC RPC ONLY — no gateway, no key. NO GATEWAY
+   IN THE REPEATED PATH (Opus, 06/09, measured: one public gateway in 13
+   works): the verdict compares CONTENT IDS (CID + path), because for
+   content-addressed metadata same CID ⇒ same bytes; a single gateway
+   seeing the same 8 tokens hunt after hunt would be P0-A one layer down,
+   with no fix at the logic level. Gateways appear only where reads do NOT
+   repeat: the image batch (once per hunt) and the refresh (everyone). THE DECOYS ARE DRAWN ONCE, AT SEAL TIME, AND
    STORED IN THE SEALED TARGET (Opus, 06/09, P0-A): decoys re-drawn per
    read are defeated by intersection — eight reads with fresh decoys and
    one constant token, and the anonymity set is 1 after three. One fixed
@@ -87,7 +92,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
-from .selector import CurationEpoch, SelectionRefused, Target, metadata_hash
+from .selector import CurationEpoch, SelectionRefused, Target
 from .snapshot import Snapshot, SnapshotStore, snapshot_selector, stratum_gate
 from .sources import ChainUnavailable
 
@@ -149,7 +154,7 @@ class SealedTargetCipher:
 
     def seal(self, s: SealedTarget) -> str:
         t = s.target
-        doc = {"v": 3, "salt": s.salt, "commitment": s.commitment,
+        doc = {"v": 4, "salt": s.salt, "commitment": s.commitment,
                "decoys": [[d.chain, d.contract, d.token_id, d.image]
                           for d in s.decoys],
                "target": {"chain": t.chain, "contract": t.contract,
@@ -157,14 +162,16 @@ class SealedTargetCipher:
                           "name_onchain": t.name_onchain,
                           "description": t.description, "image": t.image,
                           "metadata_sha256": t.metadata_sha256,
-                          "epoch": t.epoch}}
+                          "epoch": t.epoch,
+                          "token_uri": t.token_uri, "content_id": t.content_id}}
         return self._cipher.encrypt(json.dumps(doc, ensure_ascii=False))
 
     def unseal(self, blob: str) -> SealedTarget:
         try:
             doc = json.loads(self._cipher.decrypt(blob))
-            if doc.get("v") != 3:
-                raise ValueError("not a v3 sealed target (decoys missing)")
+            if doc.get("v") != 4:
+                raise ValueError("not a v4 sealed target (token_uri/content_id "
+                                 "missing — the live check compares CIDs)")
             t = doc["target"]
             target = Target(chain=t["chain"], contract=t["contract"],
                             token_id=int(t["token_id"]), name=t["name"],
@@ -172,7 +179,8 @@ class SealedTargetCipher:
                             description=t.get("description", ""),
                             image=t.get("image", ""),
                             metadata_sha256=t["metadata_sha256"],
-                            epoch=t["epoch"])
+                            epoch=t["epoch"],
+                            token_uri=t["token_uri"], content_id=t["content_id"])
             decoys = tuple(Decoy(chain=c, contract=a, token_id=int(i), image=im)
                            for c, a, i, im in doc["decoys"])
             sealed = SealedTarget(target=target, salt=doc["salt"],
@@ -239,24 +247,97 @@ def judge_in_batch(judge: BatchJudge, target: Target, decoys: Sequence[Target],
     return verdicts[pos]
 
 
+# name_is_unique(base, chain, contract, token_id) -> bool | None — the
+# marketplace uniqueness check (search_guard.MarketNameUniqueness). Moved
+# OUT of the refresh (Opus, 06/09, 5/6 review): quota-priced, ~66% pass,
+# irrelevant for every entry never drawn — so it is applied lazily here,
+# like the judge, and the gate carries its sampled rate per stratum.
+NameIsUnique = Callable[[str, str, str, int], "bool | None"]
+
+
+def uniqueness_in_batch(check: NameIsUnique, target: Target,
+                        decoys: Sequence[Target],
+                        rng: random.Random) -> bool | None:
+    """Ask the marketplace about the target's name INSIDE a shuffled batch of
+    decoy names — one search per name, the decoys' answers discarded. The
+    refresh used to search everyone's name (a diffuse leak); a draw-time
+    check that searched ONLY the candidate's name would hand the marketplace
+    the target by name before any player has a clue. So the decoy rule
+    applies here exactly as it does to the judge: the candidate varies
+    across draws ⇒ decoys must be FRESH per call (n+1, re-sampled). Every
+    name in the batch is searched even after the target's answer is known —
+    an early exit would make the target the name after which the calls
+    stop. A transport failure on the target's own search is None
+    (unverifiable, fail-closed); a decoy's failure is noise."""
+    batch = list(decoys) + [target]
+    rng.shuffle(batch)
+    verdict: bool | None = None
+    for t in batch:
+        try:
+            r = check(t.name, t.chain, t.contract, t.token_id)
+        except Exception:  # noqa: BLE001 — unverifiable, never approved
+            r = None
+        if t.id() == target.id():
+            verdict = r
+    return verdict
+
+
+def ghost_call(judge: BatchJudge, name_is_unique: NameIsUnique,
+               draw_decoys: Callable[[str], list[Target]],
+               rng: random.Random) -> None:
+    """The dummy call after the accept (Opus, 06/09): one extra batch to
+    the judge and one extra batch of name searches, all decoys, results
+    discarded. Both providers share the residual 'the target is in the
+    LAST batch' — this takes away their certainty of which batch was
+    last. Best-effort: a failing ghost never blocks the launch (the target
+    is already accepted), it only fails to hide."""
+    a = draw_decoys("")
+    b = draw_decoys("")
+    seen: set[str] = set()
+    batch: list[Target] = []
+    for t in a + b:
+        if t.id() not in seen:
+            seen.add(t.id())
+            batch.append(t)
+        if len(batch) == len(a) + 1:
+            break
+    if not batch:
+        return
+    rng.shuffle(batch)
+    try:
+        judge(batch)
+    except Exception:  # noqa: BLE001 — cosmetic
+        pass
+    for t in batch:
+        try:
+            name_is_unique(t.name, t.chain, t.contract, t.token_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def select_judged(selector, epoch: CurationEpoch, *,
-                  judge: BatchJudge, draw_decoys: Callable[[str], list[Target]],
+                  judge: BatchJudge, name_is_unique: NameIsUnique,
+                  draw_decoys: Callable[[str], list[Target]],
                   rng: random.Random,
                   exclude: frozenset[str] = frozenset(),
                   max_draws: int = 12) -> Target:
     """select_writable v2: draw until a target passes BOTH halves of the
-    judge, each verdict obtained inside a FRESH decoy batch (`draw_decoys(
-    exclude_id)` is called once per candidate and RE-SAMPLES around the
-    candidate, so the batch is always exactly n+1 — a filtered sample would
-    make the anonymity set's size vary; its result is discarded after the
-    call).
+    judge AND the marketplace uniqueness check, each verdict obtained inside
+    a FRESH decoy batch (`draw_decoys(exclude_id)` is called once per
+    check and RE-SAMPLES around the candidate, so the batch is always
+    exactly n+1 — a filtered sample would make the anonymity set's size
+    vary; its result is discarded after the call).
+
+    Cost order: the judge first (one LLM call per batch), uniqueness only
+    for what the judge approved (n+1 marketplace searches per batch) — a
+    handful of calls per hunt instead of tens of thousands per refresh.
 
     Residual, recorded not removed (Opus, 06/09): the judge returns
     verdicts, and the target is necessarily among the ones it approved —
     at ~50% writability the effective anonymity of the last batch is ~1/4,
     not 1/8. Inherent to asking. A dummy call after the accept would deny
     the provider the certainty of which batch was last, at the cost of one
-    call; not done today.
+    call; not done today. The same residual holds for the marketplace.
     None rejects the draw — fail-closed. `exclude` holds target ids that
     must not be drawn again (a relaunch after a mid-puzzle mutation
     excludes the voided target)."""
@@ -264,13 +345,19 @@ def select_judged(selector, epoch: CurationEpoch, *,
         target = selector.select(epoch)
         if target.id() in exclude:
             continue
-        decoys = draw_decoys(target.id())
-        v = judge_in_batch(judge, target, decoys, rng)
-        if v is not None and v.writable and v.content_ok:
+        v = judge_in_batch(judge, target, draw_decoys(target.id()), rng)
+        if not (v is not None and v.writable and v.content_ok):
+            continue
+        # fresh decoys again: a batch reused across two providers is still
+        # one batch per candidate, but re-sampling costs nothing and keeps
+        # the rule mechanical — every call, its own sample
+        if uniqueness_in_batch(name_is_unique, target,
+                               draw_decoys(target.id()), rng) is True:
+            ghost_call(judge, name_is_unique, draw_decoys, rng)
             return target
     raise SelectionRefused(
-        f"no target passed the judge in {max_draws} draws — writability "
-        "certification looks stale or the judge is unreachable; re-measure "
+        f"no target passed judge + uniqueness in {max_draws} draws — the "
+        "certified rates look stale or a provider is unreachable; re-measure "
         "before launching (fail-closed)")
 
 
@@ -281,15 +368,19 @@ class TargetHuntPreparer:
 
     def __init__(self, *, snapshot_store: SnapshotStore,
                  writability_rates: dict[str, float],
+                 uniqueness_rates: dict[str, float],
                  cap_exempt: frozenset[str],
                  judge: BatchJudge,
+                 name_is_unique: NameIsUnique,
                  now_iso: Callable[[], str],
                  decoys: int = 7,
                  rng: random.Random | None = None):
         self._store = snapshot_store
         self._rates = dict(writability_rates)
+        self._uniq_rates = dict(uniqueness_rates)
         self._cap_exempt = cap_exempt
         self._judge = judge
+        self._name_is_unique = name_is_unique
         self._now_iso = now_iso
         self._n_decoys = decoys
         self._rng = rng or random.SystemRandom()
@@ -304,16 +395,20 @@ class TargetHuntPreparer:
     def prepare(self, epoch: CurationEpoch, *,
                 exclude: frozenset[str] = frozenset()) -> SealedTarget:
         snap = self.load_snapshot()
-        gate = stratum_gate(snap, self._rates, cap_exempt=self._cap_exempt,
+        gate = stratum_gate(snap, self._rates,
+                            uniqueness_rates=self._uniq_rates,
+                            cap_exempt=self._cap_exempt,
                             epoch=epoch, now_iso=self._now_iso())
         if gate.verdict != "GREEN":
             raise LaunchRefused("gate is not GREEN — launch refused\n"
                                 + gate.render())
         selector = snapshot_selector(snap, rng=self._rng)
-        # judge: FRESH decoys per candidate (decoy rule); sealed batch: drawn
-        # ONCE after the target is known, fixed for the hunt's repeated reads
+        # judge + uniqueness: FRESH decoys per call (decoy rule); sealed
+        # batch: drawn ONCE after the target is known, fixed for the hunt's
+        # repeated reads
         target = select_judged(
             selector, epoch, judge=self._judge,
+            name_is_unique=self._name_is_unique,
             draw_decoys=lambda tid: self._draw_decoys(snap, epoch, exclude_id=tid),
             rng=self._rng, exclude=exclude)
         salt = generate_salt()
@@ -338,7 +433,8 @@ class TargetHuntPreparer:
                        name=e.name, name_onchain=e.name_onchain,
                        description=str(e.metadata.get("description") or "")[:600],
                        image=str(e.metadata.get("image") or ""),
-                       metadata_sha256=e.metadata_sha256, epoch=epoch.epoch_id)
+                       metadata_sha256=e.metadata_sha256, epoch=epoch.epoch_id,
+                       token_uri=e.token_uri, content_id=e.content_id)
                 for e in picks]
 
 
@@ -359,54 +455,75 @@ ACT_HOLD = "hold"                  # transport: operator notified, no decision
 
 
 @dataclass(frozen=True)
+class LiveRead:
+    """One RPC-only read of a token: its tokenURI (None when the call
+    reverts) and its owner (None when ownerOf reverts — the BURN signal;
+    Opus, 06/09: some contracts keep answering tokenURI for burned tokens,
+    so the burn is confirmed on ownerOf, same batch, same provider)."""
+
+    token_uri: str | None
+    owner: str | None
+
+
+@dataclass(frozen=True)
 class LiveVerdict:
     status: str
-    live_metadata_sha256: str | None   # None when burned/unavailable
+    live_token_uri: str | None          # None when burned/unavailable
     reads: int                          # batch size incl. decoys
+    live_content_id: str | None = None
 
     def render(self) -> str:            # Telegram-safe
         return f"live check: {self.status} ({self.reads} reads in batch)"
 
 
 class LiveCheck:
-    """`fetch_metadata_generic(chain, contract, token_id) -> dict | None`
-    goes through a GENERIC RPC and a PUBLIC IPFS gateway — never an API
-    with our key. It returns None when tokenURI/ownerOf revert (burn) or
-    metadata cannot be resolved, and raises ChainUnavailable on transport
-    trouble. The target read is shuffled into the hunt's SEALED decoy
-    batch (decision 4 + P0-A): the same batch on every read, reshuffled in
-    order only, so the intersection of all reads is the whole batch. This
-    is the "target fixed ⇒ decoys fixed" half of the decoy rule; the judge
-    is the other half (candidate varies ⇒ decoys vary)."""
+    """`read_live(chain, contract, token_id) -> LiveRead` goes through a
+    PUBLIC RPC only — tokenURI + ownerOf, never a gateway, never a key —
+    and raises ChainUnavailable on transport trouble.
 
-    def __init__(self, *, fetch_metadata_generic,
-                 rng: random.Random | None = None):
-        self._fetch = fetch_metadata_generic
+    The verdict compares CONTENT IDS, not strings (Opus, 06/09): for a
+    content-addressed URI, same CID ⇒ same bytes, so no gateway needs to
+    fetch anything in the repeated path — the only path a single working
+    gateway would otherwise see hunt after hunt (P0-A one layer down). A
+    gateway migration with the same CID is INTACT; a different CID, or a
+    URI that stopped being content-addressed, is MUTATED; ownerOf reverting
+    is BURNED. The live metadata hash for the void post is computed by the
+    caller, once, at void time, through any gateway (the hunt is over).
+
+    The target read is shuffled into the hunt's SEALED decoy batch (decision
+    4 + P0-A): the same batch on every read, reshuffled in order only."""
+
+    def __init__(self, *, read_live, rng: random.Random | None = None):
+        self._read = read_live
         self._rng = rng or random.SystemRandom()
 
     def check(self, sealed: SealedTarget) -> LiveVerdict:
+        from .refresh import content_id
         t = sealed.target
+        if not t.content_id:
+            raise ValueError("sealed target has no content_id — a v3 snapshot "
+                             "is required for the live check (fail-closed)")
         me = (t.chain, t.contract.lower(), t.token_id)
         batch = sealed.batch_keys()
         self._rng.shuffle(batch)
         result: LiveVerdict | None = None
         for chain, contract, tid in batch:
             try:
-                meta = self._fetch(chain, contract, tid)
+                read = self._read(chain, contract, tid)
             except ChainUnavailable:
                 if (chain, contract.lower(), tid) == me:
                     result = LiveVerdict(LIVE_UNAVAILABLE, None, len(batch))
                 continue                     # a decoy's outage is noise
-            except Exception:  # noqa: BLE001 — revert path for a decoy
-                meta = None
+            except Exception:  # noqa: BLE001 — a decoy's adapter quirk
+                read = None
             if (chain, contract.lower(), tid) != me:
                 continue                     # decoy results are discarded
-            if not isinstance(meta, dict) or not meta:
+            if read is None or read.owner is None:
                 result = LiveVerdict(LIVE_BURNED, None, len(batch))
-            else:
-                h = metadata_hash(meta)
-                status = LIVE_INTACT if h == t.metadata_sha256 else LIVE_MUTATED
-                result = LiveVerdict(status, h, len(batch))
+                continue
+            live_cid = content_id(read.token_uri)
+            status = LIVE_INTACT if live_cid == t.content_id else LIVE_MUTATED
+            result = LiveVerdict(status, read.token_uri, len(batch), live_cid)
         if result is None:                   # cannot happen: target is in batch
             raise RuntimeError("live check produced no verdict for the target")
         return result
@@ -484,13 +601,15 @@ def void_reveal_ingredients(sealed: SealedTarget,
                             live: LiveVerdict) -> dict:
     """Everything the void announcement publishes (commitment.py: a void is
     as verifiable as a win): target id, committed hash, salt, commitment,
-    and the live hash (None = burned: tokenURI no longer resolves)."""
+    the sealed tokenURI and the live one (None = burned/unavailable). The
+    live metadata hash is resolved by the caller at void time."""
     return {
         "target_id": sealed.id(),
         "metadata_sha256": sealed.target.metadata_sha256,
         "salt": sealed.salt,
         "commitment": sealed.commitment,
-        "live_metadata_sha256": live.live_metadata_sha256,
+        "token_uri": sealed.target.token_uri,
+        "live_token_uri": live.live_token_uri,
         "cause": live.status,
     }
 

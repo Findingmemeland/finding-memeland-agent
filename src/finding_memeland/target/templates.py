@@ -93,15 +93,20 @@ def _split_id(target_id: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def commitment_block(*, target_id: str, metadata_sha256: str, salt: str) -> str:
+def commitment_block(*, target_id: str, metadata_sha256: str, salt: str,
+                     token_uri: str = "") -> str:
     """How anyone recomputes the v2 commitment. The id is printed SPLIT
     (X link-render trap); the metadata hash is explained so the second
-    check — the mutation check — can be run against the live token."""
+    check — the mutation check — can be run against the live token. The
+    tokenURI sealed at launch is printed when known (v3): it is what the
+    live check compared by content id."""
     chain, contract, token = _split_id(target_id)
     id_lines = (
         f"  chain: {chain}\n  contract: {contract}\n  tokenId: {token}\n"
         if contract else f"  target_id: {target_id}\n"
     )
+    if token_uri:
+        id_lines += f"  tokenURI at launch: {token_uri}\n"
     return (
         "Commitment check (v2) — recompute SHA-256 of "
         "target_id + metadata_sha256 + salt, one string, utf-8.\n"
@@ -139,6 +144,8 @@ class TargetWinnerData:
     # hunt.ACT_PAY_NOTED: the token changed after the claim — noted, paid.
     live_metadata_sha256: str | None = None
     mutated_after_claim: bool = False
+    token_uri: str = ""                   # sealed at launch (v3)
+    live_token_uri: str | None = None     # what the chain answered later
 
 
 def target_winner_announcement(d: TargetWinnerData) -> str:
@@ -160,10 +167,13 @@ def target_winner_announcement(d: TargetWinnerData) -> str:
         "owner; we never touched it. The prize was on Base; the treasure "
         "was wherever it was.\n\n"
         + commitment_block(target_id=d.target_id,
-                           metadata_sha256=d.metadata_sha256, salt=d.salt)
+                           metadata_sha256=d.metadata_sha256, salt=d.salt,
+                           token_uri=d.token_uri)
         + (
             "\n\nnote: the token's metadata changed AFTER the winning claim "
-            f"(live metadata_sha256 now {d.live_metadata_sha256 or 'unresolvable'}). "
+            f"(live metadata_sha256 now {d.live_metadata_sha256 or 'unresolvable'}"
+            + (f"; live tokenURI {d.live_token_uri}" if d.live_token_uri else "")
+            + "). "
             "the winner found the right token — the commitment binds the "
             "token's identity and its metadata at launch, never who owns it "
             "or what a third party does to it later. prize paid in full."
@@ -189,13 +199,16 @@ class VoidRevealData:
     salt: str
     live_metadata_sha256: str | None = None   # None = burned/unresolvable
     relaunching: bool = False                 # puzzle-phase: fresh hunt follows
+    token_uri: str = ""                       # sealed at launch (v3)
+    live_token_uri: str | None = None         # what the chain answered at the void
 
 
 _CAUSE_LINE = {
-    "mutated": "the target's metadata was changed by its owner mid-hunt, so "
-               "the commitment can no longer be verified live",
-    "burned": "the target was burned mid-hunt — its tokenURI no longer "
-              "resolves, so the live check cannot be computed",
+    "mutated": "the target's tokenURI was changed by its owner mid-hunt "
+               "(different content), so the commitment can no longer be "
+               "verified live",
+    "burned": "the target was burned mid-hunt — ownerOf no longer resolves, "
+              "so the live check cannot be computed",
     "unclaimed": "nobody found it before the deadline",
 }
 
@@ -209,13 +222,16 @@ def void_reveal(d: VoidRevealData) -> str:
     live = (f"  live metadata_sha256: {d.live_metadata_sha256}\n"
             if d.live_metadata_sha256 else
             "  live metadata_sha256: unresolvable (tokenURI reverts)\n")
+    if d.live_token_uri:
+        live += f"  live tokenURI: {d.live_token_uri}\n"
     return (
         f"Hunt #{d.hunt_n} is void — {cause}.\n"
         "The prize goes back to the vault. Nobody loses anything they had.\n\n"
         f"The treasure was “{d.target_name_onchain}”. Here is everything, "
         "so you can check us:\n\n"
         + commitment_block(target_id=d.target_id,
-                           metadata_sha256=d.metadata_sha256, salt=d.salt)
+                           metadata_sha256=d.metadata_sha256, salt=d.salt,
+                           token_uri=d.token_uri)
         + ("\n" + live if d.cause != "unclaimed" else "\n")
         + (
             "\na new hunt, with a new treasure, starts shortly. same prize."

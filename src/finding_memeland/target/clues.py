@@ -144,19 +144,39 @@ class ImageUnavailable(RuntimeError):
     never launch on hope."""
 
 
+class ContentRefused(RuntimeError):
+    """The image failed the content guard (NSFW, gore, hate symbols, stolen
+    famous art, scam). Carries the target id so the caller EXCLUDES it and
+    draws again — the message never carries a name."""
+
+    def __init__(self, target_id: str, reason: str = ""):
+        super().__init__("content guard refused the artwork")
+        self.target_id = target_id
+        self.reason = reason[:160]
+
+
 def describe_image_batched(*, target_image_url: str,
                            decoy_image_urls: Sequence[str],
                            fetch_bytes_generic: Callable[[str], bytes | None],
                            describe: Callable[[bytes], str],
                            decoys: int = 7,
-                           rng: random.Random | None = None) -> str:
+                           rng: random.Random | None = None,
+                           content_ok: Callable[[bytes], "bool | None"] | None = None,
+                           target_id: str = "") -> str:
     """Fetch the target's image inside a shuffled batch of decoy images (from
     snapshot entries) through a generic public gateway, then describe ONLY
     the target's bytes with the vision callable (our own provider, our own
     key — that is fine; it is the marketplace/gateway that must not learn
     the target). Decoy fetch results are discarded; a decoy failure is
     noise. Raises ImageUnavailable when the target's bytes cannot be
-    fetched or the description is empty."""
+    fetched or the description is empty.
+
+    CONTENT GUARD (Opus, 06/09): text cannot see NSFW or stolen art, and
+    this is the one place the target's IMAGE is already in hand, inside a
+    batch that already exists — so `content_ok(bytes)` runs here, on the
+    same bytes, zero extra reads. False → ContentRefused(target_id) (the
+    caller excludes and redraws); None (vision unreachable) → fail-closed,
+    ImageUnavailable. The batched text judge keeps writability."""
     rng = rng or random.SystemRandom()
     others = [u for u in decoy_image_urls if u and u != target_image_url]
     batch = rng.sample(others, min(decoys, len(others))) + [target_image_url]
@@ -172,6 +192,13 @@ def describe_image_batched(*, target_image_url: str,
     if not target_bytes:
         raise ImageUnavailable("artwork bytes unavailable via the generic "
                                "gateway — not launching without the art")
+    if content_ok is not None:
+        verdict = content_ok(target_bytes)
+        if verdict is None:
+            raise ImageUnavailable("content guard unreachable — not launching "
+                                   "on an unchecked artwork (fail-closed)")
+        if verdict is False:
+            raise ContentRefused(target_id)
     text = (describe(target_bytes) or "").strip()
     if not text:
         raise ImageUnavailable("vision returned an empty description")

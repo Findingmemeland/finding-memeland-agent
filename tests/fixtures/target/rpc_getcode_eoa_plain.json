@@ -1,0 +1,13 @@
+{
+ "_meta": {
+  "url": "https://eth-mainnet.g.alchemy.com/v2/<key>",
+  "status": 200,
+  "captured_at": "2026-09-06T22:15:52.590550+00:00",
+  "note": "0x…dEaD — sem código"
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0x"
+ }
+}

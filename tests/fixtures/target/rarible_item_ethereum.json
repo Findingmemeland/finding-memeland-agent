@@ -1,0 +1,12 @@
+{
+ "_meta": {
+  "url": "https://api.rarible.org/v0.1/items/ETHEREUM:0x3b3ee1931dc30c1957379fac9aba94d1c48a5405:42",
+  "status": 429,
+  "captured_at": "2026-09-06T22:06:17.957848+00:00",
+  "chain": "ETHEREUM"
+ },
+ "body": {
+  "code": "UNAUTHORIZED",
+  "message": "Request limit reached, visit https://api.rarible.org/dashboard to increase your limit"
+ }
+}

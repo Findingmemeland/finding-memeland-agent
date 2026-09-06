@@ -235,13 +235,20 @@ def snap_with_strata(counts: dict[str, int]) -> Snapshot:
     return Snapshot(epoch_id="e1", built_at="t", entries=entries)
 
 
+# Uniqueness follows writability's path (Opus 06/09): sampled per stratum,
+# multiplied in. 1.0 here keeps the writability arithmetic of the older tests
+# intact; the dedicated tests below exercise the second factor.
+UNIQ = {"foundation": 1.0, "superrare": 1.0, "tail": 1.0, "makersplace": 1.0,
+        "mystery": 1.0}
+
+
 def test_stratum_gate_green_and_per_stratum_rows():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 60_000, "superrare": 50_000,
                           "tail": 200_000})
     # a cauda domina (56%) mas é isenta do tecto: não-enumerável por
     # terceiros (racional do Opus 05/09) — isenção é configuração de época
-    rep = stratum_gate(s, {"foundation": 0.5, "superrare": 0.7, "tail": 0.35},
+    rep = stratum_gate(s, {"foundation": 0.5, "superrare": 0.7, "tail": 0.35}, uniqueness_rates=UNIQ,
                        cap_exempt=frozenset({"tail"}))
     assert rep.verdict == "GREEN"
     by = {r.stratum: r for r in rep.rows}
@@ -255,7 +262,7 @@ def test_stratum_gate_green_and_per_stratum_rows():
 def test_stratum_gate_concentration_cap_bites():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 300_000, "tail": 40_000})
-    rep = stratum_gate(s, {"foundation": 0.5, "tail": 0.5})
+    rep = stratum_gate(s, {"foundation": 0.5, "tail": 0.5}, uniqueness_rates=UNIQ)
     assert rep.verdict == "AMBER"
     assert "foundation" in rep.detail and "cap" in rep.detail
 
@@ -263,7 +270,7 @@ def test_stratum_gate_concentration_cap_bites():
 def test_stratum_gate_unmeasured_stratum_fails_closed():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 100_000, "mystery": 900_000})
-    rep = stratum_gate(s, {"foundation": 0.5})
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates=UNIQ)
     by = {r.stratum: r for r in rep.rows}
     assert by["mystery"].effective == 0        # sem taxa medida = 0, nunca +
     assert rep.total_effective == 50_000
@@ -275,7 +282,7 @@ def test_stratum_gate_hard_cap_binds_even_exempt_strata():
     erro dele."""
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"tail": 400_000, "foundation": 60_000})
-    rep = stratum_gate(s, {"tail": 0.5, "foundation": 0.5},
+    rep = stratum_gate(s, {"tail": 0.5, "foundation": 0.5}, uniqueness_rates=UNIQ,
                        cap_exempt=frozenset({"tail"}))
     assert rep.verdict == "AMBER"
     assert "hard" in rep.detail and "tail" in rep.detail
@@ -285,7 +292,7 @@ def test_stratum_gate_hard_cap_binds_even_exempt_strata():
 def test_stratum_gate_red_when_tiny():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 30_000})
-    rep = stratum_gate(s, {"foundation": 0.5})
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates=UNIQ)
     assert rep.verdict == "RED"
     assert "never loosen quality filters" in rep.detail
 
@@ -295,7 +302,7 @@ def test_stratum_gate_epoch_mismatch_is_red():
     recusar é mentira — época errada é RED."""
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 500_000})
-    rep = stratum_gate(s, {"foundation": 0.5},
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates=UNIQ,
                        epoch=CurationEpoch(epoch_id="e2"))
     assert rep.verdict == "RED"
     assert "época" in rep.detail
@@ -305,7 +312,7 @@ def test_stratum_gate_stale_snapshot_blocks_green():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 500_000})
     s.built_at = "2026-08-01T00:00:00Z"
-    rep = stratum_gate(s, {"foundation": 0.5},
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates=UNIQ,
                        epoch=CurationEpoch(epoch_id="e1"),
                        now_iso="2026-09-05T00:00:00Z")   # 35 dias > 14
     assert rep.verdict == "AMBER"
@@ -318,7 +325,7 @@ def test_stratum_gate_fresh_snapshot_stays_green():
                           "makersplace": 200_000})
     s.built_at = "2026-09-01T00:00:00Z"
     rep = stratum_gate(s, {"foundation": 0.5, "superrare": 0.5,
-                           "makersplace": 0.5},
+                           "makersplace": 0.5}, uniqueness_rates=UNIQ,
                        epoch=CurationEpoch(epoch_id="e1"),
                        now_iso="2026-09-05T00:00:00Z")   # 4 dias < 14
     assert rep.verdict == "GREEN"
@@ -327,7 +334,41 @@ def test_stratum_gate_fresh_snapshot_stays_green():
 def test_stratum_gate_unparseable_built_at_counts_as_stale():
     from finding_memeland.target.snapshot import stratum_gate
     s = snap_with_strata({"foundation": 500_000})    # built_at="t"
-    rep = stratum_gate(s, {"foundation": 0.5},
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates=UNIQ,
                        now_iso="2026-09-05T00:00:00Z")
     assert rep.verdict == "AMBER"
     assert "ilegível" in rep.detail
+
+
+def test_stratum_gate_multiplies_sampled_uniqueness_in():
+    """A unicidade saiu do refresh (60-80k chamadas/semana) e entrou no gate
+    como taxa amostrada por estrato — 66% medido na Foundation."""
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 100_000, "tail": 200_000})
+    rep = stratum_gate(s, {"foundation": 0.5, "tail": 0.5},
+                       uniqueness_rates={"foundation": 0.66, "tail": 0.9},
+                       cap_exempt=frozenset({"tail"}))
+    by = {r.stratum: r for r in rep.rows}
+    assert by["foundation"].effective == 33_000
+    assert by["foundation"].uniqueness_rate == 0.66
+    assert by["tail"].effective == 90_000
+    assert rep.total_effective == 123_000
+    assert "uniq." in rep.render() and "66%" in rep.render()
+
+
+def test_stratum_gate_unmeasured_uniqueness_fails_closed():
+    """Estrato com escrevibilidade medida mas SEM unicidade medida vale 0 —
+    o segundo factor tem a mesma disciplina que o primeiro."""
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 500_000})
+    rep = stratum_gate(s, {"foundation": 0.5}, uniqueness_rates={})
+    assert rep.rows[0].effective == 0
+    assert rep.verdict == "RED"
+
+
+def test_stratum_gate_uniqueness_rates_is_keyword_required():
+    import pytest
+    from finding_memeland.target.snapshot import stratum_gate
+    s = snap_with_strata({"foundation": 500_000})
+    with pytest.raises(TypeError):
+        stratum_gate(s, {"foundation": 0.5})

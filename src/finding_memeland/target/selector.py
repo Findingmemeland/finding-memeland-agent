@@ -116,6 +116,10 @@ class Target:
     image: str
     metadata_sha256: str
     epoch: str
+    # v3 (Opus, 06/09): raw tokenURI + canonical content id — the live check
+    # compares content_id (CID, transport stripped); the reveal prints both.
+    token_uri: str = ""
+    content_id: str = ""
 
     def id(self) -> str:
         """'base:0x…:5' — the value inside the integrity commitment, and the
@@ -195,12 +199,14 @@ class TargetSelector:
         fetch_metadata: Callable[[str, str, int], dict | None],
         owner_is_eoa: Callable[[str, str, int], bool | None],
         name_is_unique: Callable[[str, str, str, int], bool | None],
+        token_uri: Callable[[str, str, int], "str | None"] | None = None,
         max_attempts: int = 400,
     ):
         self._source = source
         self._fetch_metadata = fetch_metadata
         self._owner_is_eoa = owner_is_eoa
         self._name_is_unique = name_is_unique
+        self._token_uri = token_uri
         self._max_attempts = max_attempts
 
     def select(self, epoch: CurationEpoch) -> Target:
@@ -241,7 +247,11 @@ class TargetSelector:
             return None
         if self._name_is_unique(base, chain, contract, token_id) is not True:
             return None
+        uri = self._token_uri(chain, contract, token_id) if self._token_uri else None
+        from .refresh import content_id as _cid   # local: refresh imports selector
         return Target(
+            token_uri=uri or "",
+            content_id=_cid(uri) or "",
             chain=chain,
             contract=contract.lower(),
             token_id=token_id,

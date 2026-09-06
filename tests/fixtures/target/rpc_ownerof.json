@@ -1,0 +1,14 @@
+{
+ "_meta": {
+  "url": "https://eth-mainnet.g.alchemy.com/v2/<key>",
+  "status": 200,
+  "captured_at": "2026-09-06T22:15:52.018295+00:00",
+  "contract": "0x3B3ee1931Dc30C1957379FAC9aba94D1C48a5405",
+  "token_id": 1
+ },
+ "body": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0x000000000000000000000000a9468e128edf50bb2a5b8aa88565ec2a0cc3816b"
+ }
+}

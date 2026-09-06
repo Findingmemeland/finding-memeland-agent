@@ -21,6 +21,7 @@ from finding_memeland.target.commitment import compute_commitment_v2
 from finding_memeland.target.hunt import (
     JudgeVerdict,
     LiveCheck,
+    LiveRead,
     SealedTargetCipher,
     SprayDetector,
     SprayParams,
@@ -105,6 +106,7 @@ class World:
     """The snapshot, the live chain (metadata by key), and the rig."""
 
     def __init__(self, *, live_params=None):
+        from finding_memeland.target.refresh import content_id
         entries = []
         i = 0
         for plat in ("foundation", "superrare2", "makersplace"):
@@ -112,13 +114,18 @@ class World:
                 i += 1
                 meta = {"name": f"Whispering Harbor {i}", "image": f"ipfs://img{i}",
                         "description": "quiet"}
+                uri = f"ipfs://Qm{str(i).rjust(44, '1')}/metadata.json"
                 entries.append(SnapshotEntry(
                     chain="ethereum", contract=f"0x{i:040x}", token_id=i,
                     name="Whispering Harbor", name_onchain=f"Whispering Harbor {i}",
-                    metadata=meta, metadata_sha256=metadata_hash(meta), platform=plat))
+                    metadata=meta, metadata_sha256=metadata_hash(meta), platform=plat,
+                    token_uri=uri, content_id=content_id(uri)))
         self.snapshot = Snapshot(epoch_id="e1", built_at="2026-08-01T11:00:00Z",
                                  entries=entries)
-        self.live = {(e.chain, e.contract, e.token_id): dict(e.metadata) for e in entries}
+        # the live chain: key -> (token_uri, owner); None = burned. Tests
+        # mutate by swapping the URI (a new CID), burn by setting None.
+        self.live = {(e.chain, e.contract, e.token_id): (e.token_uri, "0xowner")
+                     for e in entries}
         self.down = False
         mem = MemStore()
         store = SnapshotStore(cipher=XorCipher(), read=mem.read, write=mem.write)
@@ -129,21 +136,25 @@ class World:
             self.fetches.append((chain, contract, tid))
             if self.down:
                 raise ChainUnavailable("rpc down")
-            return self.live.get((chain, contract, tid))
+            v = self.live.get((chain, contract, tid))
+            return LiveRead(v[0], v[1]) if v else LiveRead(None, None)
+        self.fetch_live = fetch_live
 
         self.control = FakeControl()
         self.ports = TargetPorts(
             epoch=EPOCH,
             preparer=TargetHuntPreparer(
                 snapshot_store=store, writability_rates=RATES,
+                uniqueness_rates={k: 1.0 for k in RATES},
                 cap_exempt=frozenset(),
                 judge=lambda batch: [JudgeVerdict(True, True) for _ in batch],
+                name_is_unique=lambda base, ch, c, t: True,
                 now_iso=lambda: "2026-08-01T12:00:00Z", rng=random.Random(0)),
             cipher=SealedTargetCipher(cipher=XorCipher()),
             clue_engine=None,                       # set below (rig's fake engine)
             describe_image=lambda sealed: "a lighthouse on a black rock",
-            live_check=LiveCheck(fetch_metadata_generic=fetch_live,
-                                 rng=random.Random(1)),
+            live_check=LiveCheck(read_live=fetch_live, rng=random.Random(1)),
+            live_hash=lambda sealed: "deadbeef" * 8,     # resolved once, at the void
             resolve_link=None,
             spray=SprayDetector(live_params or SprayParams()),
         )
@@ -194,6 +205,49 @@ def test_prepare_seals_the_row_and_clue_one_is_v2():
     # o operador vê estrutura, nunca o nome
     assert all("Whispering" not in m for m in w.rig.notifier.messages)
     assert hunt.state is HuntState.LIVE
+
+
+def test_content_guard_refusal_redraws_with_the_id_excluded_and_is_bounded():
+    """Opus 06/09: o content_ok vive na passagem de visão (a imagem já está
+    em mãos, dentro de um lote que já existe). Chumbo ⇒ novo sorteio com o
+    id em exclude; três chumbos seguidos ⇒ launch recusado, nunca moído."""
+    from finding_memeland.target.clues import ContentRefused
+    from finding_memeland.target.hunt import LaunchRefused
+    w = World()
+    seen: list[str] = []
+
+    def describe(sealed):
+        seen.append(sealed.id())
+        if len(seen) == 1:
+            raise ContentRefused(sealed.id(), "nsfw")
+        return "a lighthouse on a black rock"
+    w.ports.describe_image = describe
+    hunt = w.launch()
+    assert len(seen) == 2 and seen[0] != seen[1] and hunt.target.id() == seen[1]
+    assert any("content guard refused" in m for m in w.rig.notifier.messages)
+    assert all("Whispering" not in m for m in w.rig.notifier.messages)
+
+    w2 = World()
+    w2.ports.describe_image = lambda sealed: (_ for _ in ()).throw(
+        ContentRefused(sealed.id()))
+    with pytest.raises(LaunchRefused) as e:
+        w2.orch._prepare(200)
+    assert "content guard refused 3" in str(e.value)
+
+
+def test_void_post_publishes_sealed_and_live_token_uri():
+    """A anulação por mutação publica o tokenURI selado E o que a cadeia
+    respondeu — os dois, para o void ser tão verificável como a vitória."""
+    w = World()
+    hunt = w.launch()
+    t = hunt.target.target
+    new_uri = "ipfs://Qm" + "9" * 44 + "/metadata.json"
+    w.live[(t.chain, t.contract, t.token_id)] = (new_uri, "0xowner")
+    w.orch._clue_due_fn = lambda now: now
+    assert w.orch._claim_loop(hunt) is None
+    post = next(p for p in w.rig.publisher.posts if "is void" in p)
+    assert t.token_uri in post and new_uri in post
+    assert "deadbeef" in post                                # live hash, resolvido no void
 
 
 # --------------------------------------------------------------------------- #
@@ -302,7 +356,7 @@ def test_mutation_in_puzzle_phase_void_reveals_and_next_draw_excludes():
     w = World()
     hunt = w.launch()
     t = hunt.target.target
-    w.live[(t.chain, t.contract, t.token_id)] = {"name": "changed", "image": "ipfs://x"}
+    w.live[(t.chain, t.contract, t.token_id)] = ("ipfs://Qm" + "9" * 44 + "/metadata.json", "0xowner")
     w.orch._clue_due_fn = lambda now: now
     assert w.orch._claim_loop(hunt) is None
     assert hunt.state is HuntState.DONE
@@ -407,7 +461,7 @@ def test_spray_counts_one_piece_once_whatever_the_link_shape():
         post(3003, "103", f"ethereum:{c}:1", t0 + timedelta(minutes=1), hunt.reshare_post_id),
         post(3004, "104", f"ETH:{c}:1", t0 + timedelta(minutes=1), hunt.reshare_post_id),
         # links por resolver / paste sem cadeia NÃO entram no detector
-        post(3005, "105", f"https://foundation.app/@x/piece/1", t0 + timedelta(minutes=1), hunt.reshare_post_id),
+        post(3005, "105", "https://foundation.app/@x/piece/1", t0 + timedelta(minutes=1), hunt.reshare_post_id),
     ]
     w.orch._max_rounds = 3
     with pytest.raises(RuntimeError):
@@ -531,9 +585,9 @@ def test_oscillating_outage_trips_the_accumulated_hold_ceiling():
         cycle["n"] += 1
         if (cycle["n"] // 8) % 310 < 300:                   # 8 leituras por lote
             raise ChainUnavailable("flapping")
-        return w.live.get((chain, contract, tid))
+        return w.fetch_live(chain, contract, tid)
 
-    w.ports.live_check = LiveCheck(fetch_metadata_generic=flap, rng=random.Random(2))
+    w.ports.live_check = LiveCheck(read_live=flap, rng=random.Random(2))
     w.orch._max_rounds = 15 * 60                            # 15h a 60s/ciclo
     with pytest.raises(RuntimeError):
         w.orch._claim_loop(hunt)

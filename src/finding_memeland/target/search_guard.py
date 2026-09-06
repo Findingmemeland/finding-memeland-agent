@@ -189,6 +189,29 @@ class RaribleSearch:
         payload = json.loads(raw or "{}")
         return {str(item.get("id", "")) for item in payload.get("items", []) or []}
 
+    def named_items(self, text: str) -> list[tuple[str, str]]:
+        """NameSearch: the SAME request WITHOUT the blockchains filter (the
+        hunter's view — see the asymmetry note below), returning (id, name)
+        with the name read from `meta.name`. ⚠️ `meta.name` is the documented
+        field, pinned by fixture `rarible_search_named.json` once
+        scripts/capturar_target.py has captured it — the measured 2026-08-25
+        capture only pinned `items[].id`."""
+        body = json.dumps({
+            "size": self._size,
+            "filter": {"fullText": {"text": text}},
+        }).encode()
+        raw = self._post(f"{self._base}/items/search", body, {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-KEY": self._key,
+        })
+        payload = json.loads(raw or "{}")
+        out: list[tuple[str, str]] = []
+        for item in payload.get("items", []) or []:
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            out.append((str(item.get("id", "")), str(meta.get("name", "") or "")))
+        return out
+
 
 # --------------------------------------------------------------------------- #
 # Marketplace name-uniqueness — the refresh/selector filter, with R2 canary     #
@@ -220,7 +243,9 @@ class NameSearch(Protocol):
 
 class MarketNameUniqueness:
     """name_is_unique(base, chain, contract, token_id) -> bool | None — the
-    callable the refresh and the selector inject.
+    callable hunt.select_judged injects, called at DRAW time on the drawn
+    candidate inside a fresh decoy batch (Opus, 06/09: it left the refresh,
+    where it cost 60-80k calls a week; the gate carries its sampled rate).
 
     Approval is "no OTHER item, on ANY chain, carries this base name" — an
     R2 guard, so it proves first that the index can see the target: the
