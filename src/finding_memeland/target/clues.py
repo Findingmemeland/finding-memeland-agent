@@ -178,8 +178,17 @@ def describe_image_batched(*, target_image_url: str,
     caller excludes and redraws); None (vision unreachable) → fail-closed,
     ImageUnavailable. The batched text judge keeps writability."""
     rng = rng or random.SystemRandom()
-    others = [u for u in decoy_image_urls if u and u != target_image_url]
-    batch = rng.sample(others, min(decoys, len(others))) + [target_image_url]
+    from .refresh import uri_is_content_addressed
+    others = [u for u in decoy_image_urls
+              if u and u != target_image_url and uri_is_content_addressed(u)]
+    # P1-5: the batch is EXACTLY decoys + 1 through the batch's gateway, or
+    # it is not a batch. A missing or https:// image silently shrank it.
+    if len(others) < decoys or not uri_is_content_addressed(target_image_url):
+        raise ImageUnavailable(
+            f"image batch would have {len(others) + 1} gateway reads, not "
+            f"{decoys + 1} — a decoy without a content-addressed image "
+            "shrinks the anonymity set; refusing")
+    batch = rng.sample(others, decoys) + [target_image_url]
     rng.shuffle(batch)
     target_bytes: bytes | None = None
     for url in batch:

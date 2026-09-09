@@ -210,6 +210,31 @@ def test_judge_batches_share_no_constant_member_across_draws():
     assert set.intersection(*batches) == set()
 
 
+def test_decoys_need_content_addressed_images_or_the_launch_refuses():
+    """P1-5 (auditoria 09/09): um decoy sem imagem, ou com imagem https://,
+    encolhia o lote de imagens em silêncio. Só entradas com imagem
+    content-addressed são decoys, e um pool que não chega a n recusa."""
+    from dataclasses import replace
+    from finding_memeland.target.hunt import LaunchRefused
+
+    def with_images(snap, keep):
+        out = []
+        for i, e in enumerate(snap.entries):
+            if i < keep:
+                out.append(e)
+                continue
+            meta = dict(e.metadata, image="https://cdn.example.com/x.png" if i % 2 else "")
+            out.append(replace(e, metadata=meta, metadata_sha256=metadata_hash(meta)))
+        return Snapshot(epoch_id=snap.epoch_id, built_at=snap.built_at, entries=out)
+
+    with pytest.raises(LaunchRefused) as e:
+        preparer(with_images(big_snapshot(), 4)).prepare(EPOCH)
+    assert "decoys" in str(e.value) and NAME not in str(e.value)
+    # with exactly n+1 eligible the batch is full — never smaller
+    sealed = preparer(with_images(big_snapshot(), 8)).prepare(EPOCH)
+    assert len(sealed.decoys) == 7 and all(d.image.startswith("ipfs://") for d in sealed.decoys)
+
+
 def test_sealed_decoys_are_drawn_after_the_target_and_exclude_it():
     sealed = preparer(big_snapshot()).prepare(EPOCH)
     decoy_ids = {f"{d.chain}:{d.contract.lower()}:{d.token_id}" for d in sealed.decoys}

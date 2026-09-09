@@ -475,6 +475,10 @@ def test_resume_rebuilds_the_target_from_the_sealed_row():
     assert rebuilt.ctx.image_description == "a lighthouse on a black rock"
     assert rebuilt.persona.x_user_id == ""
     assert rebuilt.target_hold is not None
+    # o detector recomeçou do zero — o operador ouve-o (limite conhecido, visível)
+    assert any("anti-spray detector restarted from zero" in m
+               for m in w.rig.notifier.messages)
+    assert all("Whispering" not in m for m in w.rig.notifier.messages)
 
 
 # --------------------------------------------------------------------------- #
@@ -602,6 +606,35 @@ def test_shotgun_reply_gets_the_one_token_rule_and_never_wins():
     assert not any(s.get("outcome") in ("won", "pending", "bad_code")
                    for s in w.rig.repo.submissions)     # sem palpite gasto
     assert w.control.pause_calls == 0                      # e o detector não vê 50 alvos
+    # P1-1 (auditoria 09/09): a forma de ataque com mais volume deixa rasto
+    mal = [s for s in w.rig.repo.submissions if s.get("outcome") == "malformed"]
+    assert len(mal) == 1 and mal[0]["sender_x_id"] == "42"
+    assert mal[0]["submitted_claim_code"] == "50 tokens"
+    assert t.contract not in repr(mal)                     # nunca o alvo no log
+
+
+def test_shotgun_account_gets_one_reply_and_the_operator_hears_at_three():
+    """P1-1: o orçamento do sys_sent é uma resposta de formato por perfil —
+    uma conta que insiste não nos faz encher o fio; ao terceiro post
+    malformado o operador é avisado uma vez, cada post fica registado."""
+    from finding_memeland.target.templates import POST_REPLY_ONE_TOKEN
+    w = World()
+    hunt = w.launch()
+    t0 = hunt.live_at
+    w.src.reshared.add("42")
+    links = [f"https://opensea.io/assets/ethereum/0x{i:040x}/1" for i in range(3)]
+    w.src.schedule[1] = lambda: [
+        post(4100 + k, "42", " ".join(links), t0 + timedelta(minutes=k + 1), hunt.reshare_post_id)
+        for k in range(4)]
+    w.orch._max_rounds = 3
+    with pytest.raises(RuntimeError):
+        w.orch._claim_loop(hunt)
+    all_replies = [r for k in range(4) for r in replies_to(w.rig, 4100 + k)]
+    assert all_replies == [POST_REPLY_ONE_TOKEN]                 # UMA por perfil
+    mal = [s for s in w.rig.repo.submissions if s.get("outcome") == "malformed"]
+    assert len(mal) == 4
+    shots = [m for m in w.rig.notifier.messages if "shotgun posts from" in m]
+    assert len(shots) == 1 and "@" in shots[0] and "no guess spent" in shots[0]
 
 
 def test_oscillating_outage_trips_the_accumulated_hold_ceiling():

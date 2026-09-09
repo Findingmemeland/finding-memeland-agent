@@ -117,6 +117,18 @@ class Snapshot:
     def size(self) -> int:
         return len(self.entries)
 
+    def digest(self) -> str:
+        """Short content digest of the pool (ids + content ids, sorted) —
+        for the /launch confirmation fingerprint. Never printed anywhere a
+        player sees; 12 hex chars of SHA-256, no entry recoverable."""
+        import hashlib
+        h = hashlib.sha256()
+        for key in sorted(f"{e.chain}:{e.contract.lower()}:{e.token_id}|{e.content_id}"
+                          for e in self.entries):
+            h.update(key.encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()[:12]
+
 
 class SnapshotIntegrityError(RuntimeError):
     """The stored snapshot does not verify (bad hash, wrong shape). Fail

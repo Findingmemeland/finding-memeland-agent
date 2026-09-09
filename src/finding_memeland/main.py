@@ -1149,8 +1149,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
             except Exception as e:  # noqa: BLE001 — tipo apenas: mensagens podem citar contratos
                 import logging
 
-                logging.getLogger(__name__).exception("target %s failed", label)
-                notifier.notify(f"🚨 /{label} FALHOU ({type(e).__name__}) — detalhe nos logs.")
+                # P2-2 (auditoria 09/09): sem traceback nos logs — os frames
+                # dos adaptadores carregam URLs com contrato+tokenId de
+                # membros do pool. Fica o tipo e o comando; o resto é local.
+                logging.getLogger(__name__).error(
+                    "target %s failed: %s", label, type(e).__name__)
+                notifier.notify(f"🚨 /{label} FALHOU ({type(e).__name__}).")
             finally:
                 target_flag["active"] = False
 

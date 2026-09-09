@@ -44,6 +44,10 @@ class ClaimMatcher(Protocol):
     def skip_judge(self, text: str) -> bool: ...
     def format_hint(self, text: str) -> str | None: ...
     def spray_key(self, text: str) -> str | None: ...
+    # is_malformed(text) — the post is a REFUSED claim attempt (>1 token), to
+    # be LOGGED (outcome 'malformed') even though it spends no guess (Opus
+    # audit 09/09, P1-1: the highest-volume attack shape left no trace).
+    def is_malformed(self, text: str) -> bool: ...
 
 
 class CodeClaimMatcher:
@@ -67,6 +71,9 @@ class CodeClaimMatcher:
 
     def skip_judge(self, text: str) -> bool:
         return guess_like(text, self._len) or contract_paste_like(text)
+
+    def is_malformed(self, text: str) -> bool:
+        return False
 
     def format_hint(self, text: str) -> str | None:
         return None
@@ -128,6 +135,13 @@ class TargetClaimMatcher:
         if self._malformed(ext) or not ext.refs:
             return None
         return ext.refs[0].id()
+
+    def is_malformed(self, text: str) -> bool:
+        return self._malformed(self._extract(text))
+
+    def tokens_named(self, text: str) -> int:
+        from ..target.claim import tokens_named
+        return tokens_named(self._extract(text))
 
     def format_hint(self, text: str) -> str | None:
         from ..target.claim import claim_shaped

@@ -425,10 +425,24 @@ class TargetHuntPreparer:
     def _draw_decoys(self, snap: Snapshot, epoch: CurationEpoch, *,
                      exclude_id: str) -> list[Target]:
         """Exactly n decoys, re-sampled AROUND the excluded id (never filtered
-        after sampling — the anonymity set must have a constant size)."""
+        after sampling — the anonymity set must have a constant size).
+
+        Only entries with a non-empty, content-addressed `image` qualify as
+        decoys (Opus audit 09/09, P1-5): the image batch drops members with
+        no image, and an https:// image goes straight to its host instead of
+        the batch's gateway — either way the gateway sees fewer than n+1 and
+        the anonymity set shrinks in silence. The refresh already refuses
+        such entries; this is the belt to that brace, and it raises rather
+        than shrinking when the pool cannot supply n."""
+        from .refresh import uri_is_content_addressed
         pool = [e for e in snap.entries
-                if f"{e.chain}:{e.contract.lower()}:{e.token_id}" != exclude_id]
-        n = min(self._n_decoys, len(pool))
+                if f"{e.chain}:{e.contract.lower()}:{e.token_id}" != exclude_id
+                and uri_is_content_addressed(str(e.metadata.get("image") or ""))]
+        n = self._n_decoys
+        if len(pool) < n:
+            raise LaunchRefused(
+                f"pool cannot supply {n} decoys with content-addressed images "
+                f"({len(pool)} eligible) — anonymity set would shrink; refusing")
         picks = self._rng.sample(pool, n)
         return [Target(chain=e.chain, contract=e.contract, token_id=e.token_id,
                        name=e.name, name_onchain=e.name_onchain,

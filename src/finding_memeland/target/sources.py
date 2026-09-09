@@ -70,6 +70,13 @@ EPOCH1_CLASSIC = (
 )
 EPOCH1_REGISTRY_STRATA = ("manifold2021", "tail2021")
 EPOCH1_CAP_EXEMPT = frozenset({"tail2021"})   # ratified 05/09; falls on leak
+# Every stratum slug the epoch can produce — the ONLY keys the sampled rates
+# may carry (Opus audit 09/09, P1-3: a typo like 'superrare_2' would silently
+# zero a stratum and send the operator to widen sourcing that is not the
+# problem). And every chain the epoch touches — each must have an RPC in
+# the keyed family AND in at least one generic provider (P1-2).
+EPOCH1_STRATA = frozenset(slug for slug, _c, _a in EPOCH1_CLASSIC) | frozenset(EPOCH1_REGISTRY_STRATA)
+EPOCH1_CHAINS = frozenset(chain for _s, chain, _a in EPOCH1_CLASSIC) | {"ethereum"}
 
 
 # --------------------------------------------------------------------------- #

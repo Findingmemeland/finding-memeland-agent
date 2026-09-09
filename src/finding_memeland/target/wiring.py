@@ -54,7 +54,13 @@ from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import ClueSearchGuard, MarketNameUniqueness, RaribleSearch
 from .selector import CurationEpoch
 from .snapshot import Snapshot, SnapshotStore, StratumGateReport, stratum_gate
-from .sources import EPOCH1_CAP_EXEMPT, ChainEoaCheck, RegistryStore
+from .sources import (
+    EPOCH1_CAP_EXEMPT,
+    EPOCH1_CHAINS,
+    EPOCH1_STRATA,
+    ChainEoaCheck,
+    RegistryStore,
+)
 
 BLOB_DISCOVERY = "target:discovery"
 BLOB_REGISTRY = "target:registry"
@@ -92,9 +98,11 @@ class TargetWiring:
     def snapshot_fingerprint(self) -> str:
         """Binds a /launch confirmation to the snapshot it was shown over:
         a /snapshot between the prompt and the 'sim' changes it and the
-        confirmation is refused (the relic-id check, for targets)."""
+        confirmation is refused (the relic-id check, for targets). Includes
+        a short digest of the ENTRIES (P2-4): a rebuild landing on the same
+        ISO second, or a stopped clock, must not pass as the same pool."""
         snap = self.snapshot_store.load()
-        return "" if snap is None else f"{snap.epoch_id}@{snap.built_at}"
+        return "" if snap is None else f"{snap.epoch_id}@{snap.built_at}#{snap.digest()}"
 
     def scan(self, n_blocks: int | None = None) -> str:
         outcome, registry = self.pipeline.scan(n_blocks or self.scan_blocks)
@@ -125,6 +133,19 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     missing = s.target_missing()
     if missing:
         raise RuntimeError("target mode not configured: " + ", ".join(missing))
+    # P1-3: rate keys must be strata the epoch can produce — a typo would
+    # zero a stratum in silence (fail-closed, but pointing the operator at
+    # the wrong fix). Loud at boot, with the unknown name.
+    for label, rates in (("target_writability_rates", s.target_writability_rate_map),
+                         ("target_uniqueness_rates", s.target_uniqueness_rate_map)):
+        unknown = sorted(set(rates) - EPOCH1_STRATA)
+        if unknown:
+            raise RuntimeError(
+                f"{label}: unknown stratum {unknown} — known: "
+                f"{sorted(EPOCH1_STRATA)} (a typo here silences a stratum)")
+        bad = sorted(k for k, v in rates.items() if not 0.0 < v <= 1.0)
+        if bad:
+            raise RuntimeError(f"{label}: rate out of (0, 1] for {bad}")
 
     cipher = FernetPoolCipher(s.target_pool_key)
     rng = rng or random.SystemRandom()
@@ -135,6 +156,11 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # -- KEYED family: our RPCs, our gateway (reads everyone) --------------- #
     rpcs = chain_rpcs({"ethereum": s.eth_rpc_url, "base": s.base_rpc_url},
                       http_post=http_post)
+    # P1-2 / R1: every chain the epoch touches has a keyed RPC — loud, by name
+    keyed_missing = sorted(EPOCH1_CHAINS - set(rpcs))
+    if keyed_missing:
+        raise RuntimeError(f"no keyed RPC for epoch chain(s) {keyed_missing} "
+                           "(eth_rpc_url / base_rpc_url)")
     keyed_meta = Erc721Metadata(rpcs=rpcs, gateway=s.target_ipfs_gateway,
                                 http_get=http_get)
     eoa_check = ChainEoaCheck(rpcs=rpcs)
@@ -176,14 +202,27 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     )
 
     # -- GENERIC family: public providers, rotation per batch ------------- #
+    # A provider is built ONLY with the chains it has an RPC for (P1-2): a
+    # provider missing a chain reads that chain as a KeyError at batch time
+    # — configuration, loud — never as a silent absence. And every epoch
+    # chain must be readable by at least one provider, or the live check
+    # for a target on that chain could never rotate onto it.
     pub = s.target_public_rpc_map
     gws = s.target_ipfs_gateway_list
-    n = max(len(pub["ethereum"]), len(gws))
+    n = max(len(lst) for lst in pub.values())
     providers = []
     for i in range(n):
         urls = {c: lst[i] for c, lst in pub.items() if i < len(lst)}
+        if not urls:
+            continue
         providers.append(Provider(name=f"provider{i}", rpc_urls=urls,
                                   gateway=gws[i % len(gws)]))
+    covered = set().union(*(set(p.rpc_urls) for p in providers)) if providers else set()
+    generic_missing = sorted(EPOCH1_CHAINS - covered)
+    if generic_missing:
+        raise RuntimeError(f"no public RPC for epoch chain(s) {generic_missing} "
+                           "(target_public_rpcs_<chain>) — the live check could "
+                           "not read a target there")
     generic = GenericMetadata(providers=providers, http_get=http_get,
                               http_post=http_post, http_get_bytes=http_get_bytes)
     vision = AnthropicVision(anthropic, s.target_vision_model)
@@ -204,8 +243,11 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         failing is unavailable — the post never confuses the two."""
         from .selector import metadata_hash
         from .sources import ChainUnavailable
-        # reads whatever the URI now points at, content-addressed or not:
-        # the void post publishes what the chain serves TODAY
+        # ⚠️ THE ONLY Erc721Metadata IN THE PACKAGE WITH content_addressed_only
+        # =False, deliberately (P2-5): the void/pay-noted post publishes what
+        # the chain serves TODAY, mutable or not — the reader gets the fact.
+        # Every other instance (refresh, selector, live path) keeps the
+        # default True; do not "harmonise" this one.
         any_meta = Erc721Metadata(rpcs=rpcs, gateway=s.target_ipfs_gateway,
                                   http_get=http_get, content_addressed_only=False)
         t = sealed.target

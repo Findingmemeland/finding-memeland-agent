@@ -1519,6 +1519,11 @@ class Orchestrator:
         is_target = getattr(hunt, "target", None) is not None
         spray_log: list[tuple[str, str]] = []  # (author, label) of wrong guesses, puzzle phase
         spray_state: dict = {}
+        # Malformed (>1 token) posts per author — logged as 'malformed', no
+        # guess spent, ONE format reply per profile (sys_sent), and the
+        # operator hears about a shotgun account once it insists (P1-1).
+        malformed_by_author: dict[str, int] = {}
+        malformed_notified: set[str] = set()
         if is_target:
             from ..target.templates import POST_REPLY_WRONG_DOOR_TARGET
             wrong_door_reply = POST_REPLY_WRONG_DOOR_TARGET
@@ -1744,6 +1749,28 @@ class Orchestrator:
                     # burn one of the five attempts.
                     hint = matcher.format_hint(post.text)
                     if hint:
+                        if matcher.is_malformed(post.text):
+                            n = malformed_by_author.get(post.author_id, 0) + 1
+                            malformed_by_author[post.author_id] = n
+                            try:
+                                self._repo.log_submission(
+                                    hunt_id=hunt.id, dm_id=post.tweet_id,
+                                    sender_x_id=post.author_id, wallet=None,
+                                    sender_handle=post.author_handle,
+                                    submitted_claim_code=(
+                                        f"{matcher.tokens_named(post.text)} tokens"
+                                        if hasattr(matcher, "tokens_named") else None),
+                                    outcome="malformed", x_created_at=post.created_at,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                self._notify(f"malformed post {post.tweet_id} not logged: {e!r}")
+                            if n >= 3 and post.author_id not in malformed_notified:
+                                malformed_notified.add(post.author_id)
+                                self._notify(
+                                    f"shotgun posts from @{post.author_handle}: {n} "
+                                    "multi-token replies (no guess spent, one format "
+                                    "reply sent; logged as 'malformed')"
+                                )
                         self._sys_reply("format", post, hint, sys_sent)
                         _done(post)
                         continue

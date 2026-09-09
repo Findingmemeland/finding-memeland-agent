@@ -158,9 +158,13 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
             orch._notify(f"content guard refused a drawn artwork ({refused}) "
                          "— redrawing (id excluded, never named)")
             if refused >= ports.max_content_redraws:
+                # `from None` (P2-1): the chained ContentRefused carries a
+                # target id — a refused one, not the hunt's, but a traceback
+                # is not the place for any id
                 raise LaunchRefused(
                     f"content guard refused {refused} draws in a row — "
-                    "launch refused; review the judge/pool before retrying")
+                    "launch refused; review the judge/pool before retrying"
+                ) from None
     ctx = TargetClueContext.from_target(sealed.target,
                                         image_description=image_description)
 
@@ -200,10 +204,15 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         predressed=True,                 # no prep window: nothing to index
         target=sealed,
     )
+    # P2-3: the uniqueness check's counters (never names) — `crowded` says
+    # how often a full page hid the candidate and a draw was spent on it.
+    stats = getattr(getattr(ports.preparer, "_name_is_unique", None), "stats", None)
+    stats_line = (" | uniqueness " + ", ".join(f"{k}={v}" for k, v in stats.items())
+                  if isinstance(stats, dict) else "")
     orch._notify(
         f"hunt #{number}: target (blind) sorteado do snapshot da época "
         f"{ports.epoch.epoch_id!r} — gate GREEN, juiz ✓, arte descrita ✓, "
-        f"{len(sealed.decoys)} decoys selados. A lançar."
+        f"{len(sealed.decoys)} decoys selados{stats_line}. A lançar."
     )
     return hunt
 
@@ -425,6 +434,12 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
 # --------------------------------------------------------------------------- #
 
 
+# KNOWN LIMIT (Opus audit 09/09, resume note): the spray log and state live
+# in memory. After a crash-resume the detector restarts from zero for that
+# hunt and may not fire again. Consequence-free for the prize (spray never
+# voids, only pauses for review) and low impact, so the log is not
+# persisted — the detector covers hunts without a crash. If that ever
+# matters, persist the (author, ref.id) pairs on the row.
 def spray_check(orch, hunt, clue_index: int, log: list[tuple[str, str]],
                 state: dict) -> None:
     """Puzzle phase only. `log` is the (author, label) list of wrong guesses
@@ -497,4 +512,13 @@ def resume_target_hunt(orch, row: dict, hunt):
         x_user_id="", access_token="", access_secret="",
     )
     hunt.target_hold = HoldLedger(held=float(row.get("target_hold_s") or 0))
+    # R8 applied to a defence (Opus, 09/09): the spray detector's log lives in
+    # memory and restarts from zero on resume — say so, so the degradation is
+    # visible to the operator instead of known only to whoever read the audit.
+    if ports.spray is not None:
+        orch._notify(
+            f"hunt #{hunt.number}: resumed — the anti-spray detector restarted "
+            "from zero (its log is in-memory); duplication before the crash is "
+            "not counted. Watch the claim thread by hand for the rest of this hunt."
+        )
     return hunt

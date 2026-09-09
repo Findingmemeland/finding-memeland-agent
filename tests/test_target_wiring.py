@@ -174,3 +174,50 @@ def test_live_hash_is_tri_state():
                      http_post=node(ok), http_get_bytes=lambda u, h: b"")
     lh = w.ports.live_hash(sealed)
     assert lh.status == "resolved" and len(lh.sha256) == 64
+
+
+def test_rate_keys_must_be_known_strata_and_in_range():
+    """P1-3: 'superrare_2' zerava um estrato em silêncio e mandava o operador
+    alargar sourcing. Agora falha no arranque com o nome desconhecido."""
+    with pytest.raises(RuntimeError) as e:
+        build(settings(target_writability_rates="foundation:0.5,superrare_2:0.6"))
+    assert "superrare_2" in str(e.value) and "unknown stratum" in str(e.value)
+    with pytest.raises(RuntimeError) as e2:
+        build(settings(target_uniqueness_rates="foundation:1.4"))
+    assert "out of (0, 1]" in str(e2.value)
+    build(settings(target_writability_rates="foundation:0.5,superrare2:0.6,manifold2021:0.4"))
+
+
+def test_providers_only_carry_the_chains_they_have_and_epoch_chains_are_covered():
+    """P1-2 / R1: um provider sem RPC para uma cadeia não existe para ela
+    (KeyError alto no lote, nunca ausência silenciosa); uma cadeia da época
+    sem RPC público em NENHUM provider é erro de arranque."""
+    w = build(settings(target_public_rpcs_ethereum="https://e0,https://e1",
+                       target_public_rpcs_base="https://b0"))
+    gen = w.ports.live_check._generic                   # noqa: SLF001
+    assert [p.rpc_urls for p in gen._providers] == [    # noqa: SLF001
+        {"ethereum": "https://e0", "base": "https://b0"}, {"ethereum": "https://e1"}]
+    with gen.batch():
+        pass
+    with gen.batch():                                   # provider1: no base
+        with pytest.raises(KeyError):
+            gen.read_live("base", C, 1)
+    with pytest.raises(RuntimeError) as e:
+        build(settings(target_public_rpcs_ethereum="", target_public_rpcs_base="https://b0"))
+    assert "ethereum" in str(e.value)
+
+
+def test_fingerprint_binds_the_pool_contents_not_only_the_stamp():
+    """P2-4: dois refreshes no mesmo segundo ISO (ou relógio parado) com
+    conteúdos diferentes não passam pelo mesmo fingerprint."""
+    from finding_memeland.target.snapshot import Snapshot, SnapshotEntry
+    e1 = SnapshotEntry(chain="ethereum", contract=C, token_id=1, name="a", name_onchain="a",
+                       metadata={}, metadata_sha256="m", platform="foundation",
+                       token_uri="ipfs://x", content_id="ipfs:x")
+    e2 = SnapshotEntry(chain="ethereum", contract=C, token_id=2, name="b", name_onchain="b",
+                       metadata={}, metadata_sha256="m", platform="foundation",
+                       token_uri="ipfs://y", content_id="ipfs:y")
+    a = Snapshot(epoch_id="e1", built_at="t", entries=[e1])
+    b = Snapshot(epoch_id="e1", built_at="t", entries=[e2])
+    assert a.digest() != b.digest() and len(a.digest()) == 12
+    assert Snapshot(epoch_id="e1", built_at="t", entries=[e1]).digest() == a.digest()

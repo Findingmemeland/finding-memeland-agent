@@ -117,16 +117,43 @@ def test_describe_image_batched_decoy_failure_is_noise_target_failure_is_not():
         return b"ok"
     assert describe_image_batched(
         target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1", "ipfs://d2"],
-        fetch_bytes_generic=fetch, describe=lambda b: "fine",
+        fetch_bytes_generic=fetch, describe=lambda b: "fine", decoys=2,
         rng=random.Random(0)) == "fine"
     with pytest.raises(ImageUnavailable):
         describe_image_batched(
             target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1"],
-            fetch_bytes_generic=lambda u: None, describe=lambda b: "fine")
+            fetch_bytes_generic=lambda u: None, describe=lambda b: "fine", decoys=1)
     with pytest.raises(ImageUnavailable):
         describe_image_batched(
             target_image_url="ipfs://target", decoy_image_urls=[],
-            fetch_bytes_generic=lambda u: b"ok", describe=lambda b: "  ")
+            fetch_bytes_generic=lambda u: b"ok", describe=lambda b: "  ", decoys=0)
+
+
+def test_image_batch_is_exactly_decoys_plus_one_or_refuses():
+    """P1-5 (auditoria 09/09): um decoy sem imagem, ou com imagem https://
+    (vai directa ao host, não passa pelo gateway do lote), encolhia o
+    conjunto de anonimato em silêncio — pedíamos 8, a Pinata via 4. Agora o
+    lote é exactamente decoys+1 pelo gateway, ou recusa."""
+    fetched: list[str] = []
+
+    def fetch(url):
+        fetched.append(url)
+        return b"ok"
+    good = [f"ipfs://d{i}" for i in range(7)]
+    assert describe_image_batched(
+        target_image_url="ipfs://target", decoy_image_urls=good,
+        fetch_bytes_generic=fetch, describe=lambda b: "x", rng=random.Random(0)) == "x"
+    assert len(fetched) == 8
+    for bad in (good[:6] + [""], good[:6] + ["https://cdn.example.com/1.png"], good[:6]):
+        with pytest.raises(ImageUnavailable) as e:
+            describe_image_batched(
+                target_image_url="ipfs://target", decoy_image_urls=bad,
+                fetch_bytes_generic=fetch, describe=lambda b: "x", rng=random.Random(0))
+        assert "anonymity set" in str(e.value)
+    with pytest.raises(ImageUnavailable):        # the target's own image, too
+        describe_image_batched(
+            target_image_url="https://cdn.example.com/t.png", decoy_image_urls=good,
+            fetch_bytes_generic=fetch, describe=lambda b: "x", rng=random.Random(0))
 
 
 def test_content_guard_runs_on_the_same_bytes_and_fails_closed():
@@ -147,7 +174,7 @@ def test_content_guard_runs_on_the_same_bytes_and_fails_closed():
         described.clear()
         return describe_image_batched(
             target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1", "ipfs://d2"],
-            fetch_bytes_generic=fetch,
+            fetch_bytes_generic=fetch, decoys=2,
             describe=lambda b: described.append(b) or "fine",
             content_ok=lambda b: verdict if b == b"bytes-ipfs://target" else None,
             target_id="ethereum:0xabc:1", rng=random.Random(0))
