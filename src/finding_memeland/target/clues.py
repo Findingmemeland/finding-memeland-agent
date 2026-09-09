@@ -18,7 +18,9 @@ the blind solver. What is target-specific lives here, and only this:
    description": both false now, and the first is a leak (decision: clues
    never state the chain — the chain is part of the answer).
 
-3. THREE MECHANICAL GUARDS in `_post_guardrail_reasons`, before the solver:
+3. FOUR GUARDS in `_post_guardrail_reasons`, before the solver — three
+   mechanical, one LLM (the consistency judge: clue + answer, must be true;
+   the blind solver's inverted twin, see TRUTH_JUDGE_SYSTEM):
    · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
      about the name's letters is tested against the string; what cannot
      be tested (compound/fused/portmanteau/hidden word) is refused. Born
@@ -129,7 +131,8 @@ _UNVERIFIABLE_RE = re.compile(
     r"(?:hidden|smaller|shorter|secret|buried|nested)\s+(?:\w+\s+){0,2}word\b|"
     r"\bword\s+(?:inside|within|nested|buried|tucked)\b|\b(?:prefix|suffix)\b|"
     r"anagram|rhymes?\s+with|(?:the\s+)?same\s+letters\s+as|acronym|initials?|"
-    r"homophone|sounds\s+like|spelled\s+backwards?|reversed?\s+spells)\b",
+    r"homophone|sounds\s+like|spelled\s+backwards?|reversed?\s+spells|"
+    r"(?:the\s+)?only\s+(?:one|letter|vowel|consonant)\b(?:\s+(?:doing|that|of|in))?)\b",
     re.IGNORECASE)
 _NO_VOWELS_RE = re.compile(r"\b(?:no|without|zero)\s+vowels?\b", re.IGNORECASE)
 _LETTERS_RE = re.compile(_NUM_RE + r"[\s-]+letters?\b", re.IGNORECASE)
@@ -760,11 +763,97 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
 # --------------------------------------------------------------------------- #
 
 
-class SearchGuardUnavailable(RuntimeError):
+class ClueGuardUnavailable(RuntimeError):
+    """A guard of OURS could not verify a clue. Raised, not returned as
+    feedback: fail-closed on EVERY clue — a leaked or false piece is
+    forever, a delayed one is a non-event. integration.clue_failed turns it
+    into the hold (deadline frozen, ramp stopped). Never carries the clue."""
+
+
+class SearchGuardUnavailable(ClueGuardUnavailable):
     """The search guard could not verify a puzzle-phase clue (blind canary or
-    transport). Raised, not returned as feedback: fail-closed on EVERY clue
-    — the operator alert reaches Telegram at once, and nothing is published
-    on the text rules alone. The message never carries the clue."""
+    transport)."""
+
+
+class TruthJudgeUnavailable(ClueGuardUnavailable):
+    """The consistency judge could not answer (API down / malformed)."""
+
+
+# --------------------------------------------------------------------------- #
+# The CONSISTENCY JUDGE — the blind solver's inverted twin (Opus, 09/09)      #
+# --------------------------------------------------------------------------- #
+#
+# Live test 09/09, clue 1 for "Ancient Future": "sits between what was and
+# what cannot yet be measured — neither the record nor the unknown, but the
+# seam between them". That is the PRESENT. The target is FUTURE — the clue
+# put the answer on the side it excludes, and every guard was green: the
+# blind solver is a DIFFICULTY gate (publish if it fails to guess), and a
+# clue that points the wrong way makes it fail faster. Misleading and hard
+# are indistinguishable from outside. So:
+#   · blind solver (exists): clue, no answer — must FAIL.
+#   · consistency judge (new): clue AND answer — "is this true of it?" —
+#     must PASS.
+# One measures difficulty, the other truth; neither can replace the other.
+# It also closes the other half of declare-and-verify: prose that adds a
+# structural embellishment the declaration did not carry ("the only one
+# doing that job" over ANCIENT's three vowels) is judged against the word.
+
+TRUTH_JUDGE_SYSTEM = (
+    "You are the fact-checker of a word-puzzle treasure hunt. You are given the "
+    "ANSWER — the name of an NFT (its words) and a description of its artwork — "
+    "and ONE clue written about it. The clue is meant to be hard, oblique and "
+    "sideways; difficulty is NOT your concern. Your only question: taken as a "
+    "statement about the answer, is the clue TRUE? A clue is consistent when the "
+    "answer satisfies it under a fair reading; it is INCONSISTENT when it describes "
+    "something the answer is not, asserts a property (of the word, its letters, "
+    "its meaning, its cultural use, or the artwork) that the answer does not have, "
+    "or points a reasoning player AWAY from the answer — e.g. a clue that defines "
+    "'present' for the word 'future', or says a letter is the only vowel when the "
+    "word has three. Read the clue literally first, then charitably; if the "
+    "literal reading is false and a player obeying it would discard the right "
+    "answer, it is inconsistent. Never reward cleverness, never punish "
+    "obscurity. Answer ONLY a JSON object: "
+    '{"consistent": true|false, "reason": "<one sentence, may name the answer>"}'
+)
+
+
+@dataclass(frozen=True)
+class TruthVerdict:
+    consistent: bool | None        # None = the judge could not answer
+    reason: str = ""
+
+
+class AnthropicTruthJudge:
+    """TruthJudge: check(clue, name=, word=, artwork=) -> TruthVerdict. One
+    call per draft; any transport/parse trouble → consistent=None (the
+    engine raises TruthJudgeUnavailable — fail-closed, like the search
+    guard). The reason may name the answer: it goes to the WRITER (who
+    knows it) and to our logs, never to a post."""
+
+    name = "anthropic-truth-judge"
+
+    def __init__(self, client, model: str, *, max_tokens: int = 200):
+        self._client = client
+        self._model = model
+        self._max_tokens = max_tokens
+
+    def check(self, clue: str, *, name: str, word: str | None,
+              artwork: str) -> TruthVerdict:
+        about = (f"the word '{word}' of the name" if word else "the ARTWORK")
+        user = (f"ANSWER — name: {name}\nartwork: {artwork or '(no description)'}\n"
+                f"This clue is about {about}.\n\nCLUE: {clue}\n\n"
+                "Is the clue TRUE of the answer?")
+        try:
+            resp = self._client.messages.create(
+                model=self._model, max_tokens=self._max_tokens,
+                system=TRUTH_JUDGE_SYSTEM,
+                messages=[{"role": "user", "content": user}])
+            text = "".join(getattr(b, "text", "") for b in resp.content)
+            start, end = text.find("{"), text.rfind("}")
+            doc = json.loads(text[start:end + 1])
+            return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
+        except Exception:  # noqa: BLE001 — the engine fails closed on None
+            return TruthVerdict(None, "judge unavailable")
 
 
 class TargetClueEngine(RelicClueEngine):
@@ -775,14 +864,18 @@ class TargetClueEngine(RelicClueEngine):
     never in production wiring)."""
 
     def __init__(self, anthropic_client, model: str, *, search_guard,
-                 trail_verifier=None, trail_policy=None, solver=None):
+                 truth_judge, trail_verifier=None, trail_policy=None, solver=None):
         super().__init__(anthropic_client, model, trail_verifier=trail_verifier,
                          trail_policy=trail_policy, solver=solver)
         if search_guard is None:
             raise ValueError("TargetClueEngine needs a ClueSearchGuard "
                              "(search_guard=False only for offline simulation)")
+        if truth_judge is None:
+            raise ValueError("TargetClueEngine needs a truth judge "
+                             "(truth_judge=False only for offline simulation)")
         self._search_guard: ClueSearchGuard | None = (
             None if search_guard is False else search_guard)
+        self._truth_judge = None if truth_judge is False else truth_judge
         self._forbidden_hits: dict[str, int] = {}
 
     def next_clue(self, persona, clue_index, prior_clues, *, max_attempts: int = 6):
@@ -827,7 +920,29 @@ class TargetClueEngine(RelicClueEngine):
             logging.getLogger(__name__).warning(
                 "clue #%s: declaration check rejected (%d)", clue_index, len(decl))
             return ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)]
-        # 4. the search guard, puzzle phase only
+        # 4. the consistency judge — clue + answer, must be TRUE (every phase)
+        if self._truth_judge is not None:
+            facet, _ = relic_slot_for(clue_index, persona)
+            word = None
+            if facet.startswith("name_word_"):
+                n = int(facet.rsplit("_", 1)[1])
+                ws = persona.display_name.split()
+                word = ws[n - 1] if 0 < n <= len(ws) else None
+            v = self._truth_judge.check(draft.text, name=persona.display_name,
+                                        word=word, artwork=persona.image_description)
+            if v.consistent is None:
+                raise TruthJudgeUnavailable(
+                    f"consistency judge unavailable for clue #{clue_index}: "
+                    f"{v.reason} — not publishing (fail-closed)")
+            if not v.consistent:
+                logging.getLogger(__name__).warning(
+                    "clue #%s: consistency judge rejected the draft", clue_index)
+                return ["the CONSISTENCY JUDGE read this clue next to the answer and "
+                        f"found it FALSE or pointing away from it: {v.reason}. A "
+                        "player who reasons correctly must arrive at the answer, not "
+                        "be pushed off it. Rewrite so the clue is TRUE of the word "
+                        "under a literal reading — hard is fine, wrong is not"]
+        # 5. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= PUZZLE_CLUES:
             v = self._search_guard.check(
                 draft.text, target_item_id=persona.target_id,
@@ -842,7 +957,7 @@ class TargetClueEngine(RelicClueEngine):
                         "any literal description of the picture or phrase that "
                         "could appear in a title; attack from the assigned angle "
                         "only"]
-        # 5. the blind solver (inherited)
+        # 6. the blind solver (inherited)
         return super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
 
     def generate(self, persona, clue_index, prior_clues, *, feedback=None):

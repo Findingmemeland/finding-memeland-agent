@@ -40,7 +40,7 @@ from .adapters import (
     mint_fetcher,
     sniff_media_type,
 )
-from .clues import TargetClueEngine, describe_image_batched
+from .clues import AnthropicTruthJudge, TargetClueEngine, describe_image_batched
 from .discovery import DiscoveryStateStore, EraDiscovery
 from .hunt import (
     LIVE_HASH_RESOLVED,
@@ -329,7 +329,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         preparer=preparer,
         cipher=SealedTargetCipher(cipher=cipher),
         clue_engine=TargetClueEngine(anthropic, s.anthropic_model,
-                                     search_guard=search_guard, solver=solver),
+                                     search_guard=search_guard, solver=solver,
+                                     truth_judge=AnthropicTruthJudge(
+                                         anthropic, s.target_judge_model)),
         describe_image=describe_image,
         live_check=RotatingLiveCheck(generic=generic, rng=rng),
         resolve_link=resolver,

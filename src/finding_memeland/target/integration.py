@@ -114,7 +114,7 @@ class TargetPorts:
 
 # Hold causes — release is by cause (manage_hold)
 HOLD_LIVE = "live check unavailable"
-HOLD_GUARD = "search guard unverifiable"
+HOLD_GUARD = "search guard unverifiable"   # also the truth judge (same ledger)
 HOLD_LIVE_CLAIM = "live check unavailable at claim (winner waiting)"
 
 
@@ -358,8 +358,8 @@ def clue_failed(orch, hunt, exc: BaseException) -> bool:
     enters the SAME hold ledger as the live check (Opus, 06/09, (b)) — the
     ramp stops AND the deadline freezes, never one without the other.
     Returns True when the failure was turned into a hold."""
-    from .clues import SearchGuardUnavailable
-    if isinstance(exc, SearchGuardUnavailable):
+    from .clues import ClueGuardUnavailable
+    if isinstance(exc, ClueGuardUnavailable):      # search guard OR truth judge
         manage_hold(orch, hunt, holding=True, reason=HOLD_GUARD)
         return True
     return False
@@ -553,8 +553,10 @@ def resolve_credit(orch, hunt) -> str:
                              "reveal goes out with the item link as attribution")
                 credit = ""
         if not credit:
-            orch._notify("R9: metadata names no artist and the chain gave no creator "
-                         "— reveal credits by item link only")
+            orch._notify("R9: metadata names no artist and "
+                         + ("the chain gave no creator" if ports.creator_credit is not None
+                            else "no creator lookup is wired (simulation)")
+                         + " — reveal credits by item link only")
         elif credit.startswith("0x"):
             orch._notify("R9: creator has no verified ENS — reveal credits the "
                          "truncated address")

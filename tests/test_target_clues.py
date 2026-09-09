@@ -238,17 +238,41 @@ def ctx():
     return TargetClueContext.from_target(TARGET, image_description="a lighthouse")
 
 
-def engine(drafts, *, guard=None, guard_hits=None):
+class FakeTruthJudge:
+    """Scripted verdicts by substring of the clue: {"substring": (ok, reason)};
+    unknown clue → consistent. `down=True` → None (unavailable)."""
+
+    name = "fake-judge"
+
+    def __init__(self, table=None, down=False):
+        self.table = table or {}
+        self.down = down
+        self.seen = []
+
+    def check(self, clue, *, name, word, artwork):
+        from finding_memeland.target.clues import TruthVerdict
+        self.seen.append((clue, name, word, artwork))
+        if self.down:
+            return TruthVerdict(None, "api down")
+        for k, (ok, why) in self.table.items():
+            if k in clue:
+                return TruthVerdict(ok, why)
+        return TruthVerdict(True, "fits")
+
+
+def engine(drafts, *, guard=None, guard_hits=None, judge=False):
     if guard is None:
         hits = guard_hits if guard_hits is not None else {"salt harbor": {ITEM_ID}}
         guard = ClueSearchGuard(search=FakeSearch(hits), retries=0, sleep_s=0.0)
     return TargetClueEngine(FakeAnthropic(drafts), "model", search_guard=guard,
-                            solver=False)
+                            truth_judge=judge, solver=False)
 
 
-def test_engine_requires_a_search_guard():
+def test_engine_requires_a_search_guard_and_a_truth_judge():
     with pytest.raises(ValueError):
-        TargetClueEngine(FakeAnthropic([]), "m", search_guard=None, solver=False)
+        TargetClueEngine(FakeAnthropic([]), "m", search_guard=None, truth_judge=False, solver=False)
+    with pytest.raises(ValueError):
+        TargetClueEngine(FakeAnthropic([]), "m", search_guard=False, truth_judge=None, solver=False)
 
 
 def test_chain_word_is_rejected_then_regenerated():
@@ -320,6 +344,11 @@ def test_clean_clue_passes_first_time():
      "word inside it that also names a tense. the container and the contained "
      "both do grammatical work.", True),
     ("its roots are Latin, its mood is tomorrow", False),        # etymology stays legal
+    # 3rd --real-clues (09/09): the declared claim was true, the prose added
+    # "that single letter is the only one doing that job" — ANCIENT has three
+    # vowels. Uniqueness-of-a-letter-role cannot be declared → refused.
+    ("word 1 opens with a vowel — that single letter is the only one doing that job", True),
+    ("the only vowel in the word is at the front", True),
     ("the second word has five letters", True),
     ("the second word of this name has six letters and ends with a vowel", False),
     ("the first word starts with a vowel; the last word ends with a vowel", False),
@@ -519,3 +548,75 @@ def test_structure_angle_text_asks_for_a_checkable_declared_fact():
     st = next(a for a in PUZZLE_ANGLES if a.startswith("STRUCTURE"))
     assert "DECLARED" in st and "NEVER guess" in st
     assert "a compound, a suffix that does work" not in st
+
+
+# --------------------------------------------------------------------------- #
+# The consistency judge — clue + answer must be TRUE (Opus, 09/09)            #
+# --------------------------------------------------------------------------- #
+
+
+def test_false_clue_is_rejected_by_the_judge_with_its_reason_and_regenerated():
+    """Live test 09/09, clue 1: a definition of PRESENT for the word FUTURE —
+    every other guard green (the blind solver REWARDS a clue that points the
+    wrong way). The judge reads clue + answer and says no."""
+    judge = FakeTruthJudge({"seam between them": (False, "that describes the present, the word is future")})
+    e = engine(["sits between what was and what cannot be measured — the seam between them",
+                "patience is a coin nobody spends"], judge=judge)
+    d = e.next_clue(ctx(), 1, [])
+    assert d.text == "patience is a coin nobody spends"
+    fb = e._client.calls[1]["messages"][0]["content"]
+    assert "CONSISTENCY JUDGE" in fb and "describes the present" in fb
+    # it saw the answer, the word this piece is about, and the artwork
+    clue, name, word, art = judge.seen[0]
+    assert name == "Salt Harbor" and word in ("Salt", "Harbor") and art == "a lighthouse"
+
+
+def test_judge_runs_in_the_reveal_phase_too_and_on_art_pieces():
+    from finding_memeland.content.relic_clues import relic_slot_for
+    judge = FakeTruthJudge()
+    e = engine(["a clue", "b clue"], judge=judge)
+    c = ctx()
+    art = next(i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image")
+    e.next_clue(c, art, ["x"] * (art - 1))
+    assert judge.seen[-1][2] is None                       # art piece: no word
+    e.next_clue(c, PUZZLE_CLUES + 4, ["x"] * (PUZZLE_CLUES + 3))
+    assert len(judge.seen) == 2                            # reveal phase: judged as well
+
+
+def test_judge_unavailable_fails_closed_and_enters_the_guard_hold():
+    from finding_memeland.target.clues import ClueGuardUnavailable, TruthJudgeUnavailable
+    e = engine(["a clue"], judge=FakeTruthJudge(down=True))
+    with pytest.raises(TruthJudgeUnavailable) as ex:
+        e.next_clue(ctx(), 5, ["x"] * 4)
+    assert "a clue" not in str(ex.value) and isinstance(ex.value, ClueGuardUnavailable)
+    # integration: same hold ledger as the search guard
+    from finding_memeland.target.dryrun import TargetWorld
+    from finding_memeland.target.integration import HOLD_GUARD, clue_failed
+    w = TargetWorld()
+    hunt = w.launch()
+    assert clue_failed(w.orch, hunt, TruthJudgeUnavailable("judge down")) is True
+    assert any("HOLD" in m and HOLD_GUARD in m for m in w.notices())
+
+
+def test_anthropic_truth_judge_parses_and_fails_to_none():
+    from finding_memeland.target.clues import AnthropicTruthJudge
+
+    class _C:
+        def __init__(self, text):
+            self.text = text
+            self.calls = []
+
+            class _M:
+                def create(_s, **kw):
+                    self.calls.append(kw)
+                    if isinstance(self.text, Exception):
+                        raise self.text
+                    return _Resp(self.text)
+            self.messages = _M()
+    c = _C('{"consistent": false, "reason": "the word is future"}')
+    v = AnthropicTruthJudge(c, "m").check("clue", name="Ancient Future", word="Future", artwork="art")
+    assert v.consistent is False and "future" in v.reason
+    user = c.calls[0]["messages"][0]["content"]
+    assert "Ancient Future" in user and "'Future'" in user and "CLUE: clue" in user
+    assert AnthropicTruthJudge(_C("garbage"), "m").check("c", name="n", word=None, artwork="").consistent is None
+    assert AnthropicTruthJudge(_C(RuntimeError("503")), "m").check("c", name="n", word=None, artwork="").consistent is None

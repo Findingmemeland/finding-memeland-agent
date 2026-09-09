@@ -8,7 +8,7 @@ Sem `--real-clues` tudo é falso e determinístico (0 chamadas, 0 rede): serve
 para ver o JOGO — o hold a entrar e a sair, o void com o gateway em baixo, o
 tecto acumulado, as respostas de formato. Com `--real-clues` o caminho feliz
 usa o TargetClueEngine REAL (Anthropic, guarda de pesquisa desligada — só em
-simulação) sobre um token real do fixture (FND #1, "Ancient Future", Sarah
+simulação; juiz de consistência LIGADO, é uma chamada por rascunho) sobre um token real do fixture (FND #1, "Ancient Future", Sarah
 Zucker 2020), para leres os posts todos seguidos como um jogador os lê. É a
 última vez que os vês antes de serem públicos (Opus, 09/09).
 
@@ -59,8 +59,11 @@ def real_world_factory(verbose: bool):
         token_uri=uri, content_id=content_id(uri))
     snap = synthetic_snapshot()
     snap.entries.append(real)
-    engine = TargetClueEngine(Anthropic(api_key=s.anthropic_api_key), s.anthropic_model,
-                              search_guard=False)     # simulação: sem guarda
+    from finding_memeland.target.clues import AnthropicTruthJudge
+    client = Anthropic(api_key=s.anthropic_api_key)
+    engine = TargetClueEngine(client, s.anthropic_model,
+                              search_guard=False,     # simulação: sem guarda de pesquisa
+                              truth_judge=AnthropicTruthJudge(client, s.target_judge_model))
     description = (
         "Glowing white serif text on a black field, the letters warped and "
         "smeared by analog video feedback — a VHS tracking line drifts across "
