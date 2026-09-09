@@ -124,8 +124,11 @@ _WORD_REF_RE = re.compile(
 _UNVERIFIABLE_RE = re.compile(
     r"\b(compound|portmanteau|fused|welded|two\s+(?:complete\s+|whole\s+)?words\s+"
     r"(?:in\s+one|joined|stitched|glued|fused|merged)|hides?\s+(?:a|another)\s+word|"
-    r"a\s+word\s+(?:hiding|hidden|inside)|find\s+(?:that|the)\s+seam)\b",
+    r"a\s+word\s+(?:hiding|hidden|inside)|find\s+(?:that|the)\s+seam|"
+    r"anagram|rhymes?\s+with|(?:the\s+)?same\s+letters\s+as|acronym|initials?|"
+    r"homophone|sounds\s+like|spelled\s+backwards?|reversed?\s+spells)\b",
     re.IGNORECASE)
+_NO_VOWELS_RE = re.compile(r"\b(?:no|without|zero)\s+vowels?\b", re.IGNORECASE)
 _LETTERS_RE = re.compile(_NUM_RE + r"[\s-]+letters?\b", re.IGNORECASE)
 _WORDS_RE = re.compile(_NUM_RE + r"[\s-]+words?\b", re.IGNORECASE)
 _LETTER_CLAIM = (        # "a vowel" | "a consonant" | "the letter F" | "'f'" | "F"
@@ -188,7 +191,24 @@ def _is(letter: str, m) -> bool:
 def structural_claim_errors(text: str, name: str) -> list[str]:
     """Claims the clue makes about the NAME'S STRING that are false or
     unverifiable, as feedback lines for the writer (each names the word:
-    the writer already knows the name; these never reach the public)."""
+    the writer already knows the name; these never reach the public).
+
+    PERMISSIVE ON AMBIGUITY — the only guard in the package that breaks a
+    tie in the TEXT'S favour (Opus, 09/09): when the clue does not say
+    which word it means, a claim passes if it holds for ANY word or for
+    the whole name ("six letters" passes for Ancient Future because
+    FUTURE has six, even if the writer meant ANCIENT). Deliberate — it
+    saves regenerations and a true-for-one claim does not mislead — but
+    do not assume it fails closed like the others.
+
+    KNOWN LIMIT — this closes the CASE, not the class: the unverifiable
+    list (compound, portmanteau, anagram, rhymes with, initials, …) chases
+    the model's imagination. The real fix, when there is room: invert the
+    burden — the writer DECLARES its structural claims as data next to
+    the clue ({"claims": [{"type": "letters", "word": 2, "n": 6}]}), the
+    guard verifies those, and prose that makes a structural claim not on
+    the declared list is refused. Same jump as emoji: from a banned word
+    to a deterministic test."""
     words = [w for w in re.findall(r"[A-Za-zÀ-ÿ']+", (name or "").lower())]
     if not words:
         return []
@@ -232,6 +252,8 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
         false(m, lambda w: any(a == b for a, b in zip(w, w[1:])))
     for m in _PALINDROME_RE.finditer(text):
         false(m, lambda w: len(w) > 1 and w == w[::-1])
+    for m in _NO_VOWELS_RE.finditer(text):
+        false(m, lambda w: not any(c in _VOWELS for c in w))
     for m in _CONTAINS_RE.finditer(text):
         inner = m.group("w").lower()
         false(m, lambda w: inner in w and inner != w)

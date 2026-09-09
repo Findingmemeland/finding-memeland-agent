@@ -291,6 +291,12 @@ def test_clean_clue_passes_first_time():
     ("word two of the name is a compound hiding in plain sight — two complete "
      "words fused, each carrying full weight alone. find that seam.", True),
     ("a portmanteau at the end", True),
+    # Opus: close the class a little wider than the case
+    ("the first word is an anagram of a Roman city", True),
+    ("word two rhymes with suture", True),
+    ("shares its initials with a famous duo", True),
+    ("the second word has no vowels", True),
+    ("sounds like a word for later", True),
     ("the second word has five letters", True),
     ("the second word of this name has six letters and ends with a vowel", False),
     ("the first word starts with a vowel; the last word ends with a vowel", False),
