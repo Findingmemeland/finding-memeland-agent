@@ -47,8 +47,9 @@ here:
    content-addressed metadata same CID ⇒ same bytes; a single gateway
    seeing the same 8 tokens hunt after hunt would be P0-A one layer down,
    with no fix at the logic level. Gateways appear only where reads do NOT
-   repeat: the image batch (once per hunt) and the refresh (everyone). THE DECOYS ARE DRAWN ONCE, AT SEAL TIME, AND
-   STORED IN THE SEALED TARGET (Opus, 06/09, P0-A): decoys re-drawn per
+   repeat: the image batch (once per hunt) and the refresh (everyone).
+
+   THE DECOYS ARE DRAWN ONCE, AT SEAL TIME, AND STORED IN THE SEALED TARGET (Opus, 06/09, P0-A): decoys re-drawn per
    read are defeated by intersection — eight reads with fresh decoys and
    one constant token, and the anonymity set is 1 after three. One fixed
    batch, reshuffled in order only, makes the intersection the whole
@@ -527,6 +528,28 @@ class LiveCheck:
         if result is None:                   # cannot happen: target is in batch
             raise RuntimeError("live check produced no verdict for the target")
         return result
+
+
+# The live METADATA HASH for a public post is TRI-STATE (R8, Opus audit
+# 09/09): "resolved" (we fetched the bytes and hashed them), "unresolvable"
+# (the CHAIN said there is nothing to fetch — tokenURI or ownerOf reverted,
+# measured over RPC), or "unavailable" (OUR gateway/transport failed — we
+# measured nothing). A None that meant both let a gateway outage publish
+# "the token was burned" about a third party's NFT, with the artist's name
+# in the post. Never again: a cause we did not measure is not published.
+LIVE_HASH_RESOLVED = "resolved"
+LIVE_HASH_UNRESOLVABLE = "unresolvable"
+LIVE_HASH_UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class LiveHash:
+    status: str
+    sha256: str | None = None
+
+    @classmethod
+    def unavailable(cls) -> "LiveHash":
+        return cls(LIVE_HASH_UNAVAILABLE, None)
 
 
 PHASE_PUZZLE = "puzzle"      # clues 1-7

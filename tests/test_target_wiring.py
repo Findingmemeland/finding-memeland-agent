@@ -38,6 +38,7 @@ def settings(**over) -> Settings:
         target_public_rpcs_ethereum="https://pub0,https://pub1",
         target_public_rpcs_base="https://pubb0",
         target_ipfs_gateways="https://gw0/ipfs/,https://gw1/ipfs/",
+        target_ipfs_gateway="https://gateway.pinata.cloud/ipfs/",
         rarible_api_key="rk", anthropic_api_key="ak",
     )
     base.update(over)
@@ -128,3 +129,48 @@ def test_snapshot_fingerprint_changes_when_snapshot_is_rebuilt():
     first = w.snapshot_fingerprint()
     w.snapshot()
     assert w.snapshot_fingerprint() != first
+
+
+def test_keyed_gateway_has_no_default_and_is_required():
+    """P0 (auditoria 09/09): ipfs.io era o default e está morto; um default
+    morto alimentava um post público. Sem default, e nomeado em falta."""
+    assert Settings(_env_file=None).target_ipfs_gateway == ""
+    s = settings(target_ipfs_gateway="")
+    assert any("target_ipfs_gateway " in m for m in s.target_missing())
+
+
+def test_live_hash_is_tri_state():
+    from finding_memeland.target.hunt import LIVE_HASH_UNAVAILABLE, LIVE_HASH_UNRESOLVABLE
+    from finding_memeland.target.selector import Target
+    t = Target(chain="ethereum", contract=C, token_id=1, name="x", name_onchain="x",
+               description="", image="", metadata_sha256="m", epoch="e1",
+               token_uri="ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN",
+               content_id="ipfs:QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN")
+    from finding_memeland.target.hunt import SealedTarget
+    sealed = SealedTarget(target=t, salt="s" * 32, commitment="c" * 64)
+
+    def node(reply):
+        def post(url, body, headers):
+            req = json.loads(body)
+            if req["method"] == "eth_call":
+                return json.dumps(reply)
+            return json.dumps({"jsonrpc": "2.0", "id": 1, "result": "0x6001"})
+        return post
+    abi = ("0x" + (32).to_bytes(32, "big").hex() + (52).to_bytes(32, "big").hex()
+           + b"ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN".hex() + "00" * 12)
+    ok = {"jsonrpc": "2.0", "id": 1, "result": abi}
+    revert = {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "execution reverted"}}
+
+    def boom(u, h):
+        raise ConnectionError("pinata 503")
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=boom, http_post=node(ok), http_get_bytes=lambda u, h: b"")
+    assert w.ports.live_hash(sealed).status == LIVE_HASH_UNAVAILABLE      # our gateway
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=boom, http_post=node(revert), http_get_bytes=lambda u, h: b"")
+    assert w.ports.live_hash(sealed).status == LIVE_HASH_UNRESOLVABLE     # the chain
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=lambda u, h: json.dumps({"name": "x", "image": "ipfs://i"}),
+                     http_post=node(ok), http_get_bytes=lambda u, h: b"")
+    lh = w.ports.live_hash(sealed)
+    assert lh.status == "resolved" and len(lh.sha256) == 64

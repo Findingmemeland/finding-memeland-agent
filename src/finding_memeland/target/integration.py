@@ -44,8 +44,10 @@ from .hunt import (
     PHASE_CLAIM,
     PHASE_PUZZLE,
     PHASE_REVEAL,
+    LIVE_HASH_UNAVAILABLE,
     HoldLedger,
     LiveCheck,
+    LiveHash,
     LiveVerdict,
     SealedTarget,
     SealedTargetCipher,
@@ -83,7 +85,7 @@ class TargetPorts:
     # that moment, through any gateway (the hunt is over or decided; the
     # repeated live check never touches a gateway — hunt.LiveCheck). None
     # = unresolvable, printed as such. Optional: sims and dry-runs omit it.
-    live_hash: Callable[[SealedTarget], "str | None"] | None = None
+    live_hash: Callable[[SealedTarget], LiveHash] | None = None
     # How many redraws the content guard may force before /launch refuses.
     max_content_redraws: int = 3
     # HOLD ceiling and cadence (Opus, 06/09, P1-B): a hold without a ceiling
@@ -351,7 +353,9 @@ def claim_time_live_check(orch, hunt) -> str:
     manage_hold(orch, hunt, holding=False, reason="")
     if action == ACT_PAY_NOTED:
         hunt.target_pay_noted = True
-        hunt.target_live_hash = _live_hash(orch, hunt.target)
+        lh = _live_hash(orch, hunt.target)
+        hunt.target_live_hash = lh.sha256
+        hunt.target_live_hash_status = lh.status
         hunt.target_live_token_uri = verdict.live_token_uri
         orch._notify("⚠️ target mutated/burned AFTER the winning claim — paying "
                      "anyway (identity binds, not ownership); noted in the reveal.")
@@ -359,14 +363,17 @@ def claim_time_live_check(orch, hunt) -> str:
     return "ok"
 
 
-def _live_hash(orch, sealed: SealedTarget) -> str | None:
+def _live_hash(orch, sealed: SealedTarget) -> LiveHash:
+    """Tri-state (R8): a port that is missing or that raised MEASURED
+    NOTHING — that is "unavailable", never "unresolvable"."""
     ports: TargetPorts = orch._target
     if ports.live_hash is None:
-        return None
+        return LiveHash.unavailable()
     try:
-        return ports.live_hash(sealed)
-    except Exception:  # noqa: BLE001 — unresolvable is a valid answer here
-        return None
+        out = ports.live_hash(sealed)
+    except Exception:  # noqa: BLE001 — our side failed: unavailable
+        return LiveHash.unavailable()
+    return out if isinstance(out, LiveHash) else LiveHash.unavailable()
 
 
 def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
@@ -378,14 +385,16 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
     sealed: SealedTarget = hunt.target
     ing = (void_reveal_ingredients(sealed, live) if live is not None
            else {"live_token_uri": None})
-    # the live hash: once, now, through any gateway — the hunt is over
-    live_hash = (_live_hash(orch, sealed)
-                 if cause in (LIVE_MUTATED, LIVE_BURNED) else None)
+    # the live hash: once, now, through our gateway — the hunt is over.
+    # Tri-state (R8): the post never says "reverts" over OUR outage.
+    lh = (_live_hash(orch, sealed)
+          if cause in (LIVE_MUTATED, LIVE_BURNED) else LiveHash.unavailable())
     text = void_reveal(VoidRevealData(
         hunt_n=hunt.number, cause=cause,
         target_name_onchain=sealed.target.name_onchain,
         target_id=sealed.id(), metadata_sha256=sealed.target.metadata_sha256,
-        salt=sealed.salt, live_metadata_sha256=live_hash,
+        salt=sealed.salt, live_metadata_sha256=lh.sha256,
+        live_hash_status=lh.status,
         token_uri=sealed.target.token_uri,
         live_token_uri=ing.get("live_token_uri"),
         relaunching=relaunching,
@@ -458,6 +467,8 @@ def reveal_text(orch, hunt, winner, receipt, *, time_to_win: str,
         salt=sealed.salt, holder=winner.holder,
         non_holder_pct=orch._non_holder_pct,
         live_metadata_sha256=getattr(hunt, "target_live_hash", None),
+        live_hash_status=getattr(hunt, "target_live_hash_status",
+                                 LIVE_HASH_UNAVAILABLE),
         mutated_after_claim=bool(getattr(hunt, "target_pay_noted", False)),
         token_uri=sealed.target.token_uri,
         live_token_uri=getattr(hunt, "target_live_token_uri", None),

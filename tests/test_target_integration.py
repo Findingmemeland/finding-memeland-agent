@@ -21,6 +21,7 @@ from finding_memeland.target.commitment import compute_commitment_v2
 from finding_memeland.target.hunt import (
     JudgeVerdict,
     LiveCheck,
+    LiveHash,
     LiveRead,
     SealedTargetCipher,
     SprayDetector,
@@ -154,7 +155,7 @@ class World:
             clue_engine=None,                       # set below (rig's fake engine)
             describe_image=lambda sealed: "a lighthouse on a black rock",
             live_check=LiveCheck(read_live=fetch_live, rng=random.Random(1)),
-            live_hash=lambda sealed: "deadbeef" * 8,     # resolved once, at the void
+            live_hash=lambda sealed: LiveHash("resolved", "deadbeef" * 8),
             resolve_link=None,
             spray=SprayDetector(live_params or SprayParams()),
         )
@@ -233,6 +234,40 @@ def test_content_guard_refusal_redraws_with_the_id_excluded_and_is_bounded():
     with pytest.raises(LaunchRefused) as e:
         w2.orch._prepare(200)
     assert "content guard refused 3" in str(e.value)
+
+
+def test_gateway_outage_at_void_time_is_printed_as_ours_never_as_a_burn():
+    """P0 (auditoria 09/09): três coisas somavam-se — live_hash None para
+    burn E para gateway em baixo, ipfs.io morto por omissão, e o template a
+    imprimir "reverts"/"burned". Agora: a falha do gateway é tri-estado e o
+    post di-lo; a causa publicada é a MEDIDA por RPC (CID diferente)."""
+    from finding_memeland.target.sources import ChainUnavailable as CU
+    w = World()
+
+    def gateway_down(sealed):
+        raise CU("pinata 503")
+    w.ports.live_hash = gateway_down
+    hunt = w.launch()
+    t = hunt.target.target
+    w.live[(t.chain, t.contract, t.token_id)] = ("ipfs://Qm" + "9" * 44 + "/metadata.json", "0xowner")
+    w.orch._clue_due_fn = lambda now: now
+    assert w.orch._claim_loop(hunt) is None
+    post = next(p for p in w.rig.publisher.posts if "is void" in p)
+    assert "tokenURI now points at different content" in post
+    assert "our gateway could not fetch it" in post
+    assert "reverts" not in post and "burned" not in post and "owner" not in post.split("Here is")[0]
+
+    # ports without a live_hash at all (sims) are "unavailable", never "unresolvable"
+    w2 = World()
+    w2.ports.live_hash = None
+    hunt2 = w2.launch()
+    t2 = hunt2.target.target
+    w2.live[(t2.chain, t2.contract, t2.token_id)] = None            # burn (ownerOf reverts)
+    w2.orch._clue_due_fn = lambda now: now
+    assert w2.orch._claim_loop(hunt2) is None
+    post2 = next(p for p in w2.rig.publisher.posts if "is void" in p)
+    assert "appears burned" in post2 and "our gateway could not fetch it" in post2
+    assert "the chain no longer serves" not in post2
 
 
 def test_void_post_publishes_sealed_and_live_token_uri():
@@ -361,7 +396,7 @@ def test_mutation_in_puzzle_phase_void_reveals_and_next_draw_excludes():
     assert w.orch._claim_loop(hunt) is None
     assert hunt.state is HuntState.DONE
     void = next(p for p in w.rig.publisher.posts if "is void" in p)
-    assert "changed by its owner" in void and "starts shortly" in void
+    assert "tokenURI now points at different content" in void and "starts shortly" in void
     assert re.search(r"salt: (\S+)", void).group(1) == hunt.target.salt
     assert w.rig.repo.hunts[hunt.id]["target_void_id"] == hunt.target.id()
     # relaunch: the voided target is excluded from the next draw

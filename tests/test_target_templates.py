@@ -136,12 +136,17 @@ def test_winner_announcement_non_holder_note():
 def test_winner_announcement_mutation_after_claim_is_noted_not_punished():
     live = hashlib.sha256(b"changed").hexdigest()
     post = target_winner_announcement(winner(mutated_after_claim=True,
-                                             live_metadata_sha256=live))
+                                             live_metadata_sha256=live,
+                                             live_hash_status="resolved"))
     assert "changed AFTER the winning claim" in post
     assert live in post and "prize paid in full" in post
     assert recompute_from_block(post) == COMMIT           # o comprometido, não o live
-    burned = target_winner_announcement(winner(mutated_after_claim=True))
-    assert "unresolvable" in burned
+    # R8: sem status "resolved", o hash não se afirma; a frase diz de QUEM foi a falha
+    ours = target_winner_announcement(winner(mutated_after_claim=True))
+    assert "our gateway could not fetch it" in ours and "reverts" not in ours
+    chain = target_winner_announcement(winner(mutated_after_claim=True,
+                                              live_hash_status="unresolvable"))
+    assert "the chain no longer serves a tokenURI" in chain
 
 
 # --------------------------------------------------------------------------- #
@@ -152,14 +157,18 @@ def test_winner_announcement_mutation_after_claim_is_noted_not_punished():
 def void(**kw):
     base = dict(hunt_n=11, cause="mutated", target_name_onchain="Salt Harbor #3",
                 target_id=TARGET_ID, metadata_sha256=META_HASH, salt=SALT,
-                live_metadata_sha256=hashlib.sha256(b"x").hexdigest())
+                live_metadata_sha256=hashlib.sha256(b"x").hexdigest(),
+                live_hash_status="resolved")
     base.update(kw)
     return VoidRevealData(**base)
 
 
 def test_void_reveal_publishes_every_ingredient():
     post = void_reveal(void())
-    assert "Hunt #11 is void" in post and "changed by its owner" in post
+    assert "Hunt #11 is void" in post
+    # R8: a causa diz o que a cadeia respondeu, nunca QUEM o fez
+    assert "tokenURI now points at different content" in post
+    assert "owner" not in post.split("Here is everything")[0]
     assert "back to the vault" in post and "Nobody loses anything" in post
     assert recompute_from_block(post) == COMMIT
     assert "live metadata_sha256: " + hashlib.sha256(b"x").hexdigest() in post
@@ -167,12 +176,32 @@ def test_void_reveal_publishes_every_ingredient():
 
 
 def test_void_reveal_burned_and_unclaimed_variants():
-    burned = void_reveal(void(cause="burned", live_metadata_sha256=None))
-    assert "burned mid-hunt" in burned and "unresolvable" in burned
+    burned = void_reveal(void(cause="burned", live_metadata_sha256=None,
+                              live_hash_status="unresolvable"))
+    assert "ownerOf no longer resolves on-chain" in burned
+    assert "appears burned" in burned and "was burned" not in burned
+    assert "the chain no longer serves a tokenURI" in burned
     unclaimed = void_reveal(void(cause="unclaimed"))
     assert "nobody found it" in unclaimed
     assert "live metadata_sha256" not in unclaimed         # não houve falha live
     assert recompute_from_block(unclaimed) == COMMIT
+
+
+def test_void_reveal_never_blames_the_token_for_our_gateway_failure():
+    """P0 da auditoria (09/09): gateway em baixo no momento do void ⇒ o post
+    dizia "unresolvable (tokenURI reverts)" e "the target was burned". Agora
+    a falha é nossa e o post di-lo — a causa medida (CID diferente, via RPC)
+    continua lá, verificável pelo tokenURI vivo impresso."""
+    post = void_reveal(void(live_metadata_sha256=None, live_hash_status="unavailable",
+                            live_token_uri="ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN"))
+    assert "our gateway could not fetch it" in post
+    assert "reverts" not in post and "burned" not in post
+    assert "live tokenURI: ipfs://QmSiu" in post
+    # e o mesmo para um burn medido com o gateway em baixo: a causa fica,
+    # o hash não se inventa
+    post2 = void_reveal(void(cause="burned", live_metadata_sha256=None,
+                             live_hash_status="unavailable"))
+    assert "appears burned" in post2 and "our gateway could not fetch it" in post2
 
 
 def test_void_reveal_relaunch_line():

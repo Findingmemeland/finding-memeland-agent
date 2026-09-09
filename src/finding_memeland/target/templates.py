@@ -143,6 +143,7 @@ class TargetWinnerData:
     non_holder_pct: int = 10
     # hunt.ACT_PAY_NOTED: the token changed after the claim — noted, paid.
     live_metadata_sha256: str | None = None
+    live_hash_status: str = "unavailable"   # resolved | unresolvable | unavailable (R8)
     mutated_after_claim: bool = False
     token_uri: str = ""                   # sealed at launch (v3)
     live_token_uri: str | None = None     # what the chain answered later
@@ -170,8 +171,8 @@ def target_winner_announcement(d: TargetWinnerData) -> str:
                            metadata_sha256=d.metadata_sha256, salt=d.salt,
                            token_uri=d.token_uri)
         + (
-            "\n\nnote: the token's metadata changed AFTER the winning claim "
-            f"(live metadata_sha256 now {d.live_metadata_sha256 or 'unresolvable'}"
+            "\n\nnote: the token's on-chain state changed AFTER the winning "
+            f"claim ({_live_hash_phrase(d.live_hash_status, d.live_metadata_sha256)}"
             + (f"; live tokenURI {d.live_token_uri}" if d.live_token_uri else "")
             + "). "
             "the winner found the right token — the commitment binds the "
@@ -197,20 +198,41 @@ class VoidRevealData:
     target_id: str
     metadata_sha256: str
     salt: str
-    live_metadata_sha256: str | None = None   # None = burned/unresolvable
+    live_metadata_sha256: str | None = None   # only meaningful when status=resolved
     relaunching: bool = False                 # puzzle-phase: fresh hunt follows
     token_uri: str = ""                       # sealed at launch (v3)
     live_token_uri: str | None = None         # what the chain answered at the void
+    live_hash_status: str = "unavailable"     # resolved | unresolvable | unavailable (R8)
 
 
+# R8 (Opus audit, 09/09): PUBLISH ONLY WHAT WAS MEASURED. The cause lines say
+# what the chain answered over RPC — a tokenURI now pointing at different
+# content, an ownerOf that no longer resolves — never who did it or why. We
+# never observed "the owner" changing anything, and "burned" is our reading
+# of a revert; the post states the observation, and readers can check it.
 _CAUSE_LINE = {
-    "mutated": "the target's tokenURI was changed by its owner mid-hunt "
-               "(different content), so the commitment can no longer be "
-               "verified live",
-    "burned": "the target was burned mid-hunt — ownerOf no longer resolves, "
-              "so the live check cannot be computed",
+    "mutated": "the target's on-chain tokenURI now points at different "
+               "content than the one sealed at launch, so the commitment can "
+               "no longer be verified live",
+    "burned": "the target's ownerOf no longer resolves on-chain (the token "
+              "appears burned or removed), so the live check cannot be "
+              "computed",
     "unclaimed": "nobody found it before the deadline",
 }
+
+
+def _live_hash_phrase(status: str, sha256: str | None) -> str:
+    """Tri-state, never conflated (R8): resolved → the hash; unresolvable →
+    the chain serves nothing to hash; unavailable → WE could not fetch it,
+    and the post says so instead of blaming the token."""
+    if status == "resolved" and sha256:
+        return f"live metadata_sha256: {sha256}"
+    if status == "unresolvable":
+        return ("live metadata_sha256: none — the chain no longer serves a "
+                "tokenURI for this token")
+    return ("live metadata_sha256: not resolved at posting time (our gateway "
+            "could not fetch it — the live tokenURI above is what the chain "
+            "answered; anyone can hash it)")
 
 
 def void_reveal(d: VoidRevealData) -> str:
@@ -219,11 +241,10 @@ def void_reveal(d: VoidRevealData) -> str:
     was honest and that the void was real. Prize back to the vault; never
     'trust us'."""
     cause = _CAUSE_LINE.get(d.cause, d.cause)
-    live = (f"  live metadata_sha256: {d.live_metadata_sha256}\n"
-            if d.live_metadata_sha256 else
-            "  live metadata_sha256: unresolvable (tokenURI reverts)\n")
+    live = ""
     if d.live_token_uri:
         live += f"  live tokenURI: {d.live_token_uri}\n"
+    live += "  " + _live_hash_phrase(d.live_hash_status, d.live_metadata_sha256) + "\n"
     return (
         f"Hunt #{d.hunt_n} is void — {cause}.\n"
         "The prize goes back to the vault. Nobody loses anything they had.\n\n"

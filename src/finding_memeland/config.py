@@ -191,8 +191,13 @@ class Settings(BaseSettings):
     target_public_rpcs_ethereum: str = Field(default="")
     target_public_rpcs_base: str = Field(default="")
     target_ipfs_gateways: str = Field(default="")
-    # KEYED gateway for the refresh (resolves everyone's metadata — no secret).
-    target_ipfs_gateway: str = Field(default="https://ipfs.io/ipfs/")
+    # KEYED gateway for the refresh and for the ONE live-hash read at void
+    # time. NO DEFAULT (Opus audit 09/09, P0): ipfs.io was the default and is
+    # measured dead (403 challenge) — a dead default here fed a public post
+    # "the token was burned" over our own gateway failing. Required, and
+    # named in target_missing(). Measured working 06/09: gateway.pinata.cloud
+    # (a dedicated, paid Pinata gateway is acceptable on this path).
+    target_ipfs_gateway: str = Field(default="")
     # Judge (batched, text) and vision models — Anthropic client.
     target_judge_model: str = Field(default="claude-sonnet-4-6")
     target_vision_model: str = Field(default="claude-sonnet-4-6")
@@ -256,6 +261,8 @@ class Settings(BaseSettings):
             missing.append("target_uniqueness_rates")
         if not (self.target_public_rpc_map["ethereum"] and self.target_ipfs_gateway_list):
             missing.append("target_public_rpcs_ethereum + target_ipfs_gateways (generic reads)")
+        if not self.target_ipfs_gateway:
+            missing.append("target_ipfs_gateway (keyed gateway: refresh + live hash at void)")
         return missing
 
     @property

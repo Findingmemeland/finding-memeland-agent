@@ -39,7 +39,16 @@ from .adapters import (
 )
 from .clues import TargetClueEngine, describe_image_batched
 from .discovery import DiscoveryStateStore, EraDiscovery
-from .hunt import SealedTarget, SealedTargetCipher, SprayDetector, SprayParams, TargetHuntPreparer
+from .hunt import (
+    LIVE_HASH_RESOLVED,
+    LIVE_HASH_UNRESOLVABLE,
+    LiveHash,
+    SealedTarget,
+    SealedTargetCipher,
+    SprayDetector,
+    SprayParams,
+    TargetHuntPreparer,
+)
 from .integration import TargetPorts
 from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import ClueSearchGuard, MarketNameUniqueness, RaribleSearch
@@ -188,17 +197,27 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                 describe=vision, content_ok=vision.content_ok,
                 target_id=sealed.id(), rng=rng)
 
-    def live_hash(sealed: SealedTarget) -> str | None:
+    def live_hash(sealed: SealedTarget) -> LiveHash:
         """Once, at void/pay-noted time, through OUR gateway (the hunt is
-        over; the repeated live check never touched one)."""
+        over; the repeated live check never touched one). TRI-STATE (R8):
+        the chain saying "no token" is unresolvable; our gateway/RPC
+        failing is unavailable — the post never confuses the two."""
         from .selector import metadata_hash
+        from .sources import ChainUnavailable
         # reads whatever the URI now points at, content-addressed or not:
         # the void post publishes what the chain serves TODAY
         any_meta = Erc721Metadata(rpcs=rpcs, gateway=s.target_ipfs_gateway,
                                   http_get=http_get, content_addressed_only=False)
-        meta = any_meta(sealed.target.chain, sealed.target.contract,
-                        sealed.target.token_id)
-        return metadata_hash(meta) if isinstance(meta, dict) and meta else None
+        t = sealed.target
+        try:
+            meta = any_meta(t.chain, t.contract, t.token_id)
+        except ChainUnavailable:
+            return LiveHash.unavailable()
+        if meta is None:
+            return LiveHash(LIVE_HASH_UNRESOLVABLE, None)
+        if not isinstance(meta, dict) or not meta:
+            return LiveHash.unavailable()
+        return LiveHash(LIVE_HASH_RESOLVED, metadata_hash(meta))
 
     preparer = TargetHuntPreparer(
         snapshot_store=snapshot_store,
