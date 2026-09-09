@@ -69,6 +69,15 @@ def test_clue_one_holder_line_optional():
                                                 non_holder_pct=None)
 
 
+def test_claim_hint_cadence_is_2_3_then_every_fifth():
+    """Opus (dry-run 09/09): the claim line on every clue reads as spam."""
+    from finding_memeland.target.templates import claim_hint_due
+    assert [i for i in range(1, 21) if claim_hint_due(i)] == [2, 3, 5, 10, 15, 20]
+    assert not claim_hint_due(0)
+    assert "chain:contract:tokenId" not in target_clue_followup(4, "c", "t")
+    assert "chain:contract:tokenId" in target_clue_followup(10, "c", "t")
+
+
 def test_followup_carries_the_claim_hint_and_no_url():
     post = target_clue_followup(3, "a quiet clue", "still nothing? \U0001F438")
     assert post.startswith("3rd Clue:")
@@ -126,6 +135,25 @@ def test_winner_announcement_reveals_and_verifies():
     assert "persona" not in low and "profile" not in low and "relic" not in low
     assert "turn notifications on" not in low             # engagement-bait
     assert "note:" not in post                            # sem mutação, sem nota
+
+
+def test_reveal_credits_the_artist_from_the_metadata_r9():
+    """R9 (Opus, 09/09): the treasure is somebody's work — title, author,
+    link. Without an author in the metadata nothing is invented."""
+    from finding_memeland.target.templates import artwork_alt_text
+    post = target_winner_announcement(winner(artist="Sarah Zucker",
+                                             item_link="opensea.io/item/ethereum/0xab/1"))
+    assert "The treasure was “Salt Harbor #3”, by Sarah Zucker" in post
+    assert "made by someone else" not in post                  # credited, not anonymous
+    assert "see it: opensea.io/item/ethereum/0xab/1" in post
+    plain = target_winner_announcement(winner())
+    assert "The treasure was “Salt Harbor #3” — an NFT" in plain and ", by " not in plain
+    assert "made by someone else" in plain
+    v = void_reveal(void(artist="Sarah Zucker"))
+    assert "The treasure was “Salt Harbor #3”, by Sarah Zucker." in v
+    alt = artwork_alt_text("Salt Harbor #3", "Sarah Zucker", 11)
+    assert alt == "“Salt Harbor #3”, by Sarah Zucker — the NFT that was Hunt #11's treasure."
+    assert ", by" not in artwork_alt_text("Salt Harbor #3", "", 11)
 
 
 def test_winner_announcement_non_holder_note():
@@ -221,3 +249,12 @@ def test_system_replies_have_no_urls_and_teach_the_format():
         assert "chain:contract:tokenId" in r
     assert "needs the chain" in POST_REPLY_FORMAT
     assert "Base" not in TARGET_CLUE_ONE_EXPLAINER.split("\n")[0]  # 1ª linha sem cadeia
+
+
+def test_artist_of_reads_the_tokens_own_keys_and_never_an_address():
+    from finding_memeland.target.selector import artist_of
+    assert artist_of({"artist": "  Sarah   Zucker "}) == "Sarah Zucker"
+    assert artist_of({"created_by": "Pak"}) == "Pak"
+    assert artist_of({"creator": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405"}) == ""
+    assert artist_of({"name": "x"}) == "" and artist_of(None) == ""
+    assert len(artist_of({"author": "a" * 300})) == 80

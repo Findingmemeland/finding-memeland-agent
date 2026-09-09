@@ -37,4 +37,10 @@ confuse 'I saw nothing' with 'there is nothing'".
       measured-no / WE-COULD-NOT-MEASURE — and the third is printed as our
       failure, never as a fact about the token or its owner. (LiveHash,
       templates._CAUSE_LINE, _live_hash_phrase)
+  R9  The treasure is somebody's work (Opus, 09/09). The reveal CREDITS the
+      author — title, artist from the token's own metadata, link to the
+      piece — and the attached image carries alt-text with both. A takedown
+      request from the artist is honoured THE SAME DAY, no discussion:
+      delete the reveal's media, keep the text and the link. Written before
+      it is needed, not after.             (selector.artist_of, templates, integration)
 """

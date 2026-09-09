@@ -85,6 +85,20 @@ def name_qualifies(base_name: str, *, min_words: int = 2) -> bool:
     return len(_WORD.findall(base_name)) >= min_words
 
 
+ARTIST_KEYS = ("artist", "created_by", "creator", "author", "createdBy")
+
+
+def artist_of(meta: dict | None) -> str:
+    """The author as the token's OWN metadata names them (R9) — the same
+    keys the clue engine bans from the clues, read the other way round at
+    the reveal. A 0x address is not a name; nothing is invented."""
+    for k in ARTIST_KEYS:
+        v = (meta or {}).get(k)
+        if isinstance(v, str) and v.strip() and not v.strip().startswith("0x"):
+            return " ".join(v.split())[:80]
+    return ""
+
+
 def metadata_hash(meta: dict) -> str:
     """SHA-256 over the canonical JSON of the token metadata AT SELECTION TIME.
 
@@ -120,6 +134,9 @@ class Target:
     # compares content_id (CID, transport stripped); the reveal prints both.
     token_uri: str = ""
     content_id: str = ""
+    # R9: the author, from the token's own metadata (artist_of) — credited
+    # at the reveal, never formatted into a clue prompt.
+    artist: str = ""
 
     def id(self) -> str:
         """'base:0x…:5' — the value inside the integrity commitment, and the
@@ -261,6 +278,7 @@ class TargetSelector:
             image=str(meta.get("image") or ""),
             metadata_sha256=metadata_hash(meta),
             epoch=epoch.epoch_id,
+            artist=artist_of(meta),
         )
 
 

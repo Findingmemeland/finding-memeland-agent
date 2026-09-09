@@ -63,6 +63,8 @@ from .templates import (
     POST_REPLY_UNRESOLVED_LINK,
     TargetWinnerData,
     VoidRevealData,
+    artwork_alt_text,
+    item_link_for,
     target_winner_announcement,
     void_reveal,
 )
@@ -86,6 +88,9 @@ class TargetPorts:
     # repeated live check never touches a gateway — hunt.LiveCheck). None
     # = unresolvable, printed as such. Optional: sims and dry-runs omit it.
     live_hash: Callable[[SealedTarget], LiveHash] | None = None
+    # The artwork's bytes for the reveal post (image types only, ≤ 5 MB):
+    # keyed gateway, once, after the hunt is decided. None = link only.
+    fetch_artwork: Callable[[SealedTarget], "bytes | None"] | None = None
     # How many redraws the content guard may force before /launch refuses.
     max_content_redraws: int = 3
     # HOLD ceiling and cadence (Opus, 06/09, P1-B): a hold without a ceiling
@@ -99,6 +104,12 @@ class TargetPorts:
     # episode ceiling while the deadline has been frozen for a day. The
     # system must detect DEGRADATION, not only death.
     max_total_hold_s: float = 12 * 3600.0
+
+
+# Hold causes — release is by cause (manage_hold)
+HOLD_LIVE = "live check unavailable"
+HOLD_GUARD = "search guard unverifiable"
+HOLD_LIVE_CLAIM = "live check unavailable at claim (winner waiting)"
 
 
 def target_label(number: int) -> str:
@@ -259,7 +270,17 @@ def manage_hold(orch, hunt, *, holding: bool, reason: str) -> None:
     """ONE ledger for every hold cause (live check unavailable, search guard
     unverifiable, live check at claim time): start/stop it, re-notify on a
     cadence, and past MAX_HOLD call the operator to DECIDE — the code never
-    resolves a hold on its own."""
+    resolves a hold on its own.
+
+    RELEASE IS BY CAUSE (found by the 6/6 dry-run, 09/09): a check that
+    comes back healthy releases ONLY the hold it opened (`reason` equal),
+    or any hold when `reason` is "" (a clue actually went out — the whole
+    pipeline is healthy). Before this, the live check passing every cycle
+    released the SEARCH GUARD's hold every cycle: sixty-second episodes,
+    start/stop/start, never an hour on the ledger — so the hourly
+    re-notify and BOTH ceilings were unreachable for a marketplace 429,
+    the exact outage P1-4 says can freeze a live hunt. Same time frozen,
+    zero visibility: the degradation R5 exists to detect."""
     ports: TargetPorts = orch._target
     ledger: HoldLedger = hunt.target_hold
     now = orch._clock.now().timestamp()
@@ -280,11 +301,11 @@ def manage_hold(orch, hunt, *, holding: bool, reason: str) -> None:
             cur = ledger.current_hold_seconds(now)
             total = ledger.held_seconds(now)
             if cur >= ports.max_hold_s or total >= ports.max_total_hold_s:
-                which = ("episode" if cur >= ports.max_hold_s
-                         else "ACCUMULATED across the hunt")
+                which = ("EPISODE ceiling" if cur >= ports.max_hold_s
+                         else "ACCUMULATED ceiling across the hunt")
                 orch._notify(
-                    f"🚨 HOLD past MAX ({which}: episode {cur/3600:.1f}h, total "
-                    f"{total/3600:.1f}h, {reason}) — the hunt is frozen and "
+                    f"🚨 HOLD past MAX — {which} (this episode {cur/3600:.1f}h, "
+                    f"hunt total {total/3600:.1f}h; {reason}) — the hunt is frozen and "
                     "nothing will be decided automatically. DECIDE: /resume once "
                     "the service is back, or void by hand.")
             else:
@@ -292,7 +313,7 @@ def manage_hold(orch, hunt, *, holding: bool, reason: str) -> None:
                              "deadline frozen.")
             _persist_hold(orch, hunt)
         return
-    if ledger.is_holding():
+    if ledger.is_holding() and (not reason or ledger.reason == reason):
         total = ledger.held_seconds(now)
         ledger.stop(now)
         orch._notify(f"▶️ hold released — deadline extended by {total:.0f}s total.")
@@ -312,10 +333,11 @@ def pre_clue_live_check(orch, hunt, clue_index: int) -> str:
         orch._notify(f"live check errored ({type(e).__name__}) — treating as unavailable")
     action = live_policy(verdict.status, phase=phase_for(clue_index))
     if action == ACT_CONTINUE:
-        manage_hold(orch, hunt, holding=False, reason="")
+        # releases only a hold the LIVE CHECK opened — a guard hold stays
+        manage_hold(orch, hunt, holding=False, reason=HOLD_LIVE)
         return PRE_CLUE_POST
     if action == ACT_HOLD:
-        manage_hold(orch, hunt, holding=True, reason="live check unavailable")
+        manage_hold(orch, hunt, holding=True, reason=HOLD_LIVE)
         return PRE_CLUE_SKIP
     # mutated / burned
     relaunching = action == ACT_RELAUNCH
@@ -332,13 +354,13 @@ def clue_failed(orch, hunt, exc: BaseException) -> bool:
     Returns True when the failure was turned into a hold."""
     from .clues import SearchGuardUnavailable
     if isinstance(exc, SearchGuardUnavailable):
-        manage_hold(orch, hunt, holding=True, reason="search guard unverifiable")
+        manage_hold(orch, hunt, holding=True, reason=HOLD_GUARD)
         return True
     return False
 
 
 def clue_posted(orch, hunt) -> None:
-    """A clue went out: whatever hold was open is over."""
+    """A clue went out: whatever hold was open is over (any cause)."""
     manage_hold(orch, hunt, holding=False, reason="")
 
 
@@ -356,10 +378,9 @@ def claim_time_live_check(orch, hunt) -> str:
         verdict = LiveVerdict(LIVE_UNAVAILABLE, None, 0)
     action = live_policy(verdict.status, phase=PHASE_CLAIM, valid_claim=True)
     if action == ACT_HOLD:
-        manage_hold(orch, hunt, holding=True,
-                    reason="live check unavailable at claim (winner waiting)")
+        manage_hold(orch, hunt, holding=True, reason=HOLD_LIVE_CLAIM)
         return "retry"
-    manage_hold(orch, hunt, holding=False, reason="")
+    manage_hold(orch, hunt, holding=False, reason=HOLD_LIVE_CLAIM)
     if action == ACT_PAY_NOTED:
         hunt.target_pay_noted = True
         lh = _live_hash(orch, hunt.target)
@@ -407,6 +428,7 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
         token_uri=sealed.target.token_uri,
         live_token_uri=ing.get("live_token_uri"),
         relaunching=relaunching,
+        artist=sealed.target.artist,
     ))
     orch._notify(f"hunt #{hunt.number} VOID ({cause})"
                  + (" — relaunch with /launch (the voided target is excluded)."
@@ -487,7 +509,42 @@ def reveal_text(orch, hunt, winner, receipt, *, time_to_win: str,
         mutated_after_claim=bool(getattr(hunt, "target_pay_noted", False)),
         token_uri=sealed.target.token_uri,
         live_token_uri=getattr(hunt, "target_live_token_uri", None),
+        item_link=item_link_for(sealed.id()),
+        artist=sealed.target.artist,
     ))
+
+
+class ArtworkUnusable(RuntimeError):
+    """fetch_artwork's measured 'no': the reason is printed to the OPERATOR
+    (Opus: count how often the reveal degrades to text — video/SVG art) and
+    never to the public."""
+
+
+def reveal_alt_text(hunt) -> str:
+    t = hunt.target.target
+    return artwork_alt_text(t.name_onchain, t.artist, hunt.number)
+
+
+def reveal_media(orch, hunt) -> bytes | None:
+    """The artwork's bytes for the reveal post (Opus, dry-run 09/09: the
+    reveal is the game's emotional payoff — show the treasure). Fetched
+    NOW, through our keyed gateway — the hunt is decided, nothing to hide —
+    via `TargetPorts.fetch_artwork`; None (no port, not an image, too big,
+    gateway down) means the post goes out with the item link alone. Never
+    blocks the announcement."""
+    ports: TargetPorts = orch._target
+    if ports.fetch_artwork is None:
+        return None
+    try:
+        return ports.fetch_artwork(hunt.target)
+    except ArtworkUnusable as e:
+        orch._notify(f"reveal artwork not attached: {e} — posting with the item "
+                     "link only")
+        return None
+    except Exception as e:  # noqa: BLE001 — the reveal never waits on art
+        orch._notify(f"reveal artwork not fetched ({type(e).__name__}) — posting "
+                     "with the item link only")
+        return None
 
 
 def resume_target_hunt(orch, row: dict, hunt):

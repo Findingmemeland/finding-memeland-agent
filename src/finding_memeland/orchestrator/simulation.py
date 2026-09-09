@@ -285,15 +285,24 @@ class FakePublisher:
         self.posts: list[str] = []
         self.dm_replies: list[tuple[str, str]] = []
         self.post_replies: list[tuple[str, str]] = []  # (in_reply_to, text)
+        self.media: dict[str, bytes] = {}              # tweet id -> attached bytes
+        self.media_alt: dict[str, str] = {}            # tweet id -> alt text
         self._verbose = verbose
         self._n = 0
 
-    def post(self, text: str, *, long_post: bool = False) -> str:
+    def post(self, text: str, *, long_post: bool = False,
+             media: bytes | None = None, media_alt: str | None = None) -> str:
         self._n += 1
         self.posts.append(text)
+        tid = f"tweet-{self._n}"
+        if media is not None:
+            self.media[tid] = media
+            if media_alt:
+                self.media_alt[tid] = media_alt
         if self._verbose:
-            print(f"\n>>> POST {self._n} {'(long)' if long_post else ''}\n{text}\n")
-        return f"tweet-{self._n}"
+            tag = ("(long)" if long_post else "") + (f" [+media {len(media)} B]" if media else "")
+            print(f"\n>>> POST {self._n} {tag}\n{text}\n")
+        return tid
 
     def reply_dm(self, recipient_x_id: str, text: str) -> None:
         self.dm_replies.append((recipient_x_id, text))

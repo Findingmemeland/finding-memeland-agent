@@ -1523,7 +1523,6 @@ class Orchestrator:
         # guess spent, ONE format reply per profile (sys_sent), and the
         # operator hears about a shotgun account once it insists (P1-1).
         malformed_by_author: dict[str, int] = {}
-        malformed_notified: set[str] = set()
         if is_target:
             from ..target.templates import POST_REPLY_WRONG_DOOR_TARGET
             wrong_door_reply = POST_REPLY_WRONG_DOOR_TARGET
@@ -1764,12 +1763,14 @@ class Orchestrator:
                                 )
                             except Exception as e:  # noqa: BLE001
                                 self._notify(f"malformed post {post.tweet_id} not logged: {e!r}")
-                            if n >= 3 and post.author_id not in malformed_notified:
-                                malformed_notified.add(post.author_id)
+                            # escalating thresholds, count "so far": the total
+                            # lives in the log (outcome='malformed'), the
+                            # operator hears at 3, 10, 50 and 200
+                            if n in (3, 10, 50, 200):
                                 self._notify(
                                     f"shotgun posts from @{post.author_handle}: {n} "
-                                    "multi-token replies (no guess spent, one format "
-                                    "reply sent; logged as 'malformed')"
+                                    "multi-token replies so far (no guess spent, one "
+                                    "format reply sent; every one logged as 'malformed')"
                                 )
                         self._sys_reply("format", post, hint, sys_sent)
                         _done(post)
@@ -2399,19 +2400,26 @@ class Orchestrator:
         )
         from ..persona.relic_integration import deliver_trophy
 
+        media = media_alt = None
         if getattr(hunt, "target", None) is not None:
-            from ..target.integration import reveal_text
+            from ..target.integration import reveal_alt_text, reveal_media, reveal_text
             text = reveal_text(
                 self, hunt, winner, receipt,
                 time_to_win=data.time_to_win, prize_amount=data.prize_amount,
             )
+            media = reveal_media(self, hunt)      # the treasure, shown
+            media_alt = reveal_alt_text(hunt)     # R9: title + author
         else:
             text = winner_announcement(data)
         # The prize is already paid; the trophy is a bonus and never blocks.
         deliver_trophy(self, hunt, winner)
         for attempt in range(3):
             try:
-                self._publisher.post(text, long_post=True)
+                if media is not None:
+                    self._publisher.post(text, long_post=True, media=media,
+                                         media_alt=media_alt)
+                else:
+                    self._publisher.post(text, long_post=True)
                 break
             except Exception as e:  # noqa: BLE001
                 if attempt == 2:

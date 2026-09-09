@@ -76,9 +76,19 @@ TARGET_CLUE_FOLLOWUP_CLAIM_HINT = (
 )
 
 
+def claim_hint_due(clue_index: int) -> bool:
+    """Where the claim line goes (Opus, dry-run 09/09): clues 2 and 3, then
+    every fifth. Twenty near-identical closers in one thread read as spam
+    and X down-ranks near-duplicate content — the opposite of what a long
+    hunt needs. Late joiners still meet the line within a few clues."""
+    return clue_index in (2, 3) or (clue_index >= 5 and clue_index % 5 == 0)
+
+
 def target_clue_followup(clue_index: int, clue_text: str, taunt: str) -> str:
     body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}\n\n{taunt}"
-    return body + f"\n\n{TARGET_CLUE_FOLLOWUP_CLAIM_HINT}"
+    if claim_hint_due(clue_index):
+        body += f"\n\n{TARGET_CLUE_FOLLOWUP_CLAIM_HINT}"
+    return body
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +157,26 @@ class TargetWinnerData:
     mutated_after_claim: bool = False
     token_uri: str = ""                   # sealed at launch (v3)
     live_token_uri: str | None = None     # what the chain answered later
+    # The reveal SHOWS the treasure (Opus, dry-run 09/09): the artwork is
+    # attached as media by the caller when its bytes are an image, and the
+    # item page is the post's ONE URL (OpenSea renders the art card —
+    # measured Hunt #9; the tx hash stays plain text). Format confirmed by
+    # Pedro's own post that rendered: opensea.io/item/<chain>/<contract>/<id>.
+    item_link: str | None = None
+    artist: str = ""                  # R9: credited when the metadata names one
+
+
+def _treasure_line(name_onchain: str, artist: str) -> str:
+    """R9 — 'The treasure was “X”, by Y' when the metadata names the author;
+    the title alone when it does not (nothing invented)."""
+    return (f"The treasure was “{name_onchain}”, by {artist}" if artist
+            else f"The treasure was “{name_onchain}”")
+
+
+def artwork_alt_text(name_onchain: str, artist: str, hunt_n: int) -> str:
+    """Alt-text for the attached artwork (R9: accessibility + credit)."""
+    who = f", by {artist}" if artist else ""
+    return f"“{name_onchain}”{who} — the NFT that was Hunt #{hunt_n}'s treasure."[:1000]
 
 
 def target_winner_announcement(d: TargetWinnerData) -> str:
@@ -163,10 +193,11 @@ def target_winner_announcement(d: TargetWinnerData) -> str:
             f"full bounty is yours next time.\n"
             if not d.holder else ""
         )
-        + f"\nThe treasure was “{d.target_name_onchain}” — an NFT that "
-        "was already out there, made by someone else. It stays with its "
-        "owner; we never touched it. The prize was on Base; the treasure "
-        "was wherever it was.\n\n"
+        + "\n" + _treasure_line(d.target_name_onchain, d.artist)
+        + (" — an NFT that was already out there." if d.artist else
+           " — an NFT that was already out there, made by someone else.")
+        + " It stays with its owner; we never touched it. The prize was on "
+        "Base; the treasure was wherever it was.\n\n"
         + commitment_block(target_id=d.target_id,
                            metadata_sha256=d.metadata_sha256, salt=d.salt,
                            token_uri=d.token_uri)
@@ -180,9 +211,17 @@ def target_winner_announcement(d: TargetWinnerData) -> str:
             "or what a third party does to it later. prize paid in full."
             if d.mutated_after_claim else ""
         )
+        + (f"\n\nsee it: {d.item_link}" if d.item_link else "")
         + "\n\nTo the rest of you: keep your eyes open. "
         "The next hunt can begin at any time."
     )
+
+
+def item_link_for(target_id: str) -> str | None:
+    """opensea.io/item/<chain>/<contract>/<tokenId> — the one URL of the
+    reveal. None when the id does not split (nothing invented)."""
+    chain, contract, token = _split_id(target_id)
+    return f"opensea.io/item/{chain}/{contract}/{token}" if contract else None
 
 
 # --------------------------------------------------------------------------- #
@@ -203,6 +242,7 @@ class VoidRevealData:
     token_uri: str = ""                       # sealed at launch (v3)
     live_token_uri: str | None = None         # what the chain answered at the void
     live_hash_status: str = "unavailable"     # resolved | unresolvable | unavailable (R8)
+    artist: str = ""                          # R9
 
 
 # R8 (Opus audit, 09/09): PUBLISH ONLY WHAT WAS MEASURED. The cause lines say
@@ -248,8 +288,8 @@ def void_reveal(d: VoidRevealData) -> str:
     return (
         f"Hunt #{d.hunt_n} is void — {cause}.\n"
         "The prize goes back to the vault. Nobody loses anything they had.\n\n"
-        f"The treasure was “{d.target_name_onchain}”. Here is everything, "
-        "so you can check us:\n\n"
+        + _treasure_line(d.target_name_onchain, d.artist)
+        + ". Here is everything, so you can check us:\n\n"
         + commitment_block(target_id=d.target_id,
                            metadata_sha256=d.metadata_sha256, salt=d.salt,
                            token_uri=d.token_uri)

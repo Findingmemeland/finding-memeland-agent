@@ -59,7 +59,8 @@ class Clock(Protocol):
 
 class Publisher(Protocol):
     """Posts on the main @FindingMemeland account."""
-    def post(self, text: str, *, long_post: bool = False) -> str: ...
+    def post(self, text: str, *, long_post: bool = False,
+             media: bytes | None = None, media_alt: str | None = None) -> str: ...
     def reply_dm(self, recipient_x_id: str, text: str) -> None: ...
 
 

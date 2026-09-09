@@ -16,6 +16,7 @@ confirmed so far (see scripts/spike_dm_read.py).
 from __future__ import annotations
 
 import functools
+import io
 import time
 from dataclasses import dataclass
 
@@ -50,6 +51,18 @@ _DM_MAX_PAGES = 10
 _MENTIONS_FETCH = 100
 _MENTIONS_MAX_PAGES = 10
 _TWEET_FIELDS = ["author_id", "created_at", "conversation_id", "referenced_tweets"]
+
+
+def _image_ext(data: bytes) -> str:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return ".png"
 
 
 def _retry_server_error(fn, *, tries: int = 3, delay: float = 4.0):
@@ -95,7 +108,12 @@ class XClient:
         bearer_token: str = "",
         main_access_token: str = "",
         main_access_secret: str = "",
+        warn=None,
     ):
+        # degradations that do not fail the call (a media upload that did
+        # not happen) go HERE — the operator's channel in production, never
+        # a print nobody reads on Railway (Opus, 09/09)
+        self._warn = warn or (lambda msg: print(f"[x] {msg}"))
         self._api_key = api_key
         self._api_secret = api_secret
         self._bearer = bearer_token
@@ -422,11 +440,52 @@ class XClient:
         ))
         return str(resp.data["id"])
 
-    def post(self, text: str, *, long_post: bool = False) -> str:
+    def post(self, text: str, *, long_post: bool = False,
+             media: bytes | None = None, media_alt: str | None = None) -> str:
         """Publish on the main account; returns the tweet id. Long posts require
-        X Premium on the account (no extra param needed)."""
-        resp = _retry_server_error(lambda: self._v2().create_tweet(text=text, user_auth=True))
+        X Premium on the account (no extra param needed). `media` (image bytes)
+        is uploaded through v1.1 media/upload on the main account's OAuth 1.0a
+        context, gets `media_alt` as alt-text, and is attached to the tweet;
+        if the upload fails the text still goes out without it (the reveal is
+        never blocked by a picture) and the operator is WARNED. NOT yet
+        measured against X — exercise with the live test before Hunt #11."""
+        media_ids: list[str] = []
+        if media:
+            try:
+                mid = self._upload_media(media)
+                if mid:
+                    media_ids = [mid]
+                    if media_alt:
+                        self._alt_text(mid, media_alt)
+            except Exception as e:  # noqa: BLE001
+                self._warn(f"⚠️ media upload failed ({type(e).__name__}: {e}) — "
+                           "posting the text without the picture")
+        kwargs = {"text": text, "user_auth": True}
+        if media_ids:
+            kwargs["media_ids"] = media_ids
+        resp = _retry_server_error(lambda: self._v2().create_tweet(**kwargs))
         return str(resp.data["id"])
+
+    def _upload_media(self, data: bytes) -> str | None:
+        """v1.1 media/upload on the main account; returns media_id (None for
+        empty bytes — never send zero bytes). The filename carries the
+        extension tweepy uses to pick the MIME type (on 3.13 it has no
+        imghdr and guesses from the name alone)."""
+        if not data:
+            return None
+        api = self._api_for(self._main_token, self._main_secret)
+        m = _retry_server_error(lambda: api.media_upload(
+            filename="artwork" + _image_ext(data), file=io.BytesIO(data)))
+        return str(m.media_id)
+
+    def _alt_text(self, media_id: str, alt: str) -> None:
+        """Alt-text on the uploaded media (R9); a failure here is a warning,
+        the picture still goes out."""
+        api = self._api_for(self._main_token, self._main_secret)
+        try:
+            api.create_media_metadata(media_id, alt[:1000])
+        except Exception as e:  # noqa: BLE001
+            self._warn(f"media alt-text not set ({type(e).__name__})")
 
     def delete_post(self, tweet_id: str) -> None:
         """Delete a post on the main account (used by the live-test cleanup)."""

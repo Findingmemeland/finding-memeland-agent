@@ -221,3 +221,59 @@ def test_fingerprint_binds_the_pool_contents_not_only_the_stamp():
     b = Snapshot(epoch_id="e1", built_at="t", entries=[e2])
     assert a.digest() != b.digest() and len(a.digest()) == 12
     assert Snapshot(epoch_id="e1", built_at="t", entries=[e1]).digest() == a.digest()
+
+
+def test_fetch_artwork_only_content_addressed_images_under_the_cap():
+    """Opus (dry-run 09/09): the reveal shows the treasure. Through OUR
+    gateway, once, on the reveal's OWN transport (short timeout, no
+    redirects — main._http_get_artwork); not an image / too big / plain
+    https → ArtworkUnusable with the MEASURED reason (the operator's
+    tally), transport errors propagate (reveal_media catches both)."""
+    from finding_memeland.target.hunt import SealedTarget
+    from finding_memeland.target.integration import ArtworkUnusable
+    from finding_memeland.target.selector import Target
+    from finding_memeland.target.wiring import MAX_ARTWORK_BYTES
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    cid = "QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN"
+
+    def sealed(image):
+        t = Target(chain="ethereum", contract=C, token_id=1, name="x", name_onchain="x",
+                   description="", image=image, metadata_sha256="m", epoch="e1",
+                   token_uri=f"ipfs://{cid}", content_id=f"ipfs:{cid}")
+        return SealedTarget(target=t, salt="s" * 32, commitment="c" * 64)
+    seen = []
+
+    def get_art(url, headers):
+        seen.append(url)
+        if "big" in url:
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * MAX_ARTWORK_BYTES
+        if "html" in url:
+            return b"<html>Just a moment...</html>"
+        if "mp4" in url:
+            return b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 8
+        if "svg" in url:
+            return b"<?xml version='1.0'?><svg/>"
+        if "down" in url:
+            raise ConnectionError("pinata 503")
+        return png
+
+    def wrong(url, headers):
+        raise AssertionError("the reveal must use its own transport")
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=lambda u, h: "{}", http_post=rpc_ok,
+                     http_get_bytes=wrong, get_artwork_bytes=get_art)
+    fa = w.ports.fetch_artwork
+    assert fa(sealed(f"ipfs://{cid}")) == png
+    assert seen == [f"https://gateway.pinata.cloud/ipfs/{cid}"]
+    for suffix, reason in (("big.png", "too big"), ("html", "html"),
+                           ("mp4", "video/mp4"), ("svg", "svg")):
+        with pytest.raises(ArtworkUnusable) as e:
+            fa(sealed(f"ipfs://{cid}/{suffix}"))
+        assert reason in str(e.value)
+    for img in ("https://example.com/art.png", "data:image/png;base64,AAAA"):
+        with pytest.raises(ArtworkUnusable) as e:
+            fa(sealed(img))
+        assert "not content-addressed" in str(e.value)
+    assert not any("example.com" in u for u in seen)                # never fetched
+    with pytest.raises(ConnectionError):                            # reveal_media catches it
+        fa(sealed(f"ipfs://{cid}/down"))

@@ -49,6 +49,29 @@ def _http_get(url: str, headers: dict | None = None) -> str:
     return _http_get_bytes(url, headers).decode("utf-8", "ignore")
 
 
+class _NoRedirect(Exception):
+    pass
+
+
+def _http_get_artwork(url: str, headers: dict | None = None) -> bytes:
+    """The reveal's picture (Opus, 09/09): a winner is waiting, so a SHORT
+    timeout; NO redirects (the wiring validated the URL it built, a 302
+    would take the fetch to a host it never checked); reads at most the
+    cap + 1 so a huge file is refused by size, not downloaded."""
+    import urllib.request
+
+    from .target.wiring import ARTWORK_TIMEOUT_S, MAX_ARTWORK_BYTES
+
+    class _Handler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+            raise _NoRedirect(f"redirect {code} refused")
+    opener = urllib.request.build_opener(_Handler)
+    req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
+                                               **(headers or {})})
+    with opener.open(req, timeout=ARTWORK_TIMEOUT_S) as r:
+        return r.read(MAX_ARTWORK_BYTES + 1)
+
+
 def _http_post(url: str, body: bytes, headers: dict) -> str:
     import urllib.request
 
@@ -314,7 +337,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             target_wiring = build_target(
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
                 http_post=_http_post, http_get_bytes=_http_get_bytes,
-                solver=_target_solver,
+                get_artwork_bytes=_http_get_artwork, solver=_target_solver,
             )
             print("[target] mode wired (epoch "
                   f"{s.target_epoch_id!r}; launch={'ON' if s.target_launch else 'off'})")
@@ -328,6 +351,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     x = XClient(
         api_key=s.x_api_key, api_secret=s.x_api_secret, bearer_token=s.x_bearer_token,
         main_access_token=s.x_main_access_token, main_access_secret=s.x_main_access_secret,
+        warn=notifier.notify,
     )
 
     holdings = Holdings(web3=web3, token_address=s.fmml_token_address, repo=repo)

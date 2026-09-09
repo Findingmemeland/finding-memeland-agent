@@ -12,8 +12,11 @@ class XPublisher:
     def __init__(self, x_client):
         self._x = x_client
 
-    def post(self, text: str, *, long_post: bool = False) -> str:
-        return self._x.post(text, long_post=long_post)
+    def post(self, text: str, *, long_post: bool = False,
+             media: bytes | None = None, media_alt: str | None = None) -> str:
+        if media is None:                   # duck-typed clients without media
+            return self._x.post(text, long_post=long_post)
+        return self._x.post(text, long_post=long_post, media=media, media_alt=media_alt)
 
     def reply_dm(self, recipient_x_id: str, text: str) -> None:
         self._x.reply_dm(recipient_x_id, text)

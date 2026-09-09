@@ -35,7 +35,9 @@ from .adapters import (
     RotatingLiveCheck,
     chain_rpcs,
     code_bytes,
+    gateway_url,
     mint_fetcher,
+    sniff_media_type,
 )
 from .clues import TargetClueEngine, describe_image_batched
 from .discovery import DiscoveryStateStore, EraDiscovery
@@ -49,7 +51,7 @@ from .hunt import (
     SprayParams,
     TargetHuntPreparer,
 )
-from .integration import TargetPorts
+from .integration import ArtworkUnusable, TargetPorts
 from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import ClueSearchGuard, MarketNameUniqueness, RaribleSearch
 from .selector import CurationEpoch
@@ -65,6 +67,8 @@ from .sources import (
 BLOB_DISCOVERY = "target:discovery"
 BLOB_REGISTRY = "target:registry"
 BLOB_SNAPSHOT = "target:snapshot"
+MAX_ARTWORK_BYTES = 5 * 1024 * 1024      # X image limit; bigger → link only
+ARTWORK_TIMEOUT_S = 10                   # a winner is waiting; the picture is optional
 
 
 def _now_iso() -> str:
@@ -118,13 +122,33 @@ class TargetWiring:
         return self.pipeline.refresh(self.epoch)
 
 
+def _media_kind(data: bytes) -> str:
+    """Names what the gateway served when it is not a still image — for
+    the operator's tally, never published."""
+    head = data[:64].lstrip()
+    if data[4:8] == b"ftyp":
+        return "video/mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "video/webm"
+    if head[:5].lower() == b"<?xml" or head[:4].lower() == b"<svg":
+        return "svg"
+    if head[:1] == b"<":
+        return "html"
+    if data[:4] == b"%PDF":
+        return "pdf"
+    return "unknown"
+
+
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
-                 solver=None, rng: random.Random | None = None) -> TargetWiring:
+                 get_artwork_bytes=None, solver=None,
+                 rng: random.Random | None = None) -> TargetWiring:
     """Compose target mode from Settings `s` and injected clients.
 
     http_get(url, headers) -> str · http_post(url, body, headers) -> str ·
     http_get_bytes(url, headers) -> bytes — all raise on HTTP/transport
-    failure. `repo` provides get_blob/put_blob (db.client.Repo). `solver`
+    failure. `get_artwork_bytes` (same shape) is the reveal's transport:
+    short timeout, NO redirects, reads at most the cap (main._http_get_artwork);
+    defaults to http_get_bytes for tests. `repo` provides get_blob/put_blob (db.client.Repo). `solver`
     is the blind solver main.py already selects for relic clues (an
     INDEPENDENT model by default — Hunt #7 post-mortem); None keeps the
     engine's own default, False switches it off."""
@@ -261,6 +285,29 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             return LiveHash.unavailable()
         return LiveHash(LIVE_HASH_RESOLVED, metadata_hash(meta))
 
+    get_art = get_artwork_bytes or http_get_bytes
+
+    def fetch_artwork(sealed: SealedTarget) -> bytes | None:
+        """The reveal's picture, once, through OUR gateway (the hunt is
+        decided — same doctrine as live_hash). Only a content-addressed
+        image (the draw guarantees it), only if it sniffs as an image, only
+        up to MAX_ARTWORK_BYTES; anything else raises ArtworkUnusable with
+        the MEASURED reason (the operator counts how often the reveal
+        degrades to text — much 1/1 art is mp4/SVG) and the post carries
+        the item link alone. Transport errors propagate (reveal_media
+        catches them)."""
+        url = gateway_url(sealed.target.image, s.target_ipfs_gateway)
+        if url is None or not url.lower().startswith(s.target_ipfs_gateway.lower()):
+            raise ArtworkUnusable("image not content-addressed (not fetched)")
+        data = get_art(url, {})
+        if not data:
+            raise ArtworkUnusable("empty body from the gateway")
+        if len(data) > MAX_ARTWORK_BYTES:
+            raise ArtworkUnusable(f"too big for X (> {MAX_ARTWORK_BYTES // (1024 * 1024)} MB)")
+        if sniff_media_type(data) is None:
+            raise ArtworkUnusable(f"not a still image ({_media_kind(data)})")
+        return data
+
     preparer = TargetHuntPreparer(
         snapshot_store=snapshot_store,
         writability_rates=s.target_writability_rate_map,
@@ -280,6 +327,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         live_check=RotatingLiveCheck(generic=generic, rng=rng),
         resolve_link=resolver,
         live_hash=live_hash,
+        fetch_artwork=fetch_artwork,
         spray=SprayDetector(SprayParams()),
         hold_renotify_s=float(s.target_hold_renotify_s),
         max_hold_s=float(s.target_max_hold_s),

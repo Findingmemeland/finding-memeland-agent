@@ -433,6 +433,10 @@ def test_sealed_round_trip_is_ciphered_and_verified():
     back = c.unseal(blob)
     assert back == sealed
     assert back.decoys == sealed.decoys and len(back.decoys) == 7
+    # R9: the author rides in the sealed doc (credited at the reveal)
+    import dataclasses
+    credited = dataclasses.replace(sealed, target=dataclasses.replace(sealed.target, artist="A. Painter"))
+    assert c.unseal(c.seal(credited)).target.artist == "A. Painter"
 
 
 def test_sealed_tamper_fails_closed_without_contents():

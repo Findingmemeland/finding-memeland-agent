@@ -93,7 +93,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
-from .selector import CurationEpoch, SelectionRefused, Target
+from .selector import CurationEpoch, SelectionRefused, Target, artist_of
 from .snapshot import Snapshot, SnapshotStore, snapshot_selector, stratum_gate
 from .sources import ChainUnavailable
 
@@ -164,7 +164,8 @@ class SealedTargetCipher:
                           "description": t.description, "image": t.image,
                           "metadata_sha256": t.metadata_sha256,
                           "epoch": t.epoch,
-                          "token_uri": t.token_uri, "content_id": t.content_id}}
+                          "token_uri": t.token_uri, "content_id": t.content_id,
+                          "artist": t.artist}}
         return self._cipher.encrypt(json.dumps(doc, ensure_ascii=False))
 
     def unseal(self, blob: str) -> SealedTarget:
@@ -181,7 +182,8 @@ class SealedTargetCipher:
                             image=t.get("image", ""),
                             metadata_sha256=t["metadata_sha256"],
                             epoch=t["epoch"],
-                            token_uri=t["token_uri"], content_id=t["content_id"])
+                            token_uri=t["token_uri"], content_id=t["content_id"],
+                            artist=str(t.get("artist") or ""))
             decoys = tuple(Decoy(chain=c, contract=a, token_id=int(i), image=im)
                            for c, a, i, im in doc["decoys"])
             sealed = SealedTarget(target=target, salt=doc["salt"],
@@ -449,7 +451,8 @@ class TargetHuntPreparer:
                        description=str(e.metadata.get("description") or "")[:600],
                        image=str(e.metadata.get("image") or ""),
                        metadata_sha256=e.metadata_sha256, epoch=epoch.epoch_id,
-                       token_uri=e.token_uri, content_id=e.content_id)
+                       token_uri=e.token_uri, content_id=e.content_id,
+                       artist=artist_of(e.metadata))
                 for e in picks]
 
 

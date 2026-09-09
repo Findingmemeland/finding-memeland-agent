@@ -61,7 +61,7 @@ from ..content.relic_clues import (
     spent_angles,
 )
 from .search_guard import ClueSearchGuard
-from .selector import Target
+from .selector import ARTIST_KEYS, Target
 
 # --------------------------------------------------------------------------- #
 # Forbidden words — the address of the answer, never in a clue                  #
@@ -93,7 +93,7 @@ def forbidden_address_words(text: str) -> list[str]:
 # Context                                                                      #
 # --------------------------------------------------------------------------- #
 
-_ARTIST_KEYS = ("artist", "created_by", "creator", "author", "createdBy")
+_ARTIST_KEYS = ARTIST_KEYS      # one reading (R9): banned here, credited at the reveal
 
 
 @dataclass

@@ -13,177 +13,20 @@ from datetime import timedelta
 
 import pytest
 
-from finding_memeland.claims.parser import ClaimPost
-from finding_memeland.claims.taunts import TauntEngine
-from finding_memeland.orchestrator.simulation import build_simulation
 from finding_memeland.orchestrator.state_machine import HuntState
 from finding_memeland.target.commitment import compute_commitment_v2
-from finding_memeland.target.hunt import (
-    JudgeVerdict,
-    LiveCheck,
-    LiveHash,
-    LiveRead,
-    SealedTargetCipher,
-    SprayDetector,
-    SprayParams,
-    TargetHuntPreparer,
-)
-from finding_memeland.target.integration import TargetPorts
-from finding_memeland.target.selector import CurationEpoch, metadata_hash
-from finding_memeland.target.snapshot import Snapshot, SnapshotEntry, SnapshotStore
+from finding_memeland.target.hunt import LiveCheck, SprayParams
 from finding_memeland.target.sources import ChainUnavailable
 from finding_memeland.target.templates import POST_REPLY_FORMAT
 
-WALLET_A = "0x" + "a" * 40
-EPOCH = CurationEpoch(epoch_id="e1")
-RATES = {"foundation": 1000.0, "superrare2": 1000.0, "makersplace": 1000.0}  # 60×1000 per stratum: over the floor, under the caps
-
-
-# --------------------------------------------------------------------------- #
-# Fakes                                                                        #
-# --------------------------------------------------------------------------- #
-
-
-class MemStore:
-    def __init__(self):
-        self.blob = None
-
-    def read(self):
-        return self.blob
-
-    def write(self, b):
-        self.blob = b
-
-
-class XorCipher:
-    def encrypt(self, p):
-        return p[::-1]
-
-    def decrypt(self, t):
-        return t[::-1]
-
-
-class FakeClaimSource:
-    def __init__(self):
-        self.schedule: dict[int, object] = {}
-        self.reshared: set[str] = set()
-        self.polls = 0
-        self._delivered: list[ClaimPost] = []
-
-    def poll(self, since):
-        self.polls += 1
-        entry = self.schedule.get(self.polls)
-        if entry is not None:
-            self._delivered += list(entry() if callable(entry) else entry)
-        if since is None:
-            return list(self._delivered)
-        return [p for p in self._delivered if int(p.tweet_id) > int(since)]
-
-    def sweep(self, conversation_id, since):
-        return []
-
-    def has_reshared(self, user_id, post_id):
-        return user_id in self.reshared
-
-    def lookup_profile(self, user_id):
-        return {"name": "Some One", "handle": f"u{user_id}", "bio": "gm"}
-
-
-class FakeControl:
-    def __init__(self):
-        self._paused = False
-        self.pause_calls = 0
-
-    def paused(self):
-        return self._paused
-
-    def pause(self):
-        self.pause_calls += 1
-        self._paused = True
-        return 1
-
-
-class World:
-    """The snapshot, the live chain (metadata by key), and the rig."""
-
-    def __init__(self, *, live_params=None):
-        from finding_memeland.target.refresh import content_id
-        entries = []
-        i = 0
-        for plat in ("foundation", "superrare2", "makersplace"):
-            for _ in range(60):
-                i += 1
-                meta = {"name": f"Whispering Harbor {i}", "image": f"ipfs://img{i}",
-                        "description": "quiet"}
-                uri = f"ipfs://Qm{str(i).rjust(44, '1')}/metadata.json"
-                entries.append(SnapshotEntry(
-                    chain="ethereum", contract=f"0x{i:040x}", token_id=i,
-                    name="Whispering Harbor", name_onchain=f"Whispering Harbor {i}",
-                    metadata=meta, metadata_sha256=metadata_hash(meta), platform=plat,
-                    token_uri=uri, content_id=content_id(uri)))
-        self.snapshot = Snapshot(epoch_id="e1", built_at="2026-08-01T11:00:00Z",
-                                 entries=entries)
-        # the live chain: key -> (token_uri, owner); None = burned. Tests
-        # mutate by swapping the URI (a new CID), burn by setting None.
-        self.live = {(e.chain, e.contract, e.token_id): (e.token_uri, "0xowner")
-                     for e in entries}
-        self.down = False
-        mem = MemStore()
-        store = SnapshotStore(cipher=XorCipher(), read=mem.read, write=mem.write)
-        store.save(self.snapshot)
-        self.fetches: list[tuple] = []
-
-        def fetch_live(chain, contract, tid):
-            self.fetches.append((chain, contract, tid))
-            if self.down:
-                raise ChainUnavailable("rpc down")
-            v = self.live.get((chain, contract, tid))
-            return LiveRead(v[0], v[1]) if v else LiveRead(None, None)
-        self.fetch_live = fetch_live
-
-        self.control = FakeControl()
-        self.ports = TargetPorts(
-            epoch=EPOCH,
-            preparer=TargetHuntPreparer(
-                snapshot_store=store, writability_rates=RATES,
-                uniqueness_rates={k: 1.0 for k in RATES},
-                cap_exempt=frozenset(),
-                judge=lambda batch: [JudgeVerdict(True, True) for _ in batch],
-                name_is_unique=lambda base, ch, c, t: True,
-                now_iso=lambda: "2026-08-01T12:00:00Z", rng=random.Random(0)),
-            cipher=SealedTargetCipher(cipher=XorCipher()),
-            clue_engine=None,                       # set below (rig's fake engine)
-            describe_image=lambda sealed: "a lighthouse on a black rock",
-            live_check=LiveCheck(read_live=fetch_live, rng=random.Random(1)),
-            live_hash=lambda sealed: LiveHash("resolved", "deadbeef" * 8),
-            resolve_link=None,
-            spray=SprayDetector(live_params or SprayParams()),
-        )
-        self.rig = build_simulation(poll_interval_s=60)
-        self.orch = self.rig.orchestrator
-        self.ports.clue_engine = self.orch._clue_engine     # FakeClueEngine
-        self.orch._target_launch = True
-        self.orch._target = self.ports
-        self.orch._control = self.control
-        self.src = FakeClaimSource()
-        self.orch._claim_source = self.src
-        self.orch._taunt_engine = TauntEngine()
-
-    def launch(self):
-        hunt = self.orch._prepare(200)
-        self.rig.clock.sleep(600)
-        self.orch._go_live(hunt)
-        return hunt
-
-
-def post(tid, author, text, at, reply_to):
-    return ClaimPost(tweet_id=str(tid), author_id=str(author),
-                     author_handle=f"u{author}", text=text, created_at=at,
-                     conversation_id=None, replied_to_id=reply_to)
-
-
-def replies_to(rig, tid):
-    return [t for r, t in rig.publisher.post_replies if r == str(tid)]
+# The world (snapshot + live chain + rig) and the fakes live in
+# target/dryrun.py — the 6/6 dry-run and these tests share ONE harness.
+from finding_memeland.target.dryrun import (
+    WALLET_A,
+    TargetWorld as World,
+    post,
+    replies_to,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -349,6 +192,13 @@ def test_full_hunt_pays_and_reveal_verifies():
     salt = re.search(r"salt: (\S+)", reveal).group(1)
     assert compute_commitment_v2(f"{chain}:{contract}:{token}", meta, salt) == hunt.integrity_hash
     assert "note:" not in reveal
+    # Opus (dry-run 09/09): the reveal SHOWS the treasure — art as media,
+    # item link in the text; the media never blocks the announcement
+    assert f"see it: opensea.io/item/ethereum/{target.contract.lower()}/{target.token_id}" in reveal
+    from finding_memeland.target.dryrun import FAKE_ARTWORK
+    assert list(w.rig.publisher.media.values()) == [FAKE_ARTWORK]
+    assert f"“{target.name_onchain}”, by {target.artist}" in reveal      # R9
+    assert target.artist and target.artist in list(w.rig.publisher.media_alt.values())[0]
     assert w.rig.payout.sent and w.rig.payout.sent[0]["wallet"] == WALLET_A
 
 
@@ -385,6 +235,45 @@ def test_transport_outage_holds_and_freezes_the_void_deadline():
     assert not any("Clue:" in p for p in w.rig.publisher.posts)   # sem pistas em hold
     assert any("HOLD (live check unavailable)" in m for m in w.rig.notifier.messages)
     assert hunt.target_hold.held_seconds(w.rig.clock.now().timestamp()) > 3600
+
+
+def test_reveal_without_usable_artwork_goes_out_with_the_link_and_tells_why():
+    """Opus: video/SVG art degrades the reveal to text — correct, but the
+    operator must be able to COUNT it (the reason is measured, never
+    published); a hung/failed gateway is a type name, and the reveal never
+    waits on either."""
+    from finding_memeland.target.integration import ArtworkUnusable
+
+    def run(fetch):
+        w = World()
+        w.ports.fetch_artwork = fetch
+        hunt = w.launch()
+        t0 = hunt.live_at
+        target = hunt.target.target
+        w.src.reshared.add("42")
+        w.src.schedule[1] = lambda: [
+            post(1010, "42", f"ethereum:{target.contract}:{target.token_id}",
+                 t0 + timedelta(minutes=1), hunt.reshare_post_id)]
+        w.src.schedule[4] = lambda: [
+            post(1040, "42", WALLET_A, t0 + timedelta(minutes=4),
+                 w.rig.repo.hunts[hunt.id].get("pending_ask_tweet_id"))]
+        winner = w.orch._claim_loop(hunt)
+        w.orch._reveal(hunt, winner, w.orch._pay(hunt, winner))
+        reveal = next(p for p in w.rig.publisher.posts if "We have a winner" in p)
+        assert "see it: opensea.io/item/" in reveal and w.rig.publisher.media == {}
+        return [m for m in w.rig.notifier.messages if "reveal artwork" in m], target
+
+    def unusable(sealed):
+        raise ArtworkUnusable("not a still image (video/mp4)")
+    notes, target = run(unusable)
+    assert notes == ["reveal artwork not attached: not a still image (video/mp4) — "
+                     "posting with the item link only"]
+
+    def hung(sealed):
+        raise TimeoutError("gateway")
+    notes, target = run(hung)
+    assert len(notes) == 1 and "TimeoutError" in notes[0]
+    assert target.name_onchain not in notes[0] and target.contract not in notes[0]
 
 
 def test_mutation_in_puzzle_phase_void_reveals_and_next_draw_excludes():
@@ -635,6 +524,7 @@ def test_shotgun_account_gets_one_reply_and_the_operator_hears_at_three():
     assert len(mal) == 4
     shots = [m for m in w.rig.notifier.messages if "shotgun posts from" in m]
     assert len(shots) == 1 and "@" in shots[0] and "no guess spent" in shots[0]
+    assert "3 multi-token replies so far" in shots[0]           # a tally, said so
 
 
 def test_oscillating_outage_trips_the_accumulated_hold_ceiling():
