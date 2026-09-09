@@ -207,10 +207,14 @@ _ANGLE_LINE = re.compile(r'as "angle"\): ([A-Z ]+):')
 _ASPECT_LINE = re.compile(r'as "image_aspect"\): (\w+) —')
 
 
+RAW = object()      # marker: the next draft is raw text, sent as-is (no JSON)
+
+
 class FakeAnthropic:
     """Scripted clue drafts, in order. A str draft is an OBEDIENT writer: it
     declares the angle/aspect the prompt assigned and no claims. A dict
-    draft is the JSON as-is (to script disobedience or claims)."""
+    draft is the JSON as-is (to script disobedience or claims). A (RAW,
+    text) pair is sent verbatim — a writer that reasoned out loud."""
 
     def __init__(self, drafts):
         self._drafts = list(drafts)
@@ -220,6 +224,8 @@ class FakeAnthropic:
             def create(_s, **kw):
                 self.calls.append(kw)
                 d = self._drafts.pop(0)
+                if isinstance(d, tuple) and d[0] is RAW:
+                    return _Resp(d[1])
                 if isinstance(d, str):
                     user = kw["messages"][0]["content"]
                     ang = _ANGLE_LINE.search(user)
@@ -620,3 +626,19 @@ def test_anthropic_truth_judge_parses_and_fails_to_none():
     assert "Ancient Future" in user and "'Future'" in user and "CLUE: clue" in user
     assert AnthropicTruthJudge(_C("garbage"), "m").check("c", name="n", word=None, artwork="").consistent is None
     assert AnthropicTruthJudge(_C(RuntimeError("503")), "m").check("c", name="n", word=None, artwork="").consistent is None
+
+
+def test_writer_reasoning_out_loud_costs_one_attempt_not_the_round():
+    """4th --real-clues: 'Looking at "Ancient" — I need a checkable structural
+    claim…' — no JSON, ValueError out of the loop, round skipped. Now: one
+    pointed retry inside generate(); a second failure still raises."""
+    e = engine([(RAW, 'Looking at "Ancient" — let me verify facts about its letters: A-'),
+                "patience is a coin nobody spends"])
+    d = e.next_clue(ctx(), 5, ["x"] * 4)
+    assert d.text == "patience is a coin nobody spends"
+    assert len(e._client.calls) == 2
+    assert "SILENTLY" in e._client.calls[1]["messages"][0]["content"]
+    assert e._client.calls[0]["max_tokens"] == 1024
+    e = engine([(RAW, "no json"), (RAW, "still no json")])
+    with pytest.raises(ValueError):
+        e.next_clue(ctx(), 5, ["x"] * 4)

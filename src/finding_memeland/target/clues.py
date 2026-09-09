@@ -706,8 +706,10 @@ is rejected. If a structural idea cannot be expressed as one of these types \
 you may NOT assert it — do not guess how a word is built. An empty list means \
 your clue says nothing about the letters, which is the normal case.
 
-Respond with ONLY a JSON object: {{"clue": "...", "taunt": "...", "angle": \
-"<label or null>", "image_aspect": "<aspect or null>", "claims": [...]}}"""
+Respond with ONLY a JSON object — no reasoning before it (verify your claims \
+silently; text outside the JSON is discarded and wastes your budget): \
+{{"clue": "...", "taunt": "...", "angle": "<label or null>", "image_aspect": \
+"<aspect or null>", "claims": [...]}}"""
 
 
 def build_target_user_message(ctx: TargetClueContext, clue_index: int,
@@ -970,9 +972,27 @@ class TargetClueEngine(RelicClueEngine):
         user = build_target_user_message(persona, clue_index, prior_clues)
         if feedback:
             user += "\n\n" + feedback
-        resp = self._client.messages.create(
-            model=self._model, max_tokens=512, system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        return parse_target_clue(text)
+        # 4th --real-clues (09/09): asked for a STRUCTURE claim, the model
+        # reasoned out loud ("Let me verify facts about…"), spent the 512
+        # tokens and never reached the JSON — a ValueError escaped the
+        # regeneration loop and the ROUND was skipped. Budget doubled, and a
+        # malformed answer is one more attempt with a pointed reminder, not
+        # a lost round.
+        for attempt in range(2):
+            resp = self._client.messages.create(
+                model=self._model, max_tokens=1024, system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            try:
+                return parse_target_clue(text)
+            except ValueError as e:
+                if attempt == 1:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "clue #%s: writer answered without a JSON object (%s) — asking once more",
+                    clue_index, type(e).__name__)
+                user += ("\n\nYour previous answer contained no JSON object (you reasoned "
+                         "out loud and ran out of room). Check your claims SILENTLY and "
+                         "respond with ONLY the JSON object, nothing before it.")
+        raise AssertionError("unreachable")
