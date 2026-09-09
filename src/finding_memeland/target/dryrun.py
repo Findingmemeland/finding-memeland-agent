@@ -328,10 +328,18 @@ def scenario_happy_path(world: TargetWorld) -> ScenarioReport:
     rep.check("reveal post carries the artwork as media",
               reveal_id is not None and world.rig.publisher.media[reveal_id] == FAKE_ARTWORK
               and len(world.rig.publisher.media) == 1)
-    rep.check("R9: reveal credits the artist; alt-text carries title + author",
-              f"“{target.name_onchain}”, by {target.artist}" in reveal and bool(target.artist)
-              and world.rig.publisher.media_alt.get(reveal_id, "").startswith(
-                  f"“{target.name_onchain}”, by {target.artist}"))
+    if target.artist:
+        rep.check("R9: reveal credits the artist; alt-text carries title + author",
+                  f"“{target.name_onchain}”, by {target.artist}" in reveal
+                  and world.rig.publisher.media_alt.get(reveal_id, "").startswith(
+                      f"“{target.name_onchain}”, by {target.artist}"))
+    else:
+        # measured 09/09: Foundation metadata (FND #1) has no artist key at all —
+        # the credit falls back to title + item link, nothing invented
+        rep.check("R9: metadata names no author → title + link only, nothing invented (see note)",
+                  ", by " not in reveal and "made by someone else" in reveal
+                  and world.rig.publisher.media_alt.get(reveal_id, "").startswith(
+                      f"“{target.name_onchain}” —"))
     hint = "chain:contract:tokenId"
 
     def nth(label):

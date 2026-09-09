@@ -277,3 +277,27 @@ def test_fetch_artwork_only_content_addressed_images_under_the_cap():
     assert not any("example.com" in u for u in seen)                # never fetched
     with pytest.raises(ConnectionError):                            # reveal_media catches it
         fa(sealed(f"ipfs://{cid}/down"))
+
+
+def test_wiring_credit_reads_token_creator_on_the_keyed_rpcs():
+    from finding_memeland.target.hunt import SealedTarget
+    from finding_memeland.target.selector import Target
+    seen = []
+
+    def node(url, body, headers):
+        req = json.loads(body)
+        if req["method"] == "eth_call":
+            seen.append((url, req["params"][0]["to"].lower(), req["params"][0]["data"][:10]))
+            if req["params"][0]["data"].startswith("0x40c1a064"):
+                return json.dumps({"jsonrpc": "2.0", "id": 1,
+                                   "result": "0x" + "0" * 24 + "1" * 40})
+            return json.dumps({"jsonrpc": "2.0", "id": 1,
+                               "error": {"code": 3, "message": "execution reverted"}})
+        return json.dumps({"jsonrpc": "2.0", "id": 1, "result": "0x6001"})
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=lambda u, h: "{}", http_post=node, http_get_bytes=lambda u, h: b"")
+    t = Target(chain="ethereum", contract=C, token_id=1, name="x", name_onchain="x",
+               description="", image="", metadata_sha256="m", epoch="e1")
+    sealed = SealedTarget(target=t, salt="s" * 32, commitment="c" * 64)
+    assert w.ports.creator_credit(sealed) == "0x1111…1111"      # no ENS resolver → address
+    assert seen[0] == ("https://alchemy.example/v2/key", C, "0x40c1a064")   # keyed, not public

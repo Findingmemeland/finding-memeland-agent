@@ -228,6 +228,100 @@ def address_from_word(data: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Creator credit (R9): tokenCreator → ENS reverse WITH forward check           #
+# --------------------------------------------------------------------------- #
+#
+# Measured 09/09: Foundation metadata carries no artist field at all, so the
+# reveal's credit needs the chain. Foundation (FND) and SuperRare both expose
+# `tokenCreator(uint256)`. The address becomes a name ONLY through ENS with a
+# forward check (Opus): a reverse record is a claim anyone can set on their
+# own address; the name must resolve BACK to the same address or it is not
+# published — R8 on a person. Order: metadata artist (elsewhere) → ENS name
+# (verified) → truncated address → nothing (the item link is attribution).
+# Every step here is best-effort: any failure → the next fallback, never an
+# exception to the reveal.
+
+SEL_TOKEN_CREATOR = "0x40c1a064"      # tokenCreator(uint256)
+SEL_ENS_RESOLVER = "0x0178b8bf"       # resolver(bytes32)
+SEL_ENS_NAME = "0x691f3431"           # name(bytes32)
+SEL_ENS_ADDR = "0x3b3b57de"           # addr(bytes32)
+ENS_REGISTRY = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e"
+_ENS_LABEL_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+def _keccak(data: bytes) -> bytes:
+    from eth_utils import keccak
+    return keccak(data)
+
+
+def ens_namehash(name: str) -> bytes | None:
+    """EIP-137 namehash for ASCII names only (lowercase, [a-z0-9-] labels).
+    Anything else (unicode, needing UTS-46 normalisation) → None: we do not
+    normalise, so we do not publish."""
+    node = b"\x00" * 32
+    if not name:
+        return node
+    labels = name.lower().split(".")
+    if any(not _ENS_LABEL_RE.match(lb) for lb in labels):
+        return None
+    for lb in reversed(labels):
+        node = _keccak(node + _keccak(lb.encode()))
+    return node
+
+
+def token_creator(rpc: ChainRpc, contract: str, token_id: int) -> str | None:
+    """tokenCreator(tokenId) → address, None when the contract has no such
+    function (revert / empty) or the chain is unavailable."""
+    try:
+        data = rpc.eth_call(contract, SEL_TOKEN_CREATOR + abi_uint(token_id))
+    except Exception:  # noqa: BLE001 — credit is best-effort
+        return None
+    return address_from_word(data)
+
+
+def ens_name_verified(eth_rpc: ChainRpc, address: str) -> str | None:
+    """The address's ENS primary name, ONLY if it resolves back to the same
+    address (forward check). None on any gap."""
+    try:
+        addr = address.lower()
+        rev = ens_namehash(f"{addr[2:]}.addr.reverse")
+        if rev is None:
+            return None
+        resolver = address_from_word(eth_rpc.eth_call(ENS_REGISTRY, SEL_ENS_RESOLVER + rev.hex()))
+        if not resolver:
+            return None
+        name = decode_abi_string(eth_rpc.eth_call(resolver, SEL_ENS_NAME + rev.hex())).strip()
+        if not name or len(name) > 64:
+            return None
+        node = ens_namehash(name)
+        if node is None:
+            return None
+        fwd_resolver = address_from_word(eth_rpc.eth_call(ENS_REGISTRY, SEL_ENS_RESOLVER + node.hex()))
+        if not fwd_resolver:
+            return None
+        back = address_from_word(eth_rpc.eth_call(fwd_resolver, SEL_ENS_ADDR + node.hex()))
+        return name.lower() if back and back.lower() == addr else None
+    except Exception:  # noqa: BLE001 — a reverse without proof is not published
+        return None
+
+
+def creator_credit(rpcs: dict[str, ChainRpc], chain: str, contract: str,
+                   token_id: int) -> str:
+    """'name.eth' (forward-verified) → '0x1234…abcd' → ''. ENS is read on
+    ethereum whatever chain the token lives on (primary names live there);
+    without an ethereum RPC the address alone is the credit."""
+    rpc = rpcs.get(chain)
+    if rpc is None:
+        return ""
+    addr = token_creator(rpc, contract, token_id)
+    if not addr:
+        return ""
+    eth = rpcs.get("ethereum")
+    name = ens_name_verified(eth, addr) if eth is not None else None
+    return name or f"{addr[:6]}…{addr[-4:]}"
+
+
+# --------------------------------------------------------------------------- #
 # Mint fetcher + code bytes for EraDiscovery                                   #
 # --------------------------------------------------------------------------- #
 

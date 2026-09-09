@@ -502,3 +502,80 @@ def test_vision_content_ok_parses_json_and_is_none_on_trouble():
         b"\xff\xd8\xffjpeg") is True
     assert AnthropicVision(FakeClient("not json"), "m").content_ok(b"\xff\xd8\xffjpeg") is None
     assert v.content_ok(b"<html>") is None            # not an image: unknown, never ok
+
+
+# --------------------------------------------------------------------------- #
+# R9 credit from the chain: tokenCreator → ENS (forward-checked) → 0x…        #
+# --------------------------------------------------------------------------- #
+
+
+def test_ens_namehash_matches_the_eip137_vectors():
+    from finding_memeland.target.adapters import ens_namehash
+    assert ens_namehash("") == b"\x00" * 32
+    assert ens_namehash("eth").hex() == "93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae"
+    assert ens_namehash("foo.eth").hex() == "de9b09fd7c5f901e23a3f19fecc54828e9c848539801e86591bd9801b019f84f"
+    assert ens_namehash("Foo.ETH") == ens_namehash("foo.eth")
+    assert ens_namehash("zoë.eth") is None                     # not normalised → not published
+
+
+class _Rpc:
+    """eth_call scripted by (to, selector) → return data; unknown → revert."""
+
+    def __init__(self, table):
+        self.table = table
+        self.calls = []
+
+    def eth_call(self, to, data):
+        self.calls.append((to.lower(), data[:10]))
+        try:
+            return self.table[(to.lower(), data[:10])]
+        except KeyError:
+            raise RuntimeError("execution reverted")
+
+
+def _word_addr(a):
+    return "0x" + a[2:].rjust(64, "0")
+
+
+def _abi_str(s):
+    b = s.encode()
+    return "0x" + (32).to_bytes(32, "big").hex() + len(b).to_bytes(32, "big").hex() + b.hex() + "00" * (-len(b) % 32)
+
+
+CREATOR = "0x1111111111111111111111111111111111111111"
+RESOLVER = "0x2222222222222222222222222222222222222222"
+FND = "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405"
+
+
+def _ens_table(name, forward_to):
+    from finding_memeland.target.adapters import (
+        ENS_REGISTRY, SEL_ENS_ADDR, SEL_ENS_NAME, SEL_ENS_RESOLVER, SEL_TOKEN_CREATOR,
+    )
+    return {
+        (FND, SEL_TOKEN_CREATOR): _word_addr(CREATOR),
+        (ENS_REGISTRY, SEL_ENS_RESOLVER): _word_addr(RESOLVER),     # both nodes
+        (RESOLVER, SEL_ENS_NAME): _abi_str(name),
+        (RESOLVER, SEL_ENS_ADDR): _word_addr(forward_to),
+    }
+
+
+def test_creator_credit_publishes_ens_only_with_the_forward_check():
+    from finding_memeland.target.adapters import creator_credit, ens_name_verified, token_creator
+    eth = _Rpc(_ens_table("sarah.eth", CREATOR))
+    assert token_creator(eth, FND, 1) == CREATOR
+    assert ens_name_verified(eth, CREATOR) == "sarah.eth"
+    assert creator_credit({"ethereum": eth}, "ethereum", FND, 1) == "sarah.eth"
+    # reverse record claims a name that resolves to SOMEONE ELSE → not published
+    liar = _Rpc(_ens_table("vitalik.eth", "0x9999999999999999999999999999999999999999"))
+    assert ens_name_verified(liar, CREATOR) is None
+    assert creator_credit({"ethereum": liar}, "ethereum", FND, 1) == "0x1111…1111"
+    # no reverse resolver at all → address
+    bare = _Rpc({(FND, "0x40c1a064"): _word_addr(CREATOR)})
+    assert creator_credit({"ethereum": bare}, "ethereum", FND, 1) == "0x1111…1111"
+    # contract without tokenCreator (revert) → nothing; chain unknown → nothing
+    assert creator_credit({"ethereum": _Rpc({})}, "ethereum", FND, 1) == ""
+    assert creator_credit({"ethereum": eth}, "polygon", FND, 1) == ""
+    # token on base, ENS read on ethereum
+    base = _Rpc({(FND, "0x40c1a064"): _word_addr(CREATOR)})
+    assert creator_credit({"base": base, "ethereum": eth}, "base", FND, 1) == "sarah.eth"
+    assert creator_credit({"base": base}, "base", FND, 1) == "0x1111…1111"

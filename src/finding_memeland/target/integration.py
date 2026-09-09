@@ -91,6 +91,12 @@ class TargetPorts:
     # The artwork's bytes for the reveal post (image types only, ≤ 5 MB):
     # keyed gateway, once, after the hunt is decided. None = link only.
     fetch_artwork: Callable[[SealedTarget], "bytes | None"] | None = None
+    # R9 credit from the chain when the metadata names nobody (measured
+    # 09/09: Foundation metadata has no artist field): tokenCreator → ENS
+    # with forward check → truncated address → "". Read at REVEAL time
+    # only (the hunt is decided; a lone read at prepare time would name the
+    # target to the node). Best-effort, never blocks the reveal.
+    creator_credit: Callable[[SealedTarget], str] | None = None
     # How many redraws the content guard may force before /launch refuses.
     max_content_redraws: int = 3
     # HOLD ceiling and cadence (Opus, 06/09, P1-B): a hold without a ceiling
@@ -428,7 +434,7 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
         token_uri=sealed.target.token_uri,
         live_token_uri=ing.get("live_token_uri"),
         relaunching=relaunching,
-        artist=sealed.target.artist,
+        artist=resolve_credit(orch, hunt),
     ))
     orch._notify(f"hunt #{hunt.number} VOID ({cause})"
                  + (" — relaunch with /launch (the voided target is excluded)."
@@ -510,7 +516,7 @@ def reveal_text(orch, hunt, winner, receipt, *, time_to_win: str,
         token_uri=sealed.target.token_uri,
         live_token_uri=getattr(hunt, "target_live_token_uri", None),
         item_link=item_link_for(sealed.id()),
-        artist=sealed.target.artist,
+        artist=resolve_credit(orch, hunt),
     ))
 
 
@@ -520,9 +526,40 @@ class ArtworkUnusable(RuntimeError):
     never to the public."""
 
 
-def reveal_alt_text(hunt) -> str:
+def reveal_alt_text(orch, hunt) -> str:
     t = hunt.target.target
-    return artwork_alt_text(t.name_onchain, t.artist, hunt.number)
+    return artwork_alt_text(t.name_onchain, resolve_credit(orch, hunt), hunt.number)
+
+
+def resolve_credit(orch, hunt) -> str:
+    """R9, in Opus's order: (1) the artist named by the token's own metadata;
+    (2) tokenCreator + ENS with forward check, or the truncated creator
+    address, via `ports.creator_credit`; (3) "" — the item link stays and
+    the link is attribution. Cached on the hunt (one chain read per reveal,
+    shared by text, void and alt-text). NEVER a guessed name, never an
+    @-handle. Failure anywhere → the next fallback and an operator note."""
+    cached = getattr(hunt, "target_credit", None)
+    if cached is not None:
+        return cached
+    t = hunt.target.target
+    credit = t.artist or ""
+    if not credit:
+        ports: TargetPorts = orch._target
+        if ports.creator_credit is not None:
+            try:
+                credit = ports.creator_credit(hunt.target) or ""
+            except Exception as e:  # noqa: BLE001 — credit never blocks the reveal
+                orch._notify(f"R9 credit lookup failed ({type(e).__name__}) — "
+                             "reveal goes out with the item link as attribution")
+                credit = ""
+        if not credit:
+            orch._notify("R9: metadata names no artist and the chain gave no creator "
+                         "— reveal credits by item link only")
+        elif credit.startswith("0x"):
+            orch._notify("R9: creator has no verified ENS — reveal credits the "
+                         "truncated address")
+    hunt.target_credit = credit
+    return credit
 
 
 def reveal_media(orch, hunt) -> bytes | None:

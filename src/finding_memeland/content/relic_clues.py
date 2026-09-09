@@ -67,6 +67,7 @@ PUZZLE_OBLIQUENESS = (0.9, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65)
 # post-mortem): the art is generated FROM the name, so a plain description of
 # it is the name in other words, and it was sitting inside the hard phase.
 PUZZLE_IMAGE_PIECES = 2
+RELATION_EARLIEST = 4          # the RELATION angle is never handed out before piece 4
 IMAGE_EASY_OBLIQUENESS = 0.25  # the plain-description art piece (reveal phase)
 REVEAL_IMAGE_SLOT = 3          # 3rd reveal clue = the plain art description
 # Every name word keeps at least this many puzzle pieces. A player needs BOTH
@@ -100,8 +101,16 @@ PUZZLE_ANGLES = (
     "between, what it is emphatically NOT.",
     "CULTURAL USE: where a person actually meets this word — a saying, a job, an "
     "object, a scene it belongs to.",
-    "STRUCTURE: how the word is BUILT — a compound, a suffix that does work, two "
-    "halves that each mean something.",
+    # 09/09 (Opus): the old text ("a compound, a suffix that does work, two
+    # halves") ASKED for a structure the word may not have — three false clues
+    # in a row (Hunt #9, both live tests) came from this angle. Now the angle
+    # is one fact a reader can verify on the SPELLING, declared as a claim.
+    "STRUCTURE: one CHECKABLE fact about the word's LETTERS — its first or last "
+    "letter, a doubled letter, a shorter real word spelt inside it, no vowels — "
+    "stated so a reader can verify it on the spelling, and DECLARED as a claim. "
+    "NEVER guess at how the word was built: no 'compound', 'suffix', 'two "
+    "halves', 'hidden word' unless you declare the exact substring and it is "
+    "really there.",
     "RELATION: how this word sits against the OTHER word of the name — the "
     "contrast, the joke, or the image the pair makes together.",
     # Pedro's angle (2026-08-23). Turns a riddle into a SEARCH: instead of
@@ -308,10 +317,13 @@ def angle_for(
             avoid.add(prev)
         if not used.get(f):
             avoid |= {v[0] for k, v in used.items() if k != f and v}
-        if i == 1:
+        if i < RELATION_EARLIEST:
             # RELATION ("how this word sits against the OTHER word") is a
             # constraint nobody can use before the other word has had a piece
-            # — and clue 1 is the most-read post (Opus, 27/08).
+            # — and clue 1 is the most-read post (Opus, 27/08). 09/09: not
+            # before piece 4 either — with one field piece already out, a
+            # relation piece at 3 handed the pair over (live test, "one
+            # belongs in a museum, the other in a prophecy").
             avoid |= {a for a in seq if a.startswith("RELATION")}
         pick = next((a for a in seq if a not in avoid), None) or next(
             (a for a in seq if a not in taken), seq[0]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 
 import pytest
 
@@ -202,8 +203,14 @@ class _Resp:
         self.content = [_Block(text)]
 
 
+_ANGLE_LINE = re.compile(r'as "angle"\): ([A-Z ]+):')
+_ASPECT_LINE = re.compile(r'as "image_aspect"\): (\w+) —')
+
+
 class FakeAnthropic:
-    """Scripted clue drafts, in order."""
+    """Scripted clue drafts, in order. A str draft is an OBEDIENT writer: it
+    declares the angle/aspect the prompt assigned and no claims. A dict
+    draft is the JSON as-is (to script disobedience or claims)."""
 
     def __init__(self, drafts):
         self._drafts = list(drafts)
@@ -212,8 +219,18 @@ class FakeAnthropic:
         class _Msgs:
             def create(_s, **kw):
                 self.calls.append(kw)
-                text = self._drafts.pop(0)
-                return _Resp(json.dumps({"clue": text, "taunt": ""}))
+                d = self._drafts.pop(0)
+                if isinstance(d, str):
+                    user = kw["messages"][0]["content"]
+                    ang = _ANGLE_LINE.search(user)
+                    asp = _ASPECT_LINE.search(user)
+                    n = re.search(r"name \((\d+) words\)", user)
+                    claims = ([{"type": "word_count", "word": 0, "value": int(n.group(1))}]
+                              if ang and ang.group(1).strip() == "STRUCTURE" and n else [])
+                    d = {"clue": d, "taunt": "", "claims": claims,
+                         "angle": ang.group(1).strip() if ang else None,
+                         "image_aspect": asp.group(1) if asp else None}
+                return _Resp(json.dumps(d))
         self.messages = _Msgs()
 
 
@@ -297,6 +314,12 @@ def test_clean_clue_passes_first_time():
     ("shares its initials with a famous duo", True),
     ("the second word has no vowels", True),
     ("sounds like a word for later", True),
+    # the SECOND real one (09/09, after the guard): "carries a hidden smaller
+    # word inside it that also names a tense" — FUTURE hides no such word
+    ("word 2: not a root, not a suffix acting alone — it carries a hidden smaller "
+     "word inside it that also names a tense. the container and the contained "
+     "both do grammatical work.", True),
+    ("its roots are Latin, its mood is tomorrow", False),        # etymology stays legal
     ("the second word has five letters", True),
     ("the second word of this name has six letters and ends with a vowel", False),
     ("the first word starts with a vowel; the last word ends with a vowel", False),
@@ -340,3 +363,159 @@ def test_false_structural_claim_is_rejected_then_regenerated():
     assert "NAME'S LETTERS" in fb1 and "cannot be checked" in fb1
     assert "'starts with a vowel' is false for harbor" in fb2
     # letter COUNTS were already banned by the base guardrail (models miscount)
+
+
+# --------------------------------------------------------------------------- #
+# DECLARE-AND-VERIFY (Opus, 09/09) — the guard tests the data, not the prose   #
+# --------------------------------------------------------------------------- #
+
+
+def test_verify_claims_checks_every_declared_claim_against_the_spelling():
+    from finding_memeland.target.clues import verify_claims
+    N = "ancient future"
+    ok = [{"type": "starts", "word": 1, "value": "vowel"},
+          {"type": "ends", "word": 2, "value": "e"},
+          {"type": "contains", "word": 1, "value": "cien"},
+          {"type": "word_count", "word": 0, "value": 2},
+          {"type": "starts", "word": 0, "value": "a"},
+          {"type": "ends", "word": 0, "value": "vowel"}]
+    assert verify_claims(ok, N) == []
+    bad = verify_claims([{"type": "contains", "word": 2, "value": "past"},
+                         {"type": "double_letter", "word": 2},
+                         {"type": "palindrome", "word": 1},
+                         {"type": "no_vowels", "word": 0},
+                         {"type": "starts", "word": 2, "value": "vowel"},
+                         {"type": "word_count", "word": 0, "value": 3},
+                         {"type": "compound", "word": 2},
+                         {"type": "starts", "word": 5, "value": "a"},
+                         {"type": "starts", "word": 1, "value": "abc"}], N)
+    assert len(bad) == 9
+    assert any("'past' is not spelt inside future" in e for e in bad)
+    assert any("unknown type" in e and "compound" in e for e in bad)
+    assert any("'word' must be 1..2" in e for e in bad)
+    assert verify_claims("nope", N) == ["'claims' must be a list"]
+
+
+def test_undeclared_prose_is_rejected_and_unverifiable_family_always():
+    from finding_memeland.target.clues import undeclared_prose_errors
+    # a structural statement in prose needs a matching declared claim
+    assert undeclared_prose_errors("the second word starts with a vowel", []) != []
+    assert undeclared_prose_errors("the second word starts with a vowel",
+                                   [{"type": "starts", "word": 2, "value": "vowel"}]) == []
+    assert undeclared_prose_errors("the first letter is a consonant", []) != []
+    # the family nobody can declare is refused even with a claim attached
+    e = undeclared_prose_errors(
+        "it carries a hidden smaller word inside it that also names a tense",
+        [{"type": "contains", "word": 2, "value": "ure"}])
+    assert e and "cannot check" in e[0]
+    assert undeclared_prose_errors("only the flicker of a tape", []) == []
+
+
+def test_image_aspects_are_assigned_distinct_and_stable():
+    from finding_memeland.target.clues import IMAGE_ASPECTS, image_aspect_for
+    from finding_memeland.content.relic_clues import relic_slot_for
+    c = ctx()
+    art = [i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image"]
+    aspects = [image_aspect_for(i, c) for i in art]
+    assert len(art) == 2 and len(set(aspects)) == 2
+    assert all(a in IMAGE_ASPECTS for a in aspects)
+    assert aspects == [image_aspect_for(i, ctx()) for i in art]          # crash-resume
+    assert all(image_aspect_for(i, c) is None for i in range(1, PUZZLE_CLUES + 1)
+               if i not in art)
+    assert image_aspect_for(PUZZLE_CLUES + 3, c) is None
+
+
+def test_declared_angle_must_be_the_assigned_one():
+    """The obedient str drafts echo the prompt's angle; a dict draft that
+    declares another angle (or none) is sent back with the assignment."""
+    from finding_memeland.target.clues import angle_label
+    from finding_memeland.content.relic_clues import angle_for_unverifiable, relic_slot_for
+    c = ctx()
+    i = next(i for i in range(1, PUZZLE_CLUES + 1)
+             if relic_slot_for(i, c)[0] != "image"
+             and angle_label(angle_for_unverifiable(i, c)) not in ("STRUCTURE", None))
+    assigned = angle_label(angle_for_unverifiable(i, c))
+    other = "RELATION" if assigned != "RELATION" else "CULTURAL USE"
+    e = engine([{"clue": "patience is a coin nobody spends", "taunt": "", "angle": other},
+                {"clue": "patience is a coin nobody spends", "taunt": ""},      # none declared
+                "patience is a coin nobody spends"])
+    d = e.next_clue(c, i, ["c"] * (i - 1))
+    assert d.text == "patience is a coin nobody spends"
+    fb1, fb2 = (x["messages"][0]["content"] for x in e._client.calls[1:3])
+    assert f"ASSIGNED angle '{assigned}'" in fb1 and f"declared '{other}'" in fb1
+    assert "declared None" in fb2
+
+
+def test_two_art_pieces_cannot_share_an_aspect():
+    from finding_memeland.target.clues import image_aspect_for
+    from finding_memeland.content.relic_clues import relic_slot_for
+    c = ctx()
+    art = [i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image"]
+    first, second = art
+    wrong = image_aspect_for(first, c)                    # the FIRST piece's aspect, again
+    e = engine([{"clue": "phosphor bruises where the beam lingers", "taunt": "x",
+                 "image_aspect": wrong, "claims": []},
+                "a frame arranged around its own absence"])
+    d = e.next_clue(c, second, ["c"] * (second - 1))
+    assert d.text == "a frame arranged around its own absence"
+    fb = e._client.calls[1]["messages"][0]["content"]
+    assert "ASSIGNED aspect" in fb and image_aspect_for(second, c) in fb
+
+
+def test_structure_piece_needs_a_verified_claim_and_false_claims_reject():
+    from finding_memeland.target.clues import angle_label
+    from finding_memeland.content.relic_clues import angle_for_unverifiable
+    c = ctx()
+    i = next(i for i in range(1, PUZZLE_CLUES + 1)
+             if angle_label(angle_for_unverifiable(i, c)) == "STRUCTURE")
+    e = engine([{"clue": "its tail is a vowel, its head is not", "taunt": "",
+                 "angle": "STRUCTURE", "claims": []},                        # no claim
+                {"clue": "its tail is a vowel, its head is not", "taunt": "",
+                 "angle": "STRUCTURE",
+                 "claims": [{"type": "ends", "word": 2, "value": "vowel"}]},   # harbor → FALSE
+                {"clue": "its tail is not a vowel", "taunt": "", "angle": "STRUCTURE",
+                 "claims": [{"type": "ends", "word": 2, "value": "consonant"}]}])
+    d = e.next_clue(c, i, ["c"] * (i - 1))
+    assert d.text == "its tail is not a vowel"
+    fb1, fb2 = (x["messages"][0]["content"] for x in e._client.calls[1:3])
+    assert "no claim, no piece" in fb1
+    assert "claim ends (word 2, value 'vowel') is FALSE" in fb2
+
+
+def test_synonym_list_in_a_name_piece_is_rejected():
+    """Live test 09/09, clue 1: 'shares a zip code with speculation, sci-fi,
+    and dread — but NOT nostalgia' → FUTURE by lookup in ten seconds."""
+    e = engine(["it shares a zip code with speculation, sci-fi, and dread",
+                "patience is a coin nobody spends"])
+    d = e.next_clue(ctx(), 1, [])
+    assert d.text == "patience is a coin nobody spends"
+    assert "synonym list" in e._client.calls[1]["messages"][0]["content"]
+
+
+def test_relation_angle_never_before_piece_four():
+    from finding_memeland.content.relic_clues import RELATION_EARLIEST, angle_for_unverifiable
+    from finding_memeland.content.relic_clues import RelicClueContext
+    for name in ("Salt Harbor", "Ancient Future", "Damp Hamlet", "Caesar Plop", "Uncle Pump"):
+        c = RelicClueContext(display_name=name, image_description="", lore="", backstory="")
+        for i in range(1, RELATION_EARLIEST):
+            assert not (angle_for_unverifiable(i, c) or "").startswith("RELATION"), (name, i)
+
+
+def test_parse_target_clue_reads_the_declaration():
+    from finding_memeland.target.clues import parse_target_clue
+    d = parse_target_clue('noise {"clue": "x", "taunt": "t", "angle": "semantic field", '
+                          '"image_aspect": null, "claims": [{"type": "starts", "word": 1, '
+                          '"value": "a"}]} tail')
+    assert d.text == "x" and d.taunt == "t" and d.angle == "semantic field"
+    assert d.image_aspect is None and d.claims[0]["type"] == "starts"
+    d = parse_target_clue('{"clue": "x"}')
+    assert d.angle is None and d.claims == [] and d.taunt is None
+    with pytest.raises(ValueError):
+        parse_target_clue("no json here")
+
+
+def test_structure_angle_text_asks_for_a_checkable_declared_fact():
+    from finding_memeland.content.relic_clues import PUZZLE_ANGLES
+    st = next(a for a in PUZZLE_ANGLES if a.startswith("STRUCTURE"))
+    assert "DECLARED" in st and "NEVER guess" in st
+    assert "a compound, a suffix that does work" not in st

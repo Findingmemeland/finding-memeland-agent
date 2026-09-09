@@ -276,6 +276,57 @@ def test_reveal_without_usable_artwork_goes_out_with_the_link_and_tells_why():
     assert target.name_onchain not in notes[0] and target.contract not in notes[0]
 
 
+def test_r9_credit_order_metadata_then_chain_then_link_only():
+    """Opus: metadata artist → tokenCreator+ENS (verified) → 0x… → nothing;
+    step 4 never blocks; one read per reveal, shared by text and alt-text;
+    the operator hears which step the credit came from."""
+    import dataclasses
+
+    def run(artist, port):
+        w = World()
+        w.ports.creator_credit = port
+        hunt = w.launch()
+        hunt.target = dataclasses.replace(
+            hunt.target, target=dataclasses.replace(hunt.target.target, artist=artist))
+        t0 = hunt.live_at
+        target = hunt.target.target
+        w.src.reshared.add("42")
+        w.src.schedule[1] = lambda: [
+            post(1010, "42", f"ethereum:{target.contract}:{target.token_id}",
+                 t0 + timedelta(minutes=1), hunt.reshare_post_id)]
+        w.src.schedule[4] = lambda: [
+            post(1040, "42", WALLET_A, t0 + timedelta(minutes=4),
+                 w.rig.repo.hunts[hunt.id].get("pending_ask_tweet_id"))]
+        winner = w.orch._claim_loop(hunt)
+        w.orch._reveal(hunt, winner, w.orch._pay(hunt, winner))
+        reveal = next(p for p in w.rig.publisher.posts if "We have a winner" in p)
+        alt = list(w.rig.publisher.media_alt.values())[0]
+        r9 = [m for m in w.rig.notifier.messages if "R9" in m]
+        return reveal, alt, r9, target
+
+    calls = []
+
+    def chain(sealed):
+        calls.append(sealed.id())
+        return "sarah.eth"
+    reveal, alt, r9, t = run("Meta Name", chain)
+    assert ", by Meta Name" in reveal and "by Meta Name" in alt and calls == [] and r9 == []
+    reveal, alt, r9, t = run("", chain)
+    assert ", by sarah.eth" in reveal and "by sarah.eth" in alt
+    assert calls == [t.id()] and r9 == []                       # ONE read, cached
+    reveal, alt, r9, t = run("", lambda s: "0x1111…1111")
+    assert ", by 0x1111…1111" in reveal and any("truncated address" in m for m in r9)
+    reveal, alt, r9, t = run("", lambda s: "")
+    assert ", by " not in reveal and "made by someone else" in reveal
+    assert "see it: opensea.io/item/" in reveal and any("item link only" in m for m in r9)
+
+    def boom(sealed):
+        raise TimeoutError("rpc")
+    reveal, alt, r9, t = run("", boom)
+    assert ", by " not in reveal and any("credit lookup failed" in m and "TimeoutError" in m for m in r9)
+    assert all(t.name_onchain not in m for m in r9)
+
+
 def test_mutation_in_puzzle_phase_void_reveals_and_next_draw_excludes():
     w = World()
     hunt = w.launch()

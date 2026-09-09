@@ -43,13 +43,14 @@ lone request that tells a gateway which token we care about.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from ..content.clue_engine import HARD_CLUE_FLOOR, _parse_clue
+from ..content.clue_engine import HARD_CLUE_FLOOR
 from ..content.relic_clues import (
     PUZZLE_ANGLES,
     PUZZLE_CLUES,
@@ -125,6 +126,8 @@ _UNVERIFIABLE_RE = re.compile(
     r"\b(compound|portmanteau|fused|welded|two\s+(?:complete\s+|whole\s+)?words\s+"
     r"(?:in\s+one|joined|stitched|glued|fused|merged)|hides?\s+(?:a|another)\s+word|"
     r"a\s+word\s+(?:hiding|hidden|inside)|find\s+(?:that|the)\s+seam|"
+    r"(?:hidden|smaller|shorter|secret|buried|nested)\s+(?:\w+\s+){0,2}word\b|"
+    r"\bword\s+(?:inside|within|nested|buried|tucked)\b|\b(?:prefix|suffix)\b|"
     r"anagram|rhymes?\s+with|(?:the\s+)?same\s+letters\s+as|acronym|initials?|"
     r"homophone|sounds\s+like|spelled\s+backwards?|reversed?\s+spells)\b",
     re.IGNORECASE)
@@ -258,6 +261,213 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
         inner = m.group("w").lower()
         false(m, lambda w: inner in w and inner != w)
     return errs
+
+
+# --------------------------------------------------------------------------- #
+# DECLARE-AND-VERIFY (Opus, 09/09 — the class fix, not the case fix)          #
+# --------------------------------------------------------------------------- #
+#
+# Three false clues from the same family (Hunt #9; both live tests of 09/09,
+# the third one a commit AFTER the blacklist above) proved the point: a
+# blacklist of phrasings chases the model's imagination. So the writer now
+# returns what it DID as data next to the clue —
+#     {"clue", "taunt", "angle": "<label>", "image_aspect": "<aspect>|null",
+#      "claims": [{"type": "starts", "word": 2, "value": "vowel"}, …]}
+# — and the guard verifies the DATA against the string and the assignment:
+#   · every declared claim must be TRUE on the real spelling;
+#   · prose that asserts something about the letters must be DECLARED
+#     (undeclared → rejected), and what cannot be expressed as a claim type
+#     (compound, hidden word, suffix, anagram, rhyme, initials) is refused;
+#   · the declared angle must be the ASSIGNED one (name pieces), and the
+#     declared image aspect the assigned one (art pieces) — two art pieces
+#     get two different aspects by construction, so "phosphor, beam, tube"
+#     cannot come twice;
+#   · a STRUCTURE piece must carry at least one verified claim.
+# Same jump as emoji: from "banned by prompt" to a deterministic test.
+
+CLAIM_TYPES = ("starts", "ends", "contains", "double_letter", "palindrome",
+               "no_vowels", "word_count")
+
+IMAGE_ASPECTS = {
+    "subject": "WHAT is in the frame — one object, figure or element, obliquely",
+    "composition": "HOW the frame is arranged — placement, scale, framing, empty space",
+    "palette": "COLOUR and LIGHT — the palette, contrast, where the light comes from",
+    "medium": "the MAKING — technique, process, material, the tool that made it",
+    "mood": "the FEELING — atmosphere, era, energy, what it reads as",
+    "text": "TEXT or SYMBOLS in the image, if any — their style, never their content",
+    "motion": "TIME — stillness or motion, before/after, what is happening",
+}
+_ASPECT_ORDER = tuple(IMAGE_ASPECTS)
+
+
+def angle_label(angle: str | None) -> str | None:
+    return angle.split(":")[0].strip().upper() if angle else None
+
+
+def image_aspect_for(clue_index: int, ctx) -> str | None:
+    """The aspect assigned to THIS art piece: the k-th image piece of the
+    plan takes the k-th aspect of a per-hunt permutation seeded by the name
+    (stable across a crash-resume; distinct for every art piece by
+    construction). None for name pieces and the reveal phase."""
+    plan = ctx.clue_facet_plan or relic_ramp_plan(ctx.display_name)
+    if clue_index > len(plan) or plan[clue_index - 1][0] != "image":
+        return None
+    order = list(_ASPECT_ORDER)
+    random.Random(f"{ctx.display_name}|aspects").shuffle(order)
+    k = sum(1 for i in range(clue_index - 1) if plan[i][0] == "image")
+    return order[k % len(order)]
+
+
+def _claim_scope(words: list[str], word: int) -> tuple[list[str], bool]:
+    if word == 0:
+        return words, True
+    if 1 <= word <= len(words):
+        return [words[word - 1]], False
+    return [], False
+
+
+def verify_claims(claims, name: str) -> list[str]:
+    """Every declared claim, checked against the real spelling. Errors name
+    the claim and the word (writer-facing; never public)."""
+    words = re.findall(r"[A-Za-zÀ-ÿ']+", (name or "").lower())
+    errs: list[str] = []
+    if not isinstance(claims, list):
+        return ["'claims' must be a list"]
+    for c in claims:
+        if not isinstance(c, dict) or c.get("type") not in CLAIM_TYPES:
+            errs.append(f"claim {c!r}: unknown type — only {', '.join(CLAIM_TYPES)} "
+                        "can be declared (and therefore asserted)")
+            continue
+        t = c["type"]
+        try:
+            w = int(c.get("word", 0))
+        except (TypeError, ValueError):
+            w = -1
+        scope, whole_ok = _claim_scope(words, w)
+        if not scope:
+            errs.append(f"claim {t}: 'word' must be 1..{len(words)} or 0 for the whole name")
+            continue
+        v = str(c.get("value", "")).strip().lower()
+        joined = "".join(scope) if whole_ok else scope[0]
+        if t == "word_count":
+            ok = v.isdigit() and int(v) == len(words)
+            why = f"the name has {len(words)} words"
+        elif t in ("starts", "ends"):
+            if v in ("vowel", "consonant"):
+                def pred(ch):
+                    return (ch in _VOWELS) if v == "vowel" else (ch.isalpha() and ch not in _VOWELS)
+            elif len(v) == 1 and v.isalpha():
+                def pred(ch):
+                    return ch == v
+            else:
+                errs.append(f"claim {t}: value must be a single letter, 'vowel' or 'consonant'")
+                continue
+            ok = pred(joined[0] if t == "starts" else joined[-1])
+            why = f"'{joined}' {t} with '{joined[0] if t == 'starts' else joined[-1]}'"
+        elif t == "contains":
+            if len(v) < 2 or not v.isalpha():
+                errs.append("claim contains: value must be a real substring of 2+ letters")
+                continue
+            ok = any(v in x and v != x for x in scope) or (whole_ok and v in joined and v != joined)
+            why = f"'{v}' is not spelt inside " + ", ".join(scope)
+        elif t == "double_letter":
+            ok = any(a == b for x in scope for a, b in zip(x, x[1:]))
+            why = "no letter is doubled in " + ", ".join(scope)
+        elif t == "palindrome":
+            ok = any(len(x) > 1 and x == x[::-1] for x in scope) or (whole_ok and joined == joined[::-1])
+            why = "nothing here reads the same backwards"
+        else:  # no_vowels
+            ok = any(not any(ch in _VOWELS for ch in x) for x in scope)
+            why = "every word here has a vowel"
+        if not ok:
+            errs.append(f"claim {t} (word {w}, value {v!r}) is FALSE: {why}")
+    return errs
+
+
+_PROSE_DETECTORS = (                 # prose pattern → the claim type it must declare
+    (_STARTS_RE, "starts"), (_ENDS_RE, "ends"), (_DOUBLE_RE, "double_letter"),
+    (_PALINDROME_RE, "palindrome"), (_NO_VOWELS_RE, "no_vowels"),
+    (_CONTAINS_RE, "contains"), (_WORDS_RE, "word_count"),
+)
+_ENUM_LIST_RE = re.compile(r"\b[\w-]+,\s+[\w-]+,?\s+(?:and|or|nor)\s+[\w-]+\b", re.IGNORECASE)
+
+
+def undeclared_prose_errors(text: str, claims) -> list[str]:
+    """Prose that asserts something about the letters without a matching
+    declared claim — the writer must put every structural statement in
+    `claims`, where it is verified. The unverifiable family is refused
+    outright, declared or not."""
+    declared = {c.get("type") for c in claims if isinstance(c, dict)}
+    errs: list[str] = []
+    m = _UNVERIFIABLE_RE.search(text)
+    if m:
+        errs.append(f"the clue asserts '{m.group(0)}' — a structure the guard cannot "
+                    "check and the writer cannot declare. Drop it; only a "
+                    "declarable claim type may be asserted")
+    for rx, t in _PROSE_DETECTORS:
+        m = rx.search(text)
+        if m and t not in declared:
+            if t == "word_count" and "letter" in text[m.end():m.end() + 12].lower():
+                continue
+            if t == "first_letter":
+                continue
+            errs.append(f"the prose says '{m.group(0)}' but no '{t}' claim is declared — "
+                        "declare it (it will be verified) or remove it")
+    for m in _FIRST_LETTER_RE.finditer(text):
+        t = "starts" if m.group("pos").lower() == "first" else "ends"
+        if t not in declared:
+            errs.append(f"the prose says '{m.group(0)}' but no '{t}' claim is declared")
+    return errs
+
+
+def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
+    """The whole declare-and-verify check for one draft (writer feedback)."""
+    errs: list[str] = []
+    facet, _ = relic_slot_for(clue_index, ctx)
+    puzzle = clue_index <= PUZZLE_CLUES
+    # angle / aspect: declared == assigned
+    if puzzle and facet != "image":
+        assigned = angle_label(angle_for_unverifiable(clue_index, ctx))
+        got = (draft.angle or "").split(":")[0].strip().upper() or None
+        if assigned and got != assigned:
+            errs.append(f"'angle' must declare the ASSIGNED angle {assigned!r} "
+                        f"(you declared {got!r}) — write from that angle and say so")
+        if assigned == "STRUCTURE" and not draft.claims:
+            errs.append("a STRUCTURE piece must DECLARE the fact it states as a claim "
+                        "(it is verified on the spelling); no claim, no piece")
+        if _ENUM_LIST_RE.search(draft.text):
+            errs.append("the clue enumerates a list ('a, b, and c') — that reads as a "
+                        "synonym list, solved by lookup in ten seconds. ONE oblique "
+                        "constraint, no lists")
+    if puzzle and facet == "image":
+        assigned = image_aspect_for(clue_index, ctx)
+        got = (draft.image_aspect or "").strip().lower() or None
+        if assigned and got != assigned:
+            errs.append(f"'image_aspect' must be the ASSIGNED aspect {assigned!r} "
+                        f"(you declared {got!r}); the other art piece has another "
+                        "aspect — two pieces on the same aspect is one piece")
+    errs += verify_claims(draft.claims, ctx.display_name)
+    errs += undeclared_prose_errors(draft.text, draft.claims)
+    return errs
+
+
+def parse_target_clue(text: str):
+    """The target writer's JSON → ClueDraft with the declared data. Missing
+    fields are None/[] (and then fail the declaration check with a reason)."""
+    from ..content.clue_engine import ClueDraft, _strip_leading_meta
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(f"no JSON object in clue response: {text[:200]!r}")
+    data = json.loads(text[start:end + 1])
+    clue = _strip_leading_meta(str(data.get("clue", "")).strip())
+    if not clue:
+        raise ValueError("empty clue text")
+    claims = data.get("claims") or []
+    return ClueDraft(text=clue, taunt=str(data.get("taunt", "")).strip() or None,
+                     angle=(str(data["angle"]).strip() if data.get("angle") else None),
+                     image_aspect=(str(data["image_aspect"]).strip().lower()
+                                   if data.get("image_aspect") else None),
+                     claims=claims if isinstance(claims, list) else [])
 
 
 # --------------------------------------------------------------------------- #
@@ -475,7 +685,26 @@ varying jeer that pokes fun at players for not solving it yet. If the jeer \
 mentions how many clues are out, the number is exactly {index} — this one \
 included. Never call a clue "final" or "last": the ramp may continue.
 
-Respond with ONLY a JSON object: {{"clue": "...", "taunt": "..."}}"""
+DECLARE WHAT YOU DID (it is verified mechanically; a mismatch rejects the clue):
+- "angle": for a NAME piece, the label of the angle you were assigned (e.g. \
+"SEMANTIC FIELD") — you must write from that angle and say so; null for art \
+pieces and reveal clues.
+- "image_aspect": for an ART piece, the aspect you were assigned (e.g. \
+"palette"); null otherwise.
+- "claims": EVERY statement your clue makes about the LETTERS or SPELLING of the \
+name, as data. Allowed types: "starts" / "ends" (value: a single letter, \
+"vowel" or "consonant"), "contains" (value: a shorter real word spelt inside), \
+"double_letter", "palindrome", "no_vowels", "word_count" (value: the number). \
+"word" is 1 for the first word, 2 for the second, 0 for the whole name. Each \
+claim is CHECKED against the real spelling: a false one rejects the clue. If \
+your prose asserts something about the letters that is not declared, the clue \
+is rejected. If a structural idea cannot be expressed as one of these types \
+(compound, portmanteau, hidden word, prefix, suffix, anagram, rhyme, initials), \
+you may NOT assert it — do not guess how a word is built. An empty list means \
+your clue says nothing about the letters, which is the normal case.
+
+Respond with ONLY a JSON object: {{"clue": "...", "taunt": "...", "angle": \
+"<label or null>", "image_aspect": "<aspect or null>", "claims": [...]}}"""
 
 
 def build_target_user_message(ctx: TargetClueContext, clue_index: int,
@@ -487,6 +716,7 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
              else "(none — this is the first clue)")
     vector, obliqueness = relic_slot_for(clue_index, ctx)
     angle = angle_for_unverifiable(clue_index, ctx)
+    aspect = image_aspect_for(clue_index, ctx)
     spent = spent_angles(clue_index, ctx, allow_anchor=False)
     n_words = len(ctx.display_name.split())
     return (
@@ -505,8 +735,11 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
             "explanations, no 'the word means…'.\n"
             if clue_index <= PUZZLE_CLUES else ""
         )
-        + (f"ANGLE FOR THIS PIECE (use THIS one, not another): {angle}\n"
-           if angle else "")
+        + (f"ANGLE FOR THIS PIECE (use THIS one, not another, and declare its label "
+           f"as \"angle\"): {angle}\n" if angle else "")
+        + (f"ASPECT FOR THIS ART PIECE (declare it as \"image_aspect\"): {aspect} — "
+           f"{IMAGE_ASPECTS[aspect]}. The other art piece of this hunt takes a "
+           "DIFFERENT aspect; stay inside yours.\n" if aspect else "")
         + ("ALREADY SPENT on this word — do NOT repeat these angles: "
            + ", ".join(spent) + "\n" if spent else "")
         + (
@@ -587,7 +820,14 @@ class TargetClueEngine(RelicClueEngine):
                     "answer. " + " | ".join(structural) + ". Rewrite without any "
                     "false structural claim; if you cannot verify a claim on the "
                     "actual letters, do not make it"]
-        # 3. the search guard, puzzle phase only
+        # 3. declare-and-verify: angle/aspect as assigned, every claim true,
+        #    every structural statement declared, no synonym lists
+        decl = declaration_errors(draft, persona, clue_index)
+        if decl:
+            logging.getLogger(__name__).warning(
+                "clue #%s: declaration check rejected (%d)", clue_index, len(decl))
+            return ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)]
+        # 4. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= PUZZLE_CLUES:
             v = self._search_guard.check(
                 draft.text, target_item_id=persona.target_id,
@@ -602,7 +842,7 @@ class TargetClueEngine(RelicClueEngine):
                         "any literal description of the picture or phrase that "
                         "could appear in a title; attack from the assigned angle "
                         "only"]
-        # 4. the blind solver (inherited)
+        # 5. the blind solver (inherited)
         return super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
 
     def generate(self, persona, clue_index, prior_clues, *, feedback=None):
@@ -620,4 +860,4 @@ class TargetClueEngine(RelicClueEngine):
             messages=[{"role": "user", "content": user}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        return _parse_clue(text)
+        return parse_target_clue(text)

@@ -98,6 +98,11 @@ class PersonaContext:
 class ClueDraft:
     text: str
     taunt: str | None = None    # None for clue 1; a jeer for clues 2+
+    # Declare-and-verify (target engine, Opus 09/09): what the writer SAYS it
+    # did, as data — the guard checks the data, not the prose.
+    angle: str | None = None            # declared angle label ("SEMANTIC FIELD")
+    image_aspect: str | None = None     # declared aspect of an art piece
+    claims: list = field(default_factory=list)   # structural claims about the name
 
 
 def obliqueness_for(clue_index: int, persona: "PersonaContext | None" = None) -> float:

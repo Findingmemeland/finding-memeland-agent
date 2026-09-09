@@ -2408,7 +2408,7 @@ class Orchestrator:
                 time_to_win=data.time_to_win, prize_amount=data.prize_amount,
             )
             media = reveal_media(self, hunt)      # the treasure, shown
-            media_alt = reveal_alt_text(hunt)     # R9: title + author
+            media_alt = reveal_alt_text(self, hunt)   # R9: title + author
         else:
             text = winner_announcement(data)
         # The prize is already paid; the trophy is a bonus and never blocks.

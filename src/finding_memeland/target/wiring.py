@@ -35,6 +35,7 @@ from .adapters import (
     RotatingLiveCheck,
     chain_rpcs,
     code_bytes,
+    creator_credit,
     gateway_url,
     mint_fetcher,
     sniff_media_type,
@@ -308,6 +309,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             raise ArtworkUnusable(f"not a still image ({_media_kind(data)})")
         return data
 
+    def credit(sealed: SealedTarget) -> str:
+        """R9 from the chain, at reveal time, on OUR keyed RPCs (the hunt is
+        decided). 'name.eth' only with the forward check; else 0x…; else ''."""
+        t = sealed.target
+        return creator_credit(rpcs, t.chain, t.contract, t.token_id)
+
     preparer = TargetHuntPreparer(
         snapshot_store=snapshot_store,
         writability_rates=s.target_writability_rate_map,
@@ -328,6 +335,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         resolve_link=resolver,
         live_hash=live_hash,
         fetch_artwork=fetch_artwork,
+        creator_credit=credit,
         spray=SprayDetector(SprayParams()),
         hold_renotify_s=float(s.target_hold_renotify_s),
         max_hold_s=float(s.target_max_hold_s),
