@@ -49,6 +49,7 @@ import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -834,28 +835,42 @@ class AnthropicTruthJudge:
 
     name = "anthropic-truth-judge"
 
-    def __init__(self, client, model: str, *, max_tokens: int = 200):
+    def __init__(self, client, model: str, *, max_tokens: int = 300,
+                 tries: int = 3, sleep=None):
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
+        self._tries = tries
+        self._sleep = sleep or (lambda s: time.sleep(s))
 
     def check(self, clue: str, *, name: str, word: str | None,
               artwork: str) -> TruthVerdict:
+        """Three tries over transient trouble (a 529, a truncated answer)
+        before the engine fails closed — one blip must not freeze a hunt.
+        The MEASURED cause travels in `reason` (R8: 'unavailable' alone told
+        the operator nothing on 09/09)."""
         about = (f"the word '{word}' of the name" if word else "the ARTWORK")
         user = (f"ANSWER — name: {name}\nartwork: {artwork or '(no description)'}\n"
                 f"This clue is about {about}.\n\nCLUE: {clue}\n\n"
-                "Is the clue TRUE of the answer?")
-        try:
-            resp = self._client.messages.create(
-                model=self._model, max_tokens=self._max_tokens,
-                system=TRUTH_JUDGE_SYSTEM,
-                messages=[{"role": "user", "content": user}])
-            text = "".join(getattr(b, "text", "") for b in resp.content)
-            start, end = text.find("{"), text.rfind("}")
-            doc = json.loads(text[start:end + 1])
-            return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
-        except Exception:  # noqa: BLE001 — the engine fails closed on None
-            return TruthVerdict(None, "judge unavailable")
+                "Is the clue TRUE of the answer? Answer with the JSON object only.")
+        last = "no attempt"
+        for attempt in range(self._tries):
+            try:
+                resp = self._client.messages.create(
+                    model=self._model, max_tokens=self._max_tokens,
+                    system=TRUTH_JUDGE_SYSTEM,
+                    messages=[{"role": "user", "content": user}])
+                text = "".join(getattr(b, "text", "") for b in resp.content)
+                start, end = text.find("{"), text.rfind("}")
+                if start == -1 or end < start:
+                    raise ValueError(f"no JSON in judge answer: {text[:80]!r}")
+                doc = json.loads(text[start:end + 1])
+                return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
+            except Exception as e:  # noqa: BLE001 — retried, then fail closed
+                last = f"{type(e).__name__}: {str(e)[:120]}"
+                if attempt < self._tries - 1:
+                    self._sleep(2.0 * (attempt + 1))
+        return TruthVerdict(None, last)
 
 
 class TargetClueEngine(RelicClueEngine):

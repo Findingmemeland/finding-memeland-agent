@@ -22,6 +22,7 @@ import json
 import sys
 from pathlib import Path
 
+from finding_memeland.target.clues import ClueGuardUnavailable
 from finding_memeland.target.dryrun import (
     MANDATORY,
     SCENARIOS,
@@ -95,7 +96,13 @@ def main(argv: list[str]) -> int:
             print("--real-clues só faz sentido com o cenário 'happy' (chamadas reais).")
             names = ["happy"]
         factory = real_world_factory
-    reports = run_scenarios(names, verbose=True, world_factory=factory)
+    try:
+        reports = run_scenarios(names, verbose=True, world_factory=factory)
+    except ClueGuardUnavailable as e:
+        # in production this is a HOLD (deadline frozen, operator called);
+        # in the simulation it is the end of the run — say why, no traceback
+        print(f"\nFAIL — um guarda nosso não conseguiu verificar (em produção: HOLD): {e}")
+        return 1
     print("\n" + "=" * 72 + "\nRELATÓRIO\n" + "=" * 72)
     for rep in reports:
         print(rep.render())

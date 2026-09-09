@@ -624,8 +624,34 @@ def test_anthropic_truth_judge_parses_and_fails_to_none():
     assert v.consistent is False and "future" in v.reason
     user = c.calls[0]["messages"][0]["content"]
     assert "Ancient Future" in user and "'Future'" in user and "CLUE: clue" in user
-    assert AnthropicTruthJudge(_C("garbage"), "m").check("c", name="n", word=None, artwork="").consistent is None
-    assert AnthropicTruthJudge(_C(RuntimeError("503")), "m").check("c", name="n", word=None, artwork="").consistent is None
+    # transient trouble: retried, then fail-closed WITH the measured cause (R8)
+    naps = []
+    g = _C("garbage")
+    v = AnthropicTruthJudge(g, "m", sleep=naps.append).check("c", name="n", word=None, artwork="")
+    assert v.consistent is None and "no JSON in judge answer" in v.reason
+    assert len(g.calls) == 3 and naps == [2.0, 4.0]
+    v = AnthropicTruthJudge(_C(RuntimeError("503 overloaded")), "m", sleep=lambda s: None).check(
+        "c", name="n", word=None, artwork="")
+    assert v.consistent is None and "RuntimeError: 503 overloaded" in v.reason
+
+
+def test_judge_recovers_on_the_second_try():
+    from finding_memeland.target.clues import AnthropicTruthJudge
+
+    class _Flaky:
+        def __init__(self):
+            self.n = 0
+
+            class _M:
+                def create(_s, **kw):
+                    self.n += 1
+                    if self.n == 1:
+                        raise RuntimeError("529")
+                    return _Resp('{"consistent": true, "reason": "fits"}')
+            self.messages = _M()
+    f = _Flaky()
+    v = AnthropicTruthJudge(f, "m", sleep=lambda s: None).check("c", name="n", word=None, artwork="")
+    assert v.consistent is True and f.n == 2
 
 
 def test_writer_reasoning_out_loud_costs_one_attempt_not_the_round():
