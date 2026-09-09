@@ -18,7 +18,11 @@ the blind solver. What is target-specific lives here, and only this:
    description": both false now, and the first is a leak (decision: clues
    never state the chain — the chain is part of the answer).
 
-3. TWO MECHANICAL GUARDS in `_post_guardrail_reasons`, before the solver:
+3. THREE MECHANICAL GUARDS in `_post_guardrail_reasons`, before the solver:
+   · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
+     about the name's letters is tested against the string; what cannot
+     be tested (compound/fused/portmanteau/hidden word) is refused. Born
+     from a false clue in Hunt #9 that repeated in the 09/09 live test.
    · NAME-OF-A-CHAIN-OR-PLATFORM: the clue must not contain ethereum/base/
      polygon/solana/…, nor foundation/superrare/opensea/…, as words. A
      platform name collapses the candidate set to one search box; a chain
@@ -87,6 +91,151 @@ _FORBIDDEN_RE = re.compile(
 def forbidden_address_words(text: str) -> list[str]:
     """Chain or platform names present in the clue text, as typed."""
     return sorted({m.group(1).lower() for m in _FORBIDDEN_RE.finditer(text or "")})
+
+
+# --------------------------------------------------------------------------- #
+# Structural-claim guard (Opus, live test 09/09 — the Hunt #9 finding repeated) #
+# --------------------------------------------------------------------------- #
+#
+# The generator invents a structural property the word does not have
+# ("word two of the name is a compound — two complete words fused"; the
+# word was FUTURE). A player who obeys the clue walks away from the answer.
+# Every claim a clue makes ABOUT THE STRING is tested against the string:
+# letter counts, first/last letter, vowel/consonant, double letters, word
+# count, palindrome, "contains the word X". Claims the guard CANNOT test —
+# compound / fused / portmanteau / hidden word without naming it — are
+# refused outright: an unverifiable structural claim was exactly the false
+# one. Deterministic, like the emoji guard.
+
+_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+              "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+              "twelve": 12, "a single": 1, "single": 1}
+_ORD_WORDS = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+              "fourth": 4, "4th": 4, "last": -1, "final": -1, "opening": 1,
+              "closing": -1}
+_NUM_RE = r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_WORD_REF_RE = re.compile(
+    r"\b(?:word\s+(?P<wn>one|two|three|four|\d+)|"
+    r"the\s+(?P<ord>first|second|third|fourth|last|final|opening|closing|1st|2nd|3rd|4th)"
+    r"(?=\s+(?:word|half|part|name|one|has|is|starts|begins|ends|carries|contains|holds|"
+    r"opens|closes|hides|runs)\b)|"
+    r"(?P<whole>the\s+(?:whole\s+|full\s+)?name|both\s+words))\b",
+    re.IGNORECASE)
+_UNVERIFIABLE_RE = re.compile(
+    r"\b(compound|portmanteau|fused|welded|two\s+(?:complete\s+|whole\s+)?words\s+"
+    r"(?:in\s+one|joined|stitched|glued|fused|merged)|hides?\s+(?:a|another)\s+word|"
+    r"a\s+word\s+(?:hiding|hidden|inside)|find\s+(?:that|the)\s+seam)\b",
+    re.IGNORECASE)
+_LETTERS_RE = re.compile(_NUM_RE + r"[\s-]+letters?\b", re.IGNORECASE)
+_WORDS_RE = re.compile(_NUM_RE + r"[\s-]+words?\b", re.IGNORECASE)
+_LETTER_CLAIM = (        # "a vowel" | "a consonant" | "the letter F" | "'f'" | "F"
+    r"(?:(?:an?\s+)?(?P<what>[Vv]owel|[Cc]onsonant)"
+    r"|the\s+letter\s+['\u2018\u2019\"\u201c\u201d]?(?P<letter>[A-Za-z])['\u2018\u2019\"\u201c\u201d]?"
+    r"|['\u2018\u2019\"\u201c\u201d](?P<qletter>[A-Za-z])['\u2018\u2019\"\u201c\u201d]"
+    r"|(?P<uletter>[A-Z]))(?![A-Za-z])")
+_STARTS_RE = re.compile(r"\b(?:[Ss]tarts|[Bb]egins|[Oo]pens)\s+with\s+" + _LETTER_CLAIM)
+_ENDS_RE = re.compile(r"\b(?:[Ee]nds|[Cc]loses|[Ff]inishes)\s+(?:with|in|on)\s+" + _LETTER_CLAIM)
+_FIRST_LETTER_RE = re.compile(
+    r"\b(?P<pos>[Ff]irst|[Ll]ast)\s+letter\s+(?:is\s+|:\s*)?" + _LETTER_CLAIM)
+_DOUBLE_RE = re.compile(r"\b(?:double|doubled|repeated|twin)\s+(?:letter|consonant|vowel)s?\b",
+                        re.IGNORECASE)
+_PALINDROME_RE = re.compile(r"\bpalindrom", re.IGNORECASE)
+_CONTAINS_RE = re.compile(
+    r"\b(?:contains|holds|hides|carries|conceals)\s+(?:the\s+word\s+)?"
+    r"['\u2018\u2019\"\u201c\u201d](?P<w>[A-Za-z]{2,})['\u2018\u2019\"\u201c\u201d]",
+    re.IGNORECASE)
+_VOWELS = set("aeiou")
+
+
+def _n(tok: str) -> int:
+    tok = tok.lower()
+    return int(tok) if tok.isdigit() else _NUM_WORDS.get(tok, 0)
+
+
+def _scope_at(text: str, pos: int, words: list[str]) -> tuple[list[str], bool]:
+    """The name word(s) a claim at `pos` is about: the NEAREST preceding
+    reference in the same sentence ("word two", "the first word"); none →
+    every word plus the whole name (a claim then needs to hold for ANY).
+    Returns (words to test, whether the whole name counts too)."""
+    ref = None
+    for m in _WORD_REF_RE.finditer(text):
+        if m.start() > pos:
+            break
+        if re.search(r"[.!?\n]", text[m.end():pos]):    # a sentence boundary resets
+            ref = None
+            continue
+        ref = m
+    if ref is None or ref.group("whole"):
+        return words, True
+    idx = _n(ref.group("wn")) if ref.group("wn") else _ORD_WORDS.get(ref.group("ord").lower(), 0)
+    if idx == -1:
+        return [words[-1]], False
+    if 1 <= idx <= len(words):
+        return [words[idx - 1]], False
+    return words, True
+
+
+def _is(letter: str, m) -> bool:
+    what = (m.group("what") or "").lower()
+    if what == "vowel":
+        return letter in _VOWELS
+    if what == "consonant":
+        return letter.isalpha() and letter not in _VOWELS
+    target = m.group("letter") or m.group("qletter") or m.group("uletter") or ""
+    return letter == target.lower()
+
+
+def structural_claim_errors(text: str, name: str) -> list[str]:
+    """Claims the clue makes about the NAME'S STRING that are false or
+    unverifiable, as feedback lines for the writer (each names the word:
+    the writer already knows the name; these never reach the public)."""
+    words = [w for w in re.findall(r"[A-Za-zÀ-ÿ']+", (name or "").lower())]
+    if not words:
+        return []
+    errs: list[str] = []
+    whole = "".join(words)
+
+    def holds(pos: int, pred) -> tuple[bool, list[str]]:
+        scope, any_ok = _scope_at(text, pos, words)
+        ok = any(pred(w) for w in scope) or (any_ok and pred(whole))
+        return ok, scope
+
+    def false(m, pred, detail=None):
+        ok, scope = holds(m.start(), pred)
+        if not ok:
+            errs.append(f"'{m.group(0)}' is false for "
+                        + (detail(scope) if detail else ", ".join(scope)))
+
+    m = _UNVERIFIABLE_RE.search(text)
+    if m:
+        errs.append(f"the clue asserts a hidden structure ('{m.group(0)}') that "
+                    "cannot be checked against the string — the last such claim "
+                    "was FALSE. Drop it; make only claims a reader can verify on "
+                    "the letters (count, first/last letter, doubled letter) or none")
+    for m in _LETTERS_RE.finditer(text):
+        n = _n(m.group("n"))
+        if n:
+            false(m, lambda w: len(w) == n,
+                  lambda scope: ", ".join(f"{w} ({len(w)} letters)" for w in scope))
+    for m in _WORDS_RE.finditer(text):
+        n = _n(m.group("n"))
+        if n and n != len(words) and "letter" not in text[m.end():m.end() + 12].lower():
+            errs.append(f"'{m.group(0)}' is false: the name has {len(words)} words")
+    for m in _STARTS_RE.finditer(text):
+        false(m, lambda w: _is(w[0], m))
+    for m in _ENDS_RE.finditer(text):
+        false(m, lambda w: _is(w[-1], m))
+    for m in _FIRST_LETTER_RE.finditer(text):
+        pick = (lambda w: w[0]) if m.group("pos").lower() == "first" else (lambda w: w[-1])
+        false(m, lambda w: _is(pick(w), m))
+    for m in _DOUBLE_RE.finditer(text):
+        false(m, lambda w: any(a == b for a, b in zip(w, w[1:])))
+    for m in _PALINDROME_RE.finditer(text):
+        false(m, lambda w: len(w) > 1 and w == w[::-1])
+    for m in _CONTAINS_RE.finditer(text):
+        inner = m.group("w").lower()
+        false(m, lambda w: inner in w and inner != w)
+    return errs
 
 
 # --------------------------------------------------------------------------- #
@@ -404,7 +553,19 @@ class TargetClueEngine(RelicClueEngine):
                     ", ".join(words) + ") — the chain and the platform are part "
                     "of the ANSWER; remove every such word and any allusion to "
                     "them"]
-        # 2. the search guard, puzzle phase only
+        # 2. structural claims about the name's string — true, or gone
+        #    (Opus, live test 09/09: "word two is a compound" — it was FUTURE)
+        structural = structural_claim_errors(draft.text, persona.display_name)
+        if structural:
+            logging.getLogger(__name__).warning(
+                "clue #%s: false/unverifiable structural claim rejected (%d)",
+                clue_index, len(structural))
+            return ["the clue makes a claim about the NAME'S LETTERS that is false "
+                    "or unverifiable — a player who obeys it walks AWAY from the "
+                    "answer. " + " | ".join(structural) + ". Rewrite without any "
+                    "false structural claim; if you cannot verify a claim on the "
+                    "actual letters, do not make it"]
+        # 3. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= PUZZLE_CLUES:
             v = self._search_guard.check(
                 draft.text, target_item_id=persona.target_id,
@@ -419,7 +580,7 @@ class TargetClueEngine(RelicClueEngine):
                         "any literal description of the picture or phrase that "
                         "could appear in a title; attack from the assigned angle "
                         "only"]
-        # 3. the blind solver (inherited)
+        # 4. the blind solver (inherited)
         return super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
 
     def generate(self, persona, clue_index, prior_clues, *, feedback=None):

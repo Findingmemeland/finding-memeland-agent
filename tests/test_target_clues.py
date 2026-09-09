@@ -279,3 +279,58 @@ def test_clean_clue_passes_first_time():
     d = e.next_clue(ctx(), 1, [])
     assert d.text == "patience is a coin nobody spends"
     assert len(e._client.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Structural-claim guard (Opus, live test 09/09 — Hunt #9 finding repeated)    #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("text,rejected", [
+    # the real one: "Ancient Future" — FUTURE is not a compound
+    ("word two of the name is a compound hiding in plain sight — two complete "
+     "words fused, each carrying full weight alone. find that seam.", True),
+    ("a portmanteau at the end", True),
+    ("the second word has five letters", True),
+    ("the second word of this name has six letters and ends with a vowel", False),
+    ("the first word starts with a vowel; the last word ends with a vowel", False),
+    ("the first word ends with a vowel", True),
+    ("the second word starts with a vowel", True),
+    ("the name has three words", True),
+    ("a two-word name, both halves older than the medium", False),
+    ("the first word has seven letters. the second ends with a consonant", True),
+    ("the first word carries a double letter", True),
+    ("the first word contains 'cien'", False),
+    ("the last word contains 'past'", True),
+    ("the name is a palindrome", True),
+    ("the second word begins with the letter F", False),
+    ("the second word begins with the letter T", True),
+    ("word one ends in 't'", False),
+    ("word one ends in 'e'", True),
+    # unspecified word: true if it holds for ANY word of the name
+    ("the last letter is a consonant", False),
+    ("six letters, and the seam runs through the middle", False),
+    # prose that is not a claim about the string
+    ("nothing structural here, only the flicker of a tape", False),
+    ("the first to find it wins; the tape ends with a hiss", False),
+])
+def test_structural_claims_are_checked_against_the_name(text, rejected):
+    from finding_memeland.target.clues import structural_claim_errors
+    assert bool(structural_claim_errors(text, "ancient future")) is rejected, \
+        structural_claim_errors(text, "ancient future")
+
+
+def test_false_structural_claim_is_rejected_then_regenerated():
+    """Hunt #9: 'pista 1 factualmente falsa à letra — ver se repete'. It
+    repeated (clue 4, 09/09). A false claim about the letters is now a
+    guardrail reason, in every phase, and the feedback names the word."""
+    e = engine(["the second word is a compound — two complete words fused, find that seam",
+                "the second word starts with a vowel, like a door left open",
+                "patience is a coin nobody spends"])
+    d = e.next_clue(ctx(), 9, ["c"] * 8)                 # reveal phase too
+    assert d.text == "patience is a coin nobody spends"
+    fb1 = e._client.calls[1]["messages"][0]["content"]
+    fb2 = e._client.calls[2]["messages"][0]["content"]
+    assert "NAME'S LETTERS" in fb1 and "cannot be checked" in fb1
+    assert "'starts with a vowel' is false for harbor" in fb2
+    # letter COUNTS were already banned by the base guardrail (models miscount)
