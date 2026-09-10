@@ -622,16 +622,17 @@ def test_anthropic_truth_judge_parses_and_fails_to_none():
                         raise self.text
                     return _Resp(self.text)
             self.messages = _M()
-    c = _C('{"consistent": false, "reason": "the word is future"}')
+    c = _C('Let me check: F-U-T-U-R-E ends with E, a vowel.\n{"consistent": false, "reason": "the word is future"}')
     v = AnthropicTruthJudge(c, "m").check("clue", name="Ancient Future", word="Future", artwork="art")
-    assert v.consistent is False and "future" in v.reason
+    assert v.consistent is False and "future" in v.reason       # reasoning before the JSON is fine
+    assert c.calls[0]["max_tokens"] >= 800
     user = c.calls[0]["messages"][0]["content"]
     assert "Ancient Future" in user and "'Future'" in user and "CLUE: clue" in user
     # transient trouble: retried, then fail-closed WITH the measured cause (R8)
     naps = []
     g = _C("garbage")
     v = AnthropicTruthJudge(g, "m", sleep=naps.append).check("c", name="n", word=None, artwork="")
-    assert v.consistent is None and "no JSON in judge answer" in v.reason
+    assert v.consistent is None and "no JSON in judge answer" in v.reason and "garbage" in v.reason
     assert len(g.calls) == 3 and naps == [2.0, 4.0]
     v = AnthropicTruthJudge(_C(RuntimeError("503 overloaded")), "m", sleep=lambda s: None).check(
         "c", name="n", word=None, artwork="")

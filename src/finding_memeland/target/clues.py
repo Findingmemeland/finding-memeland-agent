@@ -869,8 +869,10 @@ TRUTH_JUDGE_SYSTEM = (
     "word has three. Read the clue literally first, then charitably; if the "
     "literal reading is false and a player obeying it would discard the right "
     "answer, it is inconsistent. Never reward cleverness, never punish "
-    "obscurity. Answer ONLY a JSON object: "
-    '{"consistent": true|false, "reason": "<one sentence, may name the answer>"}'
+    "obscurity. You may reason BRIEFLY first (a few lines at most — checking "
+    "letters, weighing a reading), then END with the JSON object on its own "
+    'line: {"consistent": true|false, "reason": "<one sentence, may name the '
+    'answer>"}. The JSON must be the last thing you write.'
 )
 
 
@@ -889,7 +891,7 @@ class AnthropicTruthJudge:
 
     name = "anthropic-truth-judge"
 
-    def __init__(self, client, model: str, *, max_tokens: int = 300,
+    def __init__(self, client, model: str, *, max_tokens: int = 900,
                  tries: int = 3, sleep=None):
         self._client = client
         self._model = model
@@ -906,7 +908,8 @@ class AnthropicTruthJudge:
         about = (f"the word '{word}' of the name" if word else "the ARTWORK")
         user = (f"ANSWER — name: {name}\nartwork: {artwork or '(no description)'}\n"
                 f"This clue is about {about}.\n\nCLUE: {clue}\n\n"
-                "Is the clue TRUE of the answer? Answer with the JSON object only.")
+                "Is the clue TRUE of the answer? Reason briefly if you need to, "
+                "then end with the JSON object.")
         last = "no attempt"
         for attempt in range(self._tries):
             try:
@@ -915,9 +918,10 @@ class AnthropicTruthJudge:
                     system=TRUTH_JUDGE_SYSTEM,
                     messages=[{"role": "user", "content": user}])
                 text = "".join(getattr(b, "text", "") for b in resp.content)
-                start, end = text.find("{"), text.rfind("}")
-                if start == -1 or end < start:
-                    raise ValueError(f"no JSON in judge answer: {text[:80]!r}")
+                end = text.rfind("}")
+                start = text.rfind("{", 0, end) if end != -1 else -1
+                if start == -1:
+                    raise ValueError(f"no JSON in judge answer (last 80 chars: {text[-80:]!r})")
                 doc = json.loads(text[start:end + 1])
                 return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
             except Exception as e:  # noqa: BLE001 — retried, then fail closed

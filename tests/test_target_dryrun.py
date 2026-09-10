@@ -64,3 +64,20 @@ def test_a_clue_going_out_releases_any_hold():
     assert sum("⏸ HOLD (" in m for m in msgs) == 1
     assert sum("hold released" in m for m in msgs) == 1
     assert sum(1 for p in w.posts() if "Clue" in p) >= 2
+
+
+def test_guard_hold_carries_the_measured_cause_once():
+    """8th --real-clues (10/09): the judge failed three times and the hold
+    said only 'search guard unverifiable' (the ledger's name). The detail —
+    which guard, which clue, which error — now travels with the first
+    notice; the re-notifications stay short."""
+    from finding_memeland.target.clues import TruthJudgeUnavailable
+    from finding_memeland.target.integration import clue_failed
+    w = TargetWorld()
+    hunt = w.launch()
+    exc = TruthJudgeUnavailable("consistency judge unavailable for clue #4: "
+                                "ValueError: no JSON in judge answer (last 80 chars: '…')")
+    assert clue_failed(w.orch, hunt, exc) is True
+    assert clue_failed(w.orch, hunt, exc) is True
+    details = [m for m in w.notices() if "guard detail:" in m]
+    assert len(details) == 1 and "clue #4" in details[0] and "no JSON in judge answer" in details[0]

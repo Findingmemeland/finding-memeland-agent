@@ -360,7 +360,13 @@ def clue_failed(orch, hunt, exc: BaseException) -> bool:
     Returns True when the failure was turned into a hold."""
     from .clues import ClueGuardUnavailable
     if isinstance(exc, ClueGuardUnavailable):      # search guard OR truth judge
+        was_holding = hunt.target_hold.is_holding()
         manage_hold(orch, hunt, holding=True, reason=HOLD_GUARD)
+        if not was_holding:
+            # R8 on ourselves (8th --real-clues, 10/09): the ledger's cause is
+            # generic, the MEASURED one lives in the exception — which guard,
+            # which clue, which error. Never the clue text (by construction).
+            orch._notify(f"guard detail: {exc}")
         return True
     return False
 
