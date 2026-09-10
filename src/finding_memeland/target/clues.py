@@ -680,7 +680,9 @@ guess it, and never quote it: a quoted phrase is a search query.
 
 Voice: playful, ironic, meme-native crypto Twitter. Community language, cheeky, \
 lowercase is fine. NOT mystical or poetic. A smug oracle enjoying the struggle. \
-Emoji only where the phase rules below allow them.
+Emoji only where the phase rules below allow them. The hidden NFT is "the \
+treasure" (or "the piece", "the name") — NEVER "the relic": there are no relics \
+in this game and the word sends players to the wrong collection.
 
 Hard rules for the clue text:
 - One short post, max ~200 characters. Standalone clue text only.
@@ -747,6 +749,24 @@ silently; text outside the JSON is discarded and wastes your budget): \
 "<aspect or null>", "claims": [...]}}"""
 
 
+_RELIC_WORD_RE = re.compile(r"\b(the\s+)?relic('s)?\b", re.IGNORECASE)
+
+
+def _treasure_wording(guidance: str) -> str:
+    """The facet guidance is inherited from the relic engine and says "the
+    relic's NAME" / "the RELIC'S ARTWORK"; the writer copied the word into
+    the taunts ("the relic is patient" — 7th --real-clues). In this game
+    the public word is THE TREASURE (Clue 1, reveal). Local to the target
+    engine; the relic engine's own text is untouched."""
+    def sub(m):
+        art = m.group(1) or ""
+        upper = m.group(0)[len(art):][:5].isupper()
+        poss = ("'S" if upper else "'s") if m.group(2) else ""
+        word = "TREASURE" if upper else "treasure"
+        return f"{art}{word}{poss}"
+    return _RELIC_WORD_RE.sub(sub, guidance)
+
+
 def build_target_user_message(ctx: TargetClueContext, clue_index: int,
                               prior_clues: list[str]) -> str:
     """Mirrors build_relic_user_message on the DIRECT path (no anchor angle —
@@ -789,7 +809,7 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
             "use, structure, or their relation to the other words.\n"
             if clue_index <= PUZZLE_CLUES and ctx.enumerable_words else ""
         )
-        + f"FACET for this clue: {vector} — {relic_guidance_for(vector, ctx, clue_index)}\n"
+        + f"FACET for this clue: {vector} — {_treasure_wording(relic_guidance_for(vector, ctx, clue_index))}\n"
         + f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )

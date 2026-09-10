@@ -710,3 +710,19 @@ def test_taunt_that_prints_the_answer_or_the_address_is_omitted():
     assert safe_taunt("four clues deep and still circling", terms) == "four clues deep and still circling"
     assert safe_taunt("more ancient than your search history", terms) == ""
     assert safe_taunt(None, terms) == ""
+
+
+def test_target_prompt_says_treasure_never_relic():
+    """Pedro (10/09): taunts said "the relic is patient" — inherited wording.
+    In this game the public word is the treasure."""
+    from finding_memeland.target.clues import (
+        TARGET_SYSTEM_PROMPT, _treasure_wording, build_target_user_message,
+    )
+    from finding_memeland.content.relic_clues import relic_slot_for
+    assert 'NEVER "the relic"' in TARGET_SYSTEM_PROMPT
+    assert _treasure_wording("the relic's NAME and the RELIC'S ARTWORK, a relic") == \
+        "the treasure's NAME and the TREASURE'S ARTWORK, a treasure"
+    c = ctx()
+    for i in range(1, PUZZLE_CLUES + 4):
+        msg = build_target_user_message(c, i, ["x"] * (i - 1))
+        assert "relic" not in msg.lower(), (i, relic_slot_for(i, c)[0])
