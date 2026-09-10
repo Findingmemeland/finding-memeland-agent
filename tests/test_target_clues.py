@@ -527,13 +527,16 @@ def test_synonym_list_in_a_name_piece_is_rejected():
     assert "synonym list" in e._client.calls[1]["messages"][0]["content"]
 
 
-def test_relation_angle_never_before_piece_four():
+def test_relation_angle_never_on_clue_one_and_the_ramp_is_the_hunt_9_one():
+    """The Hunt #7 rule only. A "not before piece 4" tweak (09/09) was
+    reverted by Pedro: the ramp that reached clue 7 in Hunts #8 and #9 is
+    not changed on the strength of a simulation."""
     from finding_memeland.content.relic_clues import RELATION_EARLIEST, angle_for_unverifiable
     from finding_memeland.content.relic_clues import RelicClueContext
+    assert RELATION_EARLIEST == 2
     for name in ("Salt Harbor", "Ancient Future", "Damp Hamlet", "Caesar Plop", "Uncle Pump"):
         c = RelicClueContext(display_name=name, image_description="", lore="", backstory="")
-        for i in range(1, RELATION_EARLIEST):
-            assert not (angle_for_unverifiable(i, c) or "").startswith("RELATION"), (name, i)
+        assert not (angle_for_unverifiable(1, c) or "").startswith("RELATION"), name
 
 
 def test_parse_target_clue_reads_the_declaration():
@@ -668,3 +671,26 @@ def test_writer_reasoning_out_loud_costs_one_attempt_not_the_round():
     e = engine([(RAW, "no json"), (RAW, "still no json")])
     with pytest.raises(ValueError):
         e.next_clue(ctx(), 5, ["x"] * 4)
+
+
+def test_guard_pressure_is_tallied_per_clue_and_clue_one_gets_ten_attempts(caplog):
+    """Pedro (09/09): 'a hunt must run, it cannot block' — guard pressure is
+    measured per clue (which guard refused how often), so a guard that is
+    too tight is removed with numbers, not opinion. Clue 1 tries 10 times."""
+    import logging
+    judge = FakeTruthJudge({"present": (False, "that is the present")})
+    e = engine(["patience is a coin on base",                    # address words
+                {"clue": "a coin nobody spends", "taunt": "", "angle": "NOPE"},   # declaration
+                "the seam of the present",                       # judge
+                "patience is a coin nobody spends"], judge=judge)
+    with caplog.at_level(logging.WARNING):
+        d = e.next_clue(ctx(), 5, ["x"] * 4)
+    assert d.text == "patience is a coin nobody spends"
+    assert e.last_attempt_report == (4, {"address words": 1, "declaration": 1, "judge": 1})
+    assert any("published after 4 attempts" in r.message and "judge ×1" in r.message
+               for r in caplog.records)
+    # clue 1: ten attempts before refusing
+    e = engine(["patience is a coin on base"] * 10 + ["never reached"])
+    with pytest.raises(RuntimeError):
+        e.next_clue(ctx(), 1, [])
+    assert len(e._client.calls) == 10 and e._rejections == {"address words": 10}

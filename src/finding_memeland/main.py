@@ -688,12 +688,17 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # Last line of defence: the loop itself survives transient errors,
             # but if anything DOES escape (bug, unrecoverable failure), the
             # operator must hear about it on Telegram — never a silent death.
+            from .target.integration import GoLiveRefused
             try:
                 orchestrator.run_hunt(
                     prize_fmml=prize_fmml,
                     ladder_exempt=ladder_exempt,
                     expected_relic_id=expected_relic_id,
                 )
+            except GoLiveRefused as e:
+                # clue 1 never came out: nothing posted, no prize moved — the
+                # operator already got the specific reason from the orchestrator
+                notifier.notify(f"launch refused ({e}) — nothing was posted.")
             except Exception as e:  # noqa: BLE001
                 import traceback
 

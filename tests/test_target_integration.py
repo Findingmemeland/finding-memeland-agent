@@ -604,3 +604,45 @@ def test_oscillating_outage_trips_the_accumulated_hold_ceiling():
     assert any("ACCUMULATED" in m for m in msgs)
     assert any("hold released" in m for m in msgs)          # oscilou mesmo
     assert hunt.state is HuntState.LIVE
+
+
+def test_clue_one_exhaustion_is_a_refusal_that_excludes_the_target():
+    """5th --real-clues: six attempts on clue 1, all solver hits — in
+    production that surfaced as '🚨 HUNT DIED'. Nothing was posted: it is a
+    refusal. The target is excluded like a void; the hunt closes; the
+    notices never name it."""
+    from finding_memeland.target.integration import GoLiveRefused
+
+    class _Exhausted:
+        def next_clue(self, ctx, i, prior, **kw):
+            raise RuntimeError("clue #1 failed guardrails after 6 attempts")
+    w = World()
+    w.ports.clue_engine = _Exhausted()
+    with pytest.raises(GoLiveRefused) as e:
+        w.launch()
+    assert "unwritable" in str(e.value)
+    hunt = next(iter(w.rig.repo.hunts.values()))
+    assert hunt["target_void_id"] and hunt["target_void_cause"] == "unwritable"
+    assert w.rig.publisher.posts == []                          # nothing public
+    assert any("launch refused" in m and "excluded from the next draw" in m
+               for m in w.rig.notifier.messages)
+    assert all(hunt["target_void_id"].split(":")[1] not in m for m in w.rig.notifier.messages)
+    assert w.orch._last_target_void_id == hunt["target_void_id"]
+
+
+def test_guard_down_at_clue_one_refuses_without_excluding_the_target():
+    from finding_memeland.target.clues import TruthJudgeUnavailable
+    from finding_memeland.target.integration import GoLiveRefused
+
+    class _Down:
+        def next_clue(self, ctx, i, prior, **kw):
+            raise TruthJudgeUnavailable("judge down")
+    w = World()
+    w.ports.clue_engine = _Down()
+    with pytest.raises(GoLiveRefused) as e:
+        w.launch()
+    assert "guard unavailable" in str(e.value)
+    hunt = next(iter(w.rig.repo.hunts.values()))
+    assert not hunt.get("target_void_id")
+    assert any("stays prepared" in m for m in w.rig.notifier.messages)
+    assert w.rig.publisher.posts == []

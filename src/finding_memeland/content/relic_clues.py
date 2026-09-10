@@ -67,7 +67,10 @@ PUZZLE_OBLIQUENESS = (0.9, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65)
 # post-mortem): the art is generated FROM the name, so a plain description of
 # it is the name in other words, and it was sitting inside the hard phase.
 PUZZLE_IMAGE_PIECES = 2
-RELATION_EARLIEST = 4          # the RELATION angle is never handed out before piece 4
+RELATION_EARLIEST = 2          # RELATION never on clue 1 (the Hunt #7 rule; 09/09 a
+                               # "not before 4" tweak was tried and reverted — Pedro:
+                               # the ramp that reached clue 7 twice is not touched
+                               # on a simulation)
 IMAGE_EASY_OBLIQUENESS = 0.25  # the plain-description art piece (reveal phase)
 REVEAL_IMAGE_SLOT = 3          # 3rd reveal clue = the plain art description
 # Every name word keeps at least this many puzzle pieces. A player needs BOTH
@@ -320,10 +323,7 @@ def angle_for(
         if i < RELATION_EARLIEST:
             # RELATION ("how this word sits against the OTHER word") is a
             # constraint nobody can use before the other word has had a piece
-            # — and clue 1 is the most-read post (Opus, 27/08). 09/09: not
-            # before piece 4 either — with one field piece already out, a
-            # relation piece at 3 handed the pair over (live test, "one
-            # belongs in a museum, the other in a prophecy").
+            # — and clue 1 is the most-read post (Opus, 27/08).
             avoid |= {a for a in seq if a.startswith("RELATION")}
         pick = next((a for a in seq if a not in avoid), None) or next(
             (a for a in seq if a not in taken), seq[0]

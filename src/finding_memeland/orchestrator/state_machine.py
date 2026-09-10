@@ -839,7 +839,14 @@ class Orchestrator:
         self._transition(hunt, HuntState.DONE)
 
     def _go_live(self, hunt: PreparedHunt) -> None:
-        draft = self._engine_for(hunt).next_clue(hunt.ctx, 1, [])
+        try:
+            draft = self._engine_for(hunt).next_clue(hunt.ctx, 1, [])
+        except Exception as e:  # noqa: BLE001
+            if getattr(hunt, "target", None) is not None:
+                # nothing posted yet: a refusal, not a death (see clue_one_failed)
+                from ..target.integration import clue_one_failed
+                raise clue_one_failed(self, hunt, e) from e
+            raise
         # Floor 0 = holding OFF for this hunt: omit the split line rather
         # than advertise a rule that isn't enforced. Reactivates by itself
         # the moment the floor is set again (Hunt #5).

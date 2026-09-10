@@ -895,10 +895,43 @@ class TargetClueEngine(RelicClueEngine):
         self._truth_judge = None if truth_judge is False else truth_judge
         self._forbidden_hits: dict[str, int] = {}
 
+    CLUE_ONE_ATTEMPTS = 10     # a refusal at clue 1 costs a draw; try harder there
+
     def next_clue(self, persona, clue_index, prior_clues, *, max_attempts: int = 6):
+        """GUARD PRESSURE IS MEASURED, NOT GUESSED (Pedro, 09/09: "a hunt
+        must run, it cannot block"). Every published clue logs how many
+        attempts it took and which guard refused what; a clue that fails
+        every attempt logs the same tally. That tally — not opinion — is
+        what decides whether a guard is too tight."""
         self._forbidden_hits = {}
-        return super().next_clue(persona, clue_index, prior_clues,
-                                 max_attempts=max_attempts)
+        self._attempts = 0
+        self._rejections: dict[str, int] = {}
+        if clue_index == 1:
+            max_attempts = max(max_attempts, self.CLUE_ONE_ATTEMPTS)
+        log = logging.getLogger(__name__)
+        try:
+            draft = super().next_clue(persona, clue_index, prior_clues,
+                                      max_attempts=max_attempts)
+        except Exception:
+            log.warning("clue #%s: NOT produced after %s attempts — %s",
+                        clue_index, self._attempts, self._tally())
+            raise
+        if self._attempts > 1:
+            log.warning("clue #%s: published after %s attempts — %s",
+                        clue_index, self._attempts, self._tally())
+        self.last_attempt_report = (self._attempts, dict(self._rejections))
+        return draft
+
+    def _tally(self) -> str:
+        text_rules = self._attempts - 1 - sum(self._rejections.values())
+        parts = dict(self._rejections)
+        if text_rules > 0:
+            parts["text rules"] = text_rules
+        return ", ".join(f"{k} ×{v}" for k, v in parts.items()) or "no rejections"
+
+    def _reject(self, guard: str, reasons: list[str]) -> list[str]:
+        self._rejections[guard] = self._rejections.get(guard, 0) + 1
+        return reasons
 
     def _post_guardrail_reasons(self, draft, persona, clue_index, prior_clues):
         # 1. the address of the answer, mechanically, every phase
@@ -914,10 +947,10 @@ class TargetClueEngine(RelicClueEngine):
                         "clue #%s: generator hit forbidden address word %r "
                         "%s times in this clue's attempts", clue_index, w,
                         self._forbidden_hits[w])
-            return ["the clue names a blockchain or a platform (" +
+            return self._reject("address words", ["the clue names a blockchain or a platform (" +
                     ", ".join(words) + ") — the chain and the platform are part "
                     "of the ANSWER; remove every such word and any allusion to "
-                    "them"]
+                    "them"])
         # 2. structural claims about the name's string — true, or gone
         #    (Opus, live test 09/09: "word two is a compound" — it was FUTURE)
         structural = structural_claim_errors(draft.text, persona.display_name)
@@ -925,18 +958,18 @@ class TargetClueEngine(RelicClueEngine):
             logging.getLogger(__name__).warning(
                 "clue #%s: false/unverifiable structural claim rejected (%d)",
                 clue_index, len(structural))
-            return ["the clue makes a claim about the NAME'S LETTERS that is false "
+            return self._reject("structural", ["the clue makes a claim about the NAME'S LETTERS that is false "
                     "or unverifiable — a player who obeys it walks AWAY from the "
                     "answer. " + " | ".join(structural) + ". Rewrite without any "
                     "false structural claim; if you cannot verify a claim on the "
-                    "actual letters, do not make it"]
+                    "actual letters, do not make it"])
         # 3. declare-and-verify: angle/aspect as assigned, every claim true,
         #    every structural statement declared, no synonym lists
         decl = declaration_errors(draft, persona, clue_index)
         if decl:
             logging.getLogger(__name__).warning(
                 "clue #%s: declaration check rejected (%d)", clue_index, len(decl))
-            return ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)]
+            return self._reject("declaration", ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)])
         # 4. the consistency judge — clue + answer, must be TRUE (every phase)
         if self._truth_judge is not None:
             facet, _ = relic_slot_for(clue_index, persona)
@@ -954,11 +987,11 @@ class TargetClueEngine(RelicClueEngine):
             if not v.consistent:
                 logging.getLogger(__name__).warning(
                     "clue #%s: consistency judge rejected the draft", clue_index)
-                return ["the CONSISTENCY JUDGE read this clue next to the answer and "
+                return self._reject("judge", ["the CONSISTENCY JUDGE read this clue next to the answer and "
                         f"found it FALSE or pointing away from it: {v.reason}. A "
                         "player who reasons correctly must arrive at the answer, not "
                         "be pushed off it. Rewrite so the clue is TRUE of the word "
-                        "under a literal reading — hard is fine, wrong is not"]
+                        "under a literal reading — hard is fine, wrong is not"])
         # 5. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= PUZZLE_CLUES:
             v = self._search_guard.check(
@@ -969,13 +1002,14 @@ class TargetClueEngine(RelicClueEngine):
                     f"search guard unverifiable for clue #{clue_index}: "
                     f"{v.detail} — not publishing (fail-closed)")
             if not v.ok:
-                return ["a SEARCH GUARD typed this clue into a marketplace search "
+                return self._reject("search guard", ["a SEARCH GUARD typed this clue into a marketplace search "
                         "and the target came up — the piece IS a search. Remove "
                         "any literal description of the picture or phrase that "
                         "could appear in a title; attack from the assigned angle "
-                        "only"]
+                        "only"])
         # 6. the blind solver (inherited)
-        return super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
+        solver = super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
+        return self._reject("solver", solver) if solver else solver
 
     def generate(self, persona, clue_index, prior_clues, *, feedback=None):
         obliqueness = relic_slot_for(clue_index, persona)[1]
@@ -993,6 +1027,7 @@ class TargetClueEngine(RelicClueEngine):
         # regeneration loop and the ROUND was skipped. Budget doubled, and a
         # malformed answer is one more attempt with a pointed reminder, not
         # a lost round.
+        self._attempts = getattr(self, "_attempts", 0) + 1
         for attempt in range(2):
             resp = self._client.messages.create(
                 model=self._model, max_tokens=1024, system=system,

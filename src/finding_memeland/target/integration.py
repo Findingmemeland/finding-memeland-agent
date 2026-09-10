@@ -365,6 +365,45 @@ def clue_failed(orch, hunt, exc: BaseException) -> bool:
     return False
 
 
+class GoLiveRefused(RuntimeError):
+    """Clue 1 could not be produced: NOTHING was posted, no prize moved. The
+    operator relaunches; main.py reports it calmly (not 'HUNT DIED')."""
+
+
+def clue_one_failed(orch, hunt, exc: BaseException) -> GoLiveRefused:
+    """5th --real-clues (09/09): clue 1 for an abstract word exhausted the six
+    attempts on the blind solver — every SEMANTIC FIELD piece was a
+    definition in disguise. That is the guards doing their job, and the
+    honest outcome is a REFUSAL, not a dead hunt with an alarm: (a) a guard
+    of ours unavailable → the hunt stays prepared, launch again later;
+    (b) guardrail exhaustion → this target is UNWRITABLE under our rules:
+    excluded from the next draw (same column as a void), hunt closed.
+    Nothing reaches the public either way; messages never name the target."""
+    from ..orchestrator.state_machine import HuntState
+    from .clues import ClueGuardUnavailable
+    if isinstance(exc, ClueGuardUnavailable):
+        orch._notify(f"⏸ launch refused: a guard of ours could not verify clue 1 "
+                     f"({type(exc).__name__}) — nothing posted; the hunt stays "
+                     "prepared, /launch again when the service is back")
+        return GoLiveRefused("guard unavailable at clue 1")
+    orch._notify("⛔ launch refused: clue 1 could not be written under the guards "
+                 f"({type(exc).__name__}) — nothing posted. This target is excluded "
+                 "from the next draw; /launch again draws another.")
+    sealed: SealedTarget = hunt.target
+    if hunt.state is not HuntState.VOIDED:
+        orch._transition(hunt, HuntState.VOIDED)
+    try:
+        orch._repo.update_hunt(hunt.id, target_void_id=sealed.id(),
+                               target_void_cause="unwritable")
+    except Exception as e:  # noqa: BLE001
+        orch._notify(f"target_void_id not recorded: {e!r} — the next draw may "
+                     "repeat this target; note it manually.")
+    orch._last_target_void_id = sealed.id()
+    orch._transition(hunt, HuntState.RETIRING)
+    orch._transition(hunt, HuntState.DONE)
+    return GoLiveRefused("target unwritable at clue 1")
+
+
 def clue_posted(orch, hunt) -> None:
     """A clue went out: whatever hold was open is over (any cause)."""
     manage_hold(orch, hunt, holding=False, reason="")

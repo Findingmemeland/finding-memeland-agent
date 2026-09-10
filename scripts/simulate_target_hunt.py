@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from finding_memeland.target.clues import ClueGuardUnavailable
+from finding_memeland.target.integration import GoLiveRefused
 from finding_memeland.target.dryrun import (
     MANDATORY,
     SCENARIOS,
@@ -98,9 +99,14 @@ def main(argv: list[str]) -> int:
         factory = real_world_factory
     try:
         reports = run_scenarios(names, verbose=True, world_factory=factory)
+    except GoLiveRefused as e:
+        # clue 1 never came out (guards exhausted, or a guard of ours down):
+        # nothing posted; in production the operator relaunches
+        print(f"\nFAIL — lançamento recusado ({e}); ver o [notify] acima. "
+              "Nada seria publicado; em produção o operador relança.")
+        return 1
     except ClueGuardUnavailable as e:
-        # in production this is a HOLD (deadline frozen, operator called);
-        # in the simulation it is the end of the run — say why, no traceback
+        # mid-hunt: in production this is a HOLD (deadline frozen, operator called)
         print(f"\nFAIL — um guarda nosso não conseguiu verificar (em produção: HOLD): {e}")
         return 1
     print("\n" + "=" * 72 + "\nRELATÓRIO\n" + "=" * 72)
