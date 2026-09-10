@@ -88,6 +88,8 @@ class TargetWiring:
     scan_blocks: int
     writability_rates: dict
     uniqueness_rates: dict
+    # built and tested, NOT wired into ports (decision 10/09: reveal = link only)
+    fetch_artwork: Callable | None = None
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -336,7 +338,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         live_check=RotatingLiveCheck(generic=generic, rng=rng),
         resolve_link=resolver,
         live_hash=live_hash,
-        fetch_artwork=fetch_artwork,
+        # DECISION (Pedro, 10/09): the reveal carries the OpenSea item link
+        # and NO attached image — X renders one or the other, and the link
+        # card is the one that shows the piece on its marketplace page
+        # (measured Hunt #9). `fetch_artwork` stays built and tested for the
+        # day the decision changes; it is simply not wired.
+        fetch_artwork=None,
         creator_credit=credit,
         spray=SprayDetector(SprayParams()),
         hold_renotify_s=float(s.target_hold_renotify_s),
@@ -347,7 +354,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         snapshot_store=snapshot_store,
                         scan_blocks=int(s.target_scan_blocks),
                         writability_rates=s.target_writability_rate_map,
-                        uniqueness_rates=s.target_uniqueness_rate_map)
+                        uniqueness_rates=s.target_uniqueness_rate_map,
+                        fetch_artwork=fetch_artwork)
 
 
 # Type alias for main.py readers

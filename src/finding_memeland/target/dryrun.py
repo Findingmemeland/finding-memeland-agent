@@ -156,9 +156,6 @@ def synthetic_snapshot(*, per_stratum: int = 60) -> Snapshot:
     return Snapshot(epoch_id="e1", built_at="2026-08-01T11:00:00Z", entries=entries)
 
 
-FAKE_ARTWORK = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64     # sniffs as image/png
-
-
 class TargetWorld:
     """The snapshot, the live chain (tokenURI + owner by key), and the rig
     — the real Orchestrator with target mode on, everything else faked."""
@@ -201,7 +198,6 @@ class TargetWorld:
             describe_image=describe_image or (lambda sealed: "a lighthouse on a black rock"),
             live_check=LiveCheck(read_live=fetch_live, rng=random.Random(1)),
             live_hash=lambda sealed: LiveHash("resolved", "deadbeef" * 8),
-            fetch_artwork=lambda sealed: FAKE_ARTWORK,
             resolve_link=None,
             spray=SprayDetector(live_params or SprayParams()),
         )
@@ -328,22 +324,17 @@ def scenario_happy_path(world: TargetWorld) -> ScenarioReport:
     rep.check("reveal prints the tokenURI sealed at launch", target.token_uri in reveal)
     rep.check("reveal links the item (opensea.io/item/…)",
               f"see it: opensea.io/item/{target.chain}/{target.contract.lower()}/{target.token_id}" in reveal)
-    reveal_id = next((tid for tid, m in world.rig.publisher.media.items()), None)
-    rep.check("reveal post carries the artwork as media",
-              reveal_id is not None and world.rig.publisher.media[reveal_id] == FAKE_ARTWORK
-              and len(world.rig.publisher.media) == 1)
+    # decision 10/09: no image on the reveal — the link card shows the piece
+    rep.check("reveal post carries NO media (the OpenSea card renders the piece)",
+              world.rig.publisher.media == {})
     if target.artist:
-        rep.check("R9: reveal credits the artist; alt-text carries title + author",
-                  f"“{target.name_onchain}”, by {target.artist}" in reveal
-                  and world.rig.publisher.media_alt.get(reveal_id, "").startswith(
-                      f"“{target.name_onchain}”, by {target.artist}"))
+        rep.check("R9: reveal credits the artist",
+                  f"“{target.name_onchain}”, by {target.artist}" in reveal)
     else:
         # measured 09/09: Foundation metadata (FND #1) has no artist key at all —
         # the credit falls back to title + item link, nothing invented
         rep.check("R9: metadata names no author → title + link only, nothing invented (see note)",
-                  ", by " not in reveal and "made by someone else" in reveal
-                  and world.rig.publisher.media_alt.get(reveal_id, "").startswith(
-                      f"“{target.name_onchain}” —"))
+                  ", by " not in reveal and "made by someone else" in reveal)
     hint = "chain:contract:tokenId"
 
     def nth(label):

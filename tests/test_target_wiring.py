@@ -262,7 +262,8 @@ def test_fetch_artwork_only_content_addressed_images_under_the_cap():
     w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
                      http_get=lambda u, h: "{}", http_post=rpc_ok,
                      http_get_bytes=wrong, get_artwork_bytes=get_art)
-    fa = w.ports.fetch_artwork
+    fa = w.fetch_artwork
+    assert w.ports.fetch_artwork is None          # decision 10/09: not wired
     assert fa(sealed(f"ipfs://{cid}")) == png
     assert seen == [f"https://gateway.pinata.cloud/ipfs/{cid}"]
     for suffix, reason in (("big.png", "too big"), ("html", "html"),

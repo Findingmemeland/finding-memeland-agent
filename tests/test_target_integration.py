@@ -195,10 +195,8 @@ def test_full_hunt_pays_and_reveal_verifies():
     # Opus (dry-run 09/09): the reveal SHOWS the treasure — art as media,
     # item link in the text; the media never blocks the announcement
     assert f"see it: opensea.io/item/ethereum/{target.contract.lower()}/{target.token_id}" in reveal
-    from finding_memeland.target.dryrun import FAKE_ARTWORK
-    assert list(w.rig.publisher.media.values()) == [FAKE_ARTWORK]
+    assert w.rig.publisher.media == {}                 # decision 10/09: link, no image
     assert f"“{target.name_onchain}”, by {target.artist}" in reveal      # R9
-    assert target.artist and target.artist in list(w.rig.publisher.media_alt.values())[0]
     assert w.rig.payout.sent and w.rig.payout.sent[0]["wallet"] == WALLET_A
 
 
@@ -277,6 +275,7 @@ def test_reveal_without_usable_artwork_goes_out_with_the_link_and_tells_why():
 
 
 def test_r9_credit_order_metadata_then_chain_then_link_only():
+    from finding_memeland.target.integration import reveal_alt_text
     """Opus: metadata artist → tokenCreator+ENS (verified) → 0x… → nothing;
     step 4 never blocks; one read per reveal, shared by text and alt-text;
     the operator hears which step the credit came from."""
@@ -300,7 +299,7 @@ def test_r9_credit_order_metadata_then_chain_then_link_only():
         winner = w.orch._claim_loop(hunt)
         w.orch._reveal(hunt, winner, w.orch._pay(hunt, winner))
         reveal = next(p for p in w.rig.publisher.posts if "We have a winner" in p)
-        alt = list(w.rig.publisher.media_alt.values())[0]
+        alt = reveal_alt_text(w.orch, hunt)          # computed, not posted (no media)
         r9 = [m for m in w.rig.notifier.messages if "R9" in m]
         return reveal, alt, r9, target
 
