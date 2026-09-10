@@ -458,7 +458,7 @@ class XClient:
                     if media_alt:
                         self._alt_text(mid, media_alt)
             except Exception as e:  # noqa: BLE001
-                self._warn(f"⚠️ media upload failed ({type(e).__name__}: {e}) — "
+                self._warn(f"⚠️ media upload failed ({type(e).__name__}) — "
                            "posting the text without the picture")
         kwargs = {"text": text, "user_auth": True}
         if media_ids:

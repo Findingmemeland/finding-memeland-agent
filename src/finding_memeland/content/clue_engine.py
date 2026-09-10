@@ -598,10 +598,16 @@ class ClueEngine:
         # o jogador tem de descobrir.
         import logging
 
-        logging.getLogger(__name__).error(
-            "clue #%s failed guardrails after %s attempts: %s",
-            clue_index, max_attempts, last_reasons,
-        )
+        if getattr(self, "LOG_REJECTION_REASONS", True):
+            logging.getLogger(__name__).error(
+                "clue #%s failed guardrails after %s attempts: %s",
+                clue_index, max_attempts, last_reasons,
+            )
+        else:   # target engine: the reasons name the target — count only (Opus P1-3)
+            logging.getLogger(__name__).error(
+                "clue #%s failed guardrails after %s attempts (%d reasons, withheld)",
+                clue_index, max_attempts, len(last_reasons),
+            )
         raise RuntimeError(
             f"clue #{clue_index} failed guardrails after {max_attempts} attempts "
             f"({len(last_reasons)} razões — omitidas aqui porque nomeiam a "

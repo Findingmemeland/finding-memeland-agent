@@ -701,12 +701,20 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 notifier.notify(f"launch refused ({e}) — nothing was posted.")
             except Exception as e:  # noqa: BLE001
                 import traceback
+                import uuid
 
+                # Opus P1-2 (10/09): the last net must not print repr(e) to
+                # Telegram — an unclassified error can carry a model request
+                # (which names the target). Type + a short id here; the full
+                # traceback goes to the logs, findable by that id.
+                err_id = uuid.uuid4().hex[:8]
+                print(f"[hunt-died {err_id}]")
                 traceback.print_exc()
                 notifier.notify(
-                    f"🚨 HUNT DIED with an unhandled error: {e!r}. "
-                    "The persona may still be dressed and players may be mid-game — "
-                    "intervene NOW (check the persona profile and pending DMs)."
+                    f"🚨 HUNT DIED with an unhandled error ({type(e).__name__}, "
+                    f"log id {err_id}). The persona may still be dressed and players "
+                    "may be mid-game — intervene NOW (check the persona profile and "
+                    "pending DMs; grep the logs for the id)."
                 )
             finally:
                 hunt_flag["active"] = False

@@ -250,8 +250,12 @@ class FakeTruthJudge:
 
     name = "fake-judge"
 
-    def __init__(self, table=None, down=False):
-        self.table = table or {}
+    CANARY = {"spelled with a single letter": (False, "canary"),
+              "the number zero": (False, "canary")}
+
+    def __init__(self, table=None, down=False, blind=False):
+        # a real judge rejects the canaries; `blind=True` approves everything
+        self.table = dict(self.CANARY if not blind else {}, **(table or {}))
         self.down = down
         self.seen = []
 
@@ -632,11 +636,11 @@ def test_anthropic_truth_judge_parses_and_fails_to_none():
     naps = []
     g = _C("garbage")
     v = AnthropicTruthJudge(g, "m", sleep=naps.append).check("c", name="n", word=None, artwork="")
-    assert v.consistent is None and "no JSON in judge answer" in v.reason and "garbage" not in v.reason
+    assert v.consistent is None and v.reason == "ValueError" and "garbage" not in v.reason
     assert len(g.calls) == 3 and naps == [2.0, 4.0]
     v = AnthropicTruthJudge(_C(RuntimeError("503 overloaded")), "m", sleep=lambda s: None).check(
         "c", name="n", word=None, artwork="")
-    assert v.consistent is None and "RuntimeError: 503 overloaded" in v.reason
+    assert v.consistent is None and v.reason == "RuntimeError"      # never str(e) (Opus P1-1)
 
 
 def test_judge_recovers_on_the_second_try():
@@ -723,7 +727,7 @@ def test_no_message_carries_the_writers_or_judges_raw_text(caplog):
     assert "Ancient" not in str(e.value) and "chars" in str(e.value)
     j = AnthropicTruthJudge(_JudgeText("FUTURE ends with E, so yes"), "m", sleep=lambda s: None)
     v = j.check("c", name="Ancient Future", word="Future", artwork="")
-    assert v.consistent is None and "FUTURE" not in v.reason and "chars" in v.reason
+    assert v.consistent is None and "FUTURE" not in v.reason and v.reason == "ValueError"
     # solver guesses are not logged by the target engine
 
     class _Solver:
@@ -747,3 +751,77 @@ class _JudgeText:
             def create(_s, **kw):
                 return _Resp(text)
         self.messages = _M()
+
+
+def test_judge_canary_runs_before_clue_one_and_a_blind_judge_refuses_the_launch():
+    """R2 on the judge (Opus, 10/09): before clue 1 the judge must reject two
+    clues that are false by construction; a judge that approves them cannot
+    see, and the launch is refused as 'guard unavailable' (stays prepared)."""
+    from finding_memeland.target.clues import TruthJudgeUnavailable
+    judge = FakeTruthJudge()
+    e = engine(["patience is a coin nobody spends"], judge=judge)
+    e.next_clue(ctx(), 1, [])
+    canary_clues = [c for c, *_ in judge.seen if "single letter" in c or "number zero" in c]
+    assert len(canary_clues) == 2 and all("second word" in c for c in canary_clues)
+    assert judge.seen[0][2] == "Harbor"                      # judged against the real word
+    blind = FakeTruthJudge(blind=True)
+    e = engine(["patience is a coin nobody spends"], judge=blind)
+    with pytest.raises(TruthJudgeUnavailable) as ex:
+        e.next_clue(ctx(), 1, [])
+    assert "FAILED its canary" in str(ex.value) and "Harbor" not in str(ex.value)
+    # not on later clues
+    judge = FakeTruthJudge()
+    e = engine(["patience is a coin nobody spends"], judge=judge)
+    e.next_clue(ctx(), 3, ["a", "b"])
+    assert not any("single letter" in c for c, *_ in judge.seen)
+
+
+def test_judge_reason_never_carries_the_exceptions_text():
+    """Opus P1-1: an SDK error can echo the request body ("ANSWER — name:
+    Ancient Future …"); the reason carries the type and a status code only."""
+    from finding_memeland.target.clues import AnthropicTruthJudge
+
+    class _Err(Exception):
+        status_code = 529
+    j = AnthropicTruthJudge(_JudgeRaises(_Err("overloaded: ANSWER — name: Ancient Future")), "m",
+                            sleep=lambda s: None)
+    v = j.check("c", name="Ancient Future", word="Future", artwork="")
+    assert v.consistent is None and v.reason == "_Err (HTTP 529)"
+
+
+class _JudgeRaises:
+    def __init__(self, exc):
+        class _M:
+            def create(_s, **kw):
+                raise exc
+        self.messages = _M()
+
+
+def test_solver_outage_at_clue_one_keeps_the_hunt_prepared_not_unwritable():
+    """Opus P1-4: an OpenAI outage at clue 1 is OUR outage — the hunt stays
+    prepared; the target is not burned as 'unwritable'."""
+    from finding_memeland.content.relic_clues import ClueGuardUnavailable, SolverUnavailable
+
+    class _Down:
+        name = "down"
+
+        def guess(self, clues, n):
+            raise RuntimeError("openai 503 — request: ANSWER Salt Harbor")
+    e = engine(["patience is a coin nobody spends"], judge=FakeTruthJudge())
+    e._solver = _Down()
+    with pytest.raises(SolverUnavailable) as ex:
+        e.next_clue(ctx(), 1, [])
+    assert isinstance(ex.value, ClueGuardUnavailable) and isinstance(ex.value, RuntimeError)
+    assert "Harbor" not in str(ex.value) and "RuntimeError" in str(ex.value)
+
+
+def test_exhaustion_log_withholds_the_reasons_in_target_mode(caplog):
+    """Opus P1-3: the base engine logs last_reasons at ERROR on exhaustion —
+    they cite the answer. The target engine logs the count only."""
+    import logging
+    e = engine(["patience is a coin on base"] * 10, judge=FakeTruthJudge())
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError):
+            e.next_clue(ctx(), 1, [])
+    errs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errs and all("withheld" in m and "blockchain" not in m for m in errs)

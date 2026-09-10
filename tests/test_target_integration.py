@@ -647,3 +647,25 @@ def test_guard_down_at_clue_one_refuses_without_excluding_the_target():
     assert any("stays prepared" in m for m in w.rig.notifier.messages)
     assert w.rig.publisher.posts == []
 
+
+
+def test_r9_credit_lookup_has_a_deadline(monkeypatch):
+    """Opus P2-4: up to 5 eth_calls sit on the winner's post path; a hung
+    node must not delay the reveal — the credit degrades to the link."""
+    import time
+    from finding_memeland.target import integration as integ
+    monkeypatch.setattr(integ, "CREDIT_DEADLINE_S", 0.2)
+
+    def slow(sealed):
+        time.sleep(2)
+        return "sarah.eth"
+    import dataclasses
+    w = World()
+    w.ports.creator_credit = slow
+    hunt = w.launch()
+    hunt.target = dataclasses.replace(
+        hunt.target, target=dataclasses.replace(hunt.target.target, artist=""))
+    t0 = time.monotonic()
+    assert integ.resolve_credit(w.orch, hunt) == ""
+    assert time.monotonic() - t0 < 1.5
+    assert any("credit lookup failed" in m and "TimeoutError" in m for m in w.rig.notifier.messages)

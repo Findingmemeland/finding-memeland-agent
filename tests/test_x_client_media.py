@@ -94,6 +94,7 @@ def test_upload_failure_still_posts_the_text_and_warns_the_operator():
     assert xc.post("reveal", media=PNG) == "777"
     assert xc._client.calls == [{"text": "reveal", "user_auth": True}]
     assert len(warns) == 1 and "media upload failed" in warns[0] and "RuntimeError" in warns[0]
+    assert "400" not in warns[0]                    # type only, never str(e) (Opus P2-2)
 
 
 def test_default_warn_prints_when_no_notifier(capsys):

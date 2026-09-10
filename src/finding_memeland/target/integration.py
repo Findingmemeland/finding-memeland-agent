@@ -576,6 +576,21 @@ def reveal_alt_text(orch, hunt) -> str:
     return artwork_alt_text(t.name_onchain, resolve_credit(orch, hunt), hunt.number)
 
 
+CREDIT_DEADLINE_S = 15.0       # up to 5 eth_calls on the winner's post path (Opus P2-4)
+
+
+def _with_deadline(fn, *args, seconds: float):
+    """Run fn in a worker and give up after `seconds` (TimeoutError). The
+    worker is abandoned, not killed — fine for a read whose result we no
+    longer want."""
+    import concurrent.futures as cf
+    ex = cf.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(fn, *args).result(timeout=seconds)
+    finally:
+        ex.shutdown(wait=False)
+
+
 def resolve_credit(orch, hunt) -> str:
     """R9, in Opus's order: (1) the artist named by the token's own metadata;
     (2) tokenCreator + ENS with forward check, or the truncated creator
@@ -592,7 +607,8 @@ def resolve_credit(orch, hunt) -> str:
         ports: TargetPorts = orch._target
         if ports.creator_credit is not None:
             try:
-                credit = ports.creator_credit(hunt.target) or ""
+                credit = _with_deadline(ports.creator_credit, hunt.target,
+                                        seconds=CREDIT_DEADLINE_S) or ""
             except Exception as e:  # noqa: BLE001 — credit never blocks the reveal
                 orch._notify(f"R9 credit lookup failed ({type(e).__name__}) — "
                              "reveal goes out with the item link as attribution")

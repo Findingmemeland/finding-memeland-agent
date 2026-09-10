@@ -61,6 +61,7 @@ from ..content.relic_clues import (
     REVEAL_PHASE_RULES,
     RelicClueContext,
     RelicClueEngine,
+    ClueGuardUnavailable,
     angle_for_unverifiable,
     enumerable_words_in,
     relic_guidance_for,
@@ -788,11 +789,11 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
 # --------------------------------------------------------------------------- #
 
 
-class ClueGuardUnavailable(RuntimeError):
-    """A guard of OURS could not verify a clue. Raised, not returned as
-    feedback: fail-closed on EVERY clue — a leaked or false piece is
-    forever, a delayed one is a non-event. integration.clue_failed turns it
-    into the hold (deadline frozen, ramp stopped). Never carries the clue."""
+# ClueGuardUnavailable lives in content.relic_clues (shared base: the solver
+# outage at clue 1 raises it too — Opus P1-4). Raised, not returned as
+# feedback: fail-closed on EVERY clue — a leaked or false piece is forever, a
+# delayed one is a non-event. integration.clue_failed turns it into the hold
+# (deadline frozen, ramp stopped). Never carries the clue.
 
 
 class SearchGuardUnavailable(ClueGuardUnavailable):
@@ -893,7 +894,11 @@ class AnthropicTruthJudge:
                 doc = json.loads(text[start:end + 1])
                 return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
             except Exception as e:  # noqa: BLE001 — retried, then fail closed
-                last = f"{type(e).__name__}: {str(e)[:120]}"
+                # Opus P1-1 (10/09): never str(e) — an SDK error can echo the
+                # request body, which starts with "ANSWER — name: <target>".
+                # Type + status code (when the SDK gives one), nothing else.
+                code = getattr(e, "status_code", None)
+                last = type(e).__name__ + (f" (HTTP {code})" if code else "")
                 if attempt < self._tries - 1:
                     self._sleep(2.0 * (attempt + 1))
         return TruthVerdict(None, last)
@@ -923,10 +928,44 @@ class TargetClueEngine(RelicClueEngine):
 
     CLUE_ONE_ATTEMPTS = 10     # a refusal at clue 1 costs a draw; try harder there
 
-    # the relic engine logs the blind solver's guesses (they name the
-    # answer; "fica nos logs" was acceptable for a relic). A target's name
-    # never reaches a log mid-hunt (audit 10/09).
+    # the relic engine logs the blind solver's guesses and, on exhaustion,
+    # the rejection reasons (they name the answer; "fica nos logs" was
+    # acceptable for a relic). A target's name never reaches a log mid-hunt
+    # (audit 10/09; Opus P1-3): the target engine logs the tally only.
     LOG_SOLVER_GUESSES = False
+    LOG_REJECTION_REASONS = False
+
+    def _judge_canary(self, persona) -> None:
+        """R2 applied to the judge (Opus, 10/09): zero rejections in three
+        runs does not tell "good judge" from "judge that always says yes".
+        Before clue 1, the judge is shown two clues that are FALSE about
+        the real name by construction — one structural, one semantic — and
+        must reject both. If it approves either, it cannot see, and the
+        launch is refused (TruthJudgeUnavailable → 'stays prepared'). Two
+        calls per hunt. The canary texts never leave this process."""
+        if self._truth_judge is None:
+            return
+        words = persona.display_name.split()
+        n = len(words)
+        w = words[-1]
+        ordinal = {1: "first", 2: "second", 3: "third"}.get(n, f"{n}th")
+        canaries = []
+        if len(w) >= 2:
+            canaries.append(f"the {ordinal} word of the name is spelled with a single letter")
+        if w.lower() not in ("zero", "nothing", "none"):
+            canaries.append(f"the {ordinal} word of the name is the number zero, written out")
+        for text in canaries:
+            v = self._truth_judge.check(text, name=persona.display_name, word=w,
+                                        artwork=persona.image_description)
+            if v.consistent is None:
+                raise TruthJudgeUnavailable(
+                    f"consistency judge unavailable at its canary: {v.reason}")
+            if v.consistent:
+                raise TruthJudgeUnavailable(
+                    "consistency judge FAILED its canary (approved a clue that is "
+                    "false by construction) — it cannot see; not launching on it")
+        logging.getLogger(__name__).info("consistency judge passed its canary (%d/%d)",
+                                         len(canaries), len(canaries))
 
     def next_clue(self, persona, clue_index, prior_clues, *, max_attempts: int = 6):
         """GUARD PRESSURE IS MEASURED, NOT GUESSED (Pedro, 09/09: "a hunt
@@ -939,6 +978,7 @@ class TargetClueEngine(RelicClueEngine):
         self._rejections: dict[str, int] = {}
         if clue_index == 1:
             max_attempts = max(max_attempts, self.CLUE_ONE_ATTEMPTS)
+            self._judge_canary(persona)
         log = logging.getLogger(__name__)
         try:
             draft = super().next_clue(persona, clue_index, prior_clues,

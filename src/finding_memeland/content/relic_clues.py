@@ -709,6 +709,16 @@ class OpenAIBlindSolver:
         return _parse_guesses(text)
 
 
+class ClueGuardUnavailable(RuntimeError):
+    """A guard of OURS could not verify a clue (base for the target engine's
+    search guard / judge, and for the solver outage at clue 1). Lives here
+    so the shared engine can raise it without importing the target package."""
+
+
+class SolverUnavailable(ClueGuardUnavailable):
+    """The blind solver was unreachable at clue 1."""
+
+
 class RelicClueEngine(ClueEngine):
     """ClueEngine with the relic prompt/ramp.
 
@@ -770,13 +780,17 @@ class RelicClueEngine(ClueEngine):
             )
         except Exception as e:  # noqa: BLE001
             if clue_index == 1:
-                raise RuntimeError(
+                # Opus P1-4 (10/09): this is OUR outage, not the target's —
+                # a SolverUnavailable (a ClueGuardUnavailable) so the target
+                # flow keeps the hunt prepared instead of burning the target
+                # as "unwritable". Still a RuntimeError for the relic path.
+                raise SolverUnavailable(
                     f"blind solver ({getattr(self._solver, 'name', '?')}) unavailable "
-                    f"for clue 1 — not publishing without it: {e!r}"
+                    f"for clue 1 — not publishing without it ({type(e).__name__})"
                 ) from e
             log.warning(
-                "blind solver unavailable for clue #%s (%r) — accepting on text rules only",
-                clue_index, e,
+                "blind solver unavailable for clue #%s (%s) — accepting on text rules only",
+                clue_index, type(e).__name__,
             )
             return []
         hits_alone = solver_hits(alone, targets)
