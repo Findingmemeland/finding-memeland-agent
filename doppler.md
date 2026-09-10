@@ -2,12 +2,12 @@
 
 All secrets live in Doppler, project `finding-memeland`, never in the repo.
 Local dev: copy `.env.example` to `.env` (git-ignored) or `doppler run -- PYTHONPATH=src python -m finding_memeland.main`.
-Production: the Doppler ↔ Railway integration injects config **`prd`**; a change in Doppler restarts the worker.
+Production: the Doppler ↔ Railway integration injects config **`dev`** (the config actually wired to Railway — Pedro, 10/09); a change in Doppler restarts the worker.
 
 ## Configs
 
-- `dev` — local development
-- `prd` — Railway production. **Check the config selector before saving** — a value saved in `dev` by mistake is invisible to production.
+- `dev` — the config Railway runs (production, despite the name)
+- `prd` — NOT wired. **Check the config selector before saving** — a value saved in `prd` is invisible to the worker.
 
 Several names keep the historical `FMML_` prefix. The token is $FIND.
 
@@ -63,6 +63,28 @@ Several names keep the historical `FMML_` prefix. The token is $FIND.
 | `RARIBLE_API_KEY` / `OPENSEA_API_KEY` | secret | findability gate at `/launch`; at least one — without a confirmed hit the launch is refused |
 | `RELIC_TRAILS_ENABLED` | config | verified trail clues; `false` = direct clues |
 
+### Target hunts (Option A — the treasure is an existing NFT)
+
+Read only when `TARGET_LAUNCH=true`; with it `false` (the default) every other mode is untouched, so these can be set and the worker redeployed safely before the first target hunt. Run the `db/schema.sql` migration (six `target_*` columns on `hunts` + `target_blobs`) BEFORE flipping `TARGET_LAUNCH`.
+
+| Variable | Type | Notes |
+|---|---|---|
+| `TARGET_LAUNCH` | config | `true` makes `/launch` stage a TARGET hunt (gate GREEN required). Keep `false` until `/scan` + `/snapshot` show GREEN |
+| `TARGET_POOL_KEY` | secret | Fernet key sealing the target on the hunt row and the registry/discovery/snapshot blobs. SEPARATE from `RELIC_POOL_KEY` by decision. **Losing it loses the registry (weeks of era scans) and every sealed target; a live hunt could not be resumed.** Back it up before the first `/scan` |
+| `ETH_RPC_URL` | secret | Ethereum mainnet RPC (Alchemy; the key lives in the path). Epoch-1 sources are all Ethereum. Rotate the key that was pasted in chat before use |
+| `TARGET_EPOCH_ID` | config | curation epoch id, `e1` |
+| `TARGET_CANARY_BLOCK` / `TARGET_CANARY_MINTS` | config | R2 canary of the era scan: a pinned era block and its MEASURED ERC-721 mint count — `12965000` / `3` (fixture `rpc_getlogs_mints_one_block.json`, 06/09). Both ≠ 0 or the scan refuses |
+| `TARGET_WRITABILITY_RATES` / `TARGET_UNIQUENESS_RATES` | config | per-stratum SAMPLED rates the gate multiplies in, `stratum:rate,…`. Keys must be epoch-1 strata (`foundation`, `superrare2`, `superrare1`, `makersplace`, `manifold2021`, `tail2021`); an unknown key refuses at boot, an unlisted stratum counts 0 (fail-closed). Measured 04-05/09: `foundation:0.52` / `foundation:0.66`; the other strata are set as they are sampled |
+| `TARGET_SCAN_BLOCKS` | config | era blocks per `/scan` run (default 300; one `eth_getLogs` per block) |
+| `TARGET_PUBLIC_RPCS_ETHEREUM` | config | comma-separated PUBLIC Ethereum RPCs, no key — the generic read family (live check inside the decoy batch). Measured 06/09: `https://ethereum.publicnode.com,https://eth.drpc.org,https://eth.merkle.io,https://rpc.mevblocker.io,https://eth-pokt.nodies.app` |
+| `TARGET_PUBLIC_RPCS_BASE` | config | same for Base — optional in epoch 1 (Ethereum only) |
+| `TARGET_IPFS_GATEWAYS` | config | comma-separated PUBLIC IPFS gateways for the generic family. Measured 06/09: only `https://gateway.pinata.cloud/ipfs/` served |
+| `TARGET_IPFS_GATEWAY` | config | the KEYED/dedicated gateway for the refresh and the one live-hash read at void time; required, no default (`https://gateway.pinata.cloud/ipfs/` or a dedicated Pinata gateway) |
+| `OPENSEA_API_KEY` | secret | the marketplace surface of the target game (search guard, name uniqueness, chain probe) — measured 10/09, 120 requests/min. `RARIBLE_API_KEY` is accepted instead, but its public plans (100 requests/month) do not cover a hunt |
+| `TARGET_JUDGE_MODEL` / `TARGET_VISION_MODEL` | config | default `claude-sonnet-4-6` |
+| `TARGET_MAX_HOLD_S` / `TARGET_MAX_TOTAL_HOLD_S` / `TARGET_HOLD_RENOTIFY_S` | config | hold ceilings per episode / accumulated (defaults 6h / 12h) and re-notify interval (1h) |
+| `TARGET_MIN_AGE_DAYS` / `TARGET_MAX_SNAPSHOT_AGE_DAYS` | config | defaults 180 / 14 |
+
 ### Game parameters
 
 | Variable | Type | Notes |
@@ -85,7 +107,7 @@ Several names keep the historical `FMML_` prefix. The token is $FIND.
 
 ## Rules
 
-- Service role key, hot wallet key, relic pool key and mint wallet keys are **secrets** — rotate on any leak.
+- Service role key, hot wallet key, relic pool key, target pool key and mint wallet keys are **secrets** — rotate on any leak.
 - **Never delete** `RELIC_WALLET_REFS` or any `RX*_*` / `RW*_*` pair: a spent mint wallet still holds the relic until the trophy transfer, and its key is what signs that transfer.
 - `RELIC_WALLET_REFS` is a deliberate allowlist: it names only the wallet(s) available to mint next, never the whole key set.
 - `INTEGRITY_SALT` is the same across a hunt and is published only after that hunt resolves.

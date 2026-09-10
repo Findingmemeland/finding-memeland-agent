@@ -24,6 +24,18 @@ NON_GAME_KINDS = frozenset({"pinned_rules", "filler", "comms"})
 _GAME_KINDS = frozenset({"clue_one", "clue", "winner_announcement"})
 
 
+# Every admin command the Telegram handler listens to. python-telegram-bot
+# IGNORES unregistered commands in silence — /scan and /snapshot were routed
+# in main.py but missing here, and the first live /scan (10/09) got no reply
+# at all. test_telegram_commands pins this set against main.py's actions.
+TELEGRAM_COMMANDS = frozenset({
+    "launch", "dress", "silence", "resume", "status", "post",
+    "abort_prep", "delay_golive",
+    "tease", "approve", "reject", "relic_new", "relic_mint",
+    "scan", "snapshot",
+})
+
+
 def route_command(command: str, *, is_admin: bool, actions: dict) -> str:
     """Authenticate + route an admin command to an action callback.
 
@@ -114,12 +126,7 @@ class TelegramAdmin:
             reply = route_command(text, is_admin=self._is_admin(chat_id), actions=self._actions)
             await update.message.reply_text(reply)
 
-        app.add_handler(CommandHandler(
-            ["launch", "dress", "silence", "resume", "status", "post",
-             "abort_prep", "delay_golive",
-             "tease", "approve", "reject", "relic_new", "relic_mint"],
-            _handle,
-        ))
+        app.add_handler(CommandHandler(sorted(TELEGRAM_COMMANDS), _handle))
 
         if self._on_text is not None:
             from telegram.ext import MessageHandler, filters
