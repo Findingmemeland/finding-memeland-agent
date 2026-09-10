@@ -85,7 +85,7 @@ def claim_hint_due(clue_index: int) -> bool:
 
 
 def target_clue_followup(clue_index: int, clue_text: str, taunt: str) -> str:
-    body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}\n\n{taunt}"
+    body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}" + (f"\n\n{taunt}" if taunt else "")
     if claim_hint_due(clue_index):
         body += f"\n\n{TARGET_CLUE_FOLLOWUP_CLAIM_HINT}"
     return body

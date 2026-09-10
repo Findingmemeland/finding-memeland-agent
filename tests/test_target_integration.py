@@ -646,3 +646,25 @@ def test_guard_down_at_clue_one_refuses_without_excluding_the_target():
     assert not hunt.get("target_void_id")
     assert any("stays prepared" in m for m in w.rig.notifier.messages)
     assert w.rig.publisher.posts == []
+
+
+def test_leaking_taunt_is_dropped_from_the_post_and_the_operator_told():
+    from finding_memeland.content.clue_engine import ClueDraft
+    w = World()
+    hunt = w.launch()
+    t = hunt.target.target
+    words = t.name.split()
+
+    class _Engine:
+        def next_clue(self, ctx, i, prior, **kw):
+            return ClueDraft(text="a quiet clue", taunt=f"more {words[0]} than your search history")
+    w.orch._clue_engine = _Engine()
+    w.ports.clue_engine = _Engine()
+    w.orch._clue_due_fn = lambda now: now
+    w.orch._max_rounds = 1
+    with pytest.raises(RuntimeError):
+        w.orch._claim_loop(hunt)
+    clue2 = next(p for p in w.rig.publisher.posts if p.startswith("2nd Clue:"))
+    assert words[0] not in clue2 and "a quiet clue" in clue2
+    assert any("taunt omitted" in m for m in w.rig.notifier.messages)
+    assert all(words[0] not in m for m in w.rig.notifier.messages)

@@ -258,3 +258,9 @@ def test_artist_of_reads_the_tokens_own_keys_and_never_an_address():
     assert artist_of({"creator": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405"}) == ""
     assert artist_of({"name": "x"}) == "" and artist_of(None) == ""
     assert len(artist_of({"author": "a" * 300})) == 80
+
+
+def test_followup_without_a_taunt_has_no_dangling_blank_lines():
+    post = target_clue_followup(4, "a quiet clue", "")
+    assert post == "4th Clue:\n\na quiet clue"
+    assert "\n\n\n" not in target_clue_followup(5, "a quiet clue", "")

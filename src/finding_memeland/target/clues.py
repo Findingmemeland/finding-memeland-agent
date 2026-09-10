@@ -475,6 +475,40 @@ def parse_target_clue(text: str):
 
 
 # --------------------------------------------------------------------------- #
+# The taunt's ONE check (Pedro, 10/09)                                         #
+# --------------------------------------------------------------------------- #
+#
+# The taunt is unguarded by decision (voice matters). The one exception,
+# decided on this example — 7th --real-clues, clue 4: "is it more ANCIENT or
+# more FUTURE than your search history?" — the taunt printed both words of
+# the name. So: a taunt that contains a name word, a chain or a platform is
+# OMITTED from that post. Nothing else changes: no regeneration, no extra
+# call, no way to block the hunt; the clue goes out on its own.
+
+def taunt_leaks(taunt: str, solution_terms) -> list[str]:
+    """Words of the answer's name (solution_terms) or of its address found
+    in the taunt, as typed. Empty = the taunt may go out."""
+    if not taunt:
+        return []
+    low = taunt.lower()
+    hits = [t for t in solution_terms
+            if len(t) >= 3 and re.search(r"\b" + re.escape(t.lower()) + r"\b", low)]
+    return sorted(set(hits) | set(forbidden_address_words(taunt)))
+
+
+def safe_taunt(taunt: str | None, solution_terms, *, log_label: str = "") -> str:
+    """The taunt, or '' when it leaks — logged with the words, never with
+    the taunt itself in a public place."""
+    leaks = taunt_leaks(taunt or "", solution_terms)
+    if leaks:
+        logging.getLogger(__name__).warning(
+            "%s: taunt omitted — it contained %d word(s) of the answer/address",
+            log_label or "clue", len(leaks))
+        return ""
+    return taunt or ""
+
+
+# --------------------------------------------------------------------------- #
 # Context                                                                      #
 # --------------------------------------------------------------------------- #
 
