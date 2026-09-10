@@ -7,6 +7,7 @@ hosts), com o .env do agente:
 
     python scripts/capturar_target.py                # tudo
     python scripts/capturar_target.py rpc rarible    # só alguns
+    python scripts/capturar_target.py opensea        # OpenSea em vez da Rarible?
     python scripts/capturar_target.py foundation https://foundation.app/@x/y/1
 
 Escreve em tests/fixtures/target/<nome>.json — cada ficheiro tem `_meta`
@@ -24,6 +25,8 @@ O que se mede, e porquê:
   rarible     GET /items/{CHAIN}:{contract}:{tid} em várias cadeias (a sonda
               de cadeia do resolvedor: link sem cadeia → em que cadeia
               existe?), incluindo a forma do 404.
+  opensea     search por texto (com/sem cadeia) + GET do item por cadeia —
+              mede se a OpenSea cobre os três papéis da Rarible (10/09).
   superrare   HTML da página /artwork/eth/<contract>/<tokenId> (registo; o
               URL já traz cadeia+contrato+tokenId, não precisa de parser).
   foundation  nada — o marketplace fechou (06/09/2026); ver FOUNDATION_URLS.
@@ -147,6 +150,18 @@ def _scrub(url: str) -> str:
 
 def _call(url: str, *, body: dict | None = None, headers: dict | None = None,
           timeout: int = 30) -> tuple[int, str]:
+    st, tx, _ = _call_h(url, body=body, headers=headers, timeout=timeout)
+    return st, tx
+
+
+_RATE_HEADERS = ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset",
+                 "retry-after")
+
+
+def _call_h(url: str, *, body: dict | None = None, headers: dict | None = None,
+            timeout: int = 30) -> tuple[int, str, dict]:
+    """Como `_call`, mas devolve também os cabeçalhos de quota (só esses —
+    nunca o resto, que pode ecoar a chave)."""
     data = json.dumps(body).encode() if body is not None else None
     h = {"User-Agent": UA, "Accept": "application/json, text/html;q=0.9, */*;q=0.8"}
     if body is not None:
@@ -156,11 +171,13 @@ def _call(url: str, *, body: dict | None = None, headers: dict | None = None,
                                  method="POST" if data else "GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=_SSL) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+            rate = {k: r.headers.get(k) for k in _RATE_HEADERS if r.headers.get(k)}
+            return r.status, r.read().decode("utf-8", "replace"), rate
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
+        rate = {k: e.headers.get(k) for k in _RATE_HEADERS if e.headers.get(k)}
+        return e.code, e.read().decode("utf-8", "replace"), rate
     except Exception as e:  # noqa: BLE001
-        return 0, f"{type(e).__name__}: {e}"
+        return 0, f"{type(e).__name__}: {e}", {}
 
 
 def _save(name: str, url: str, status: int, text: str, **extra) -> None:
@@ -290,6 +307,45 @@ def cap_rarible() -> None:
     _save("rarible_search_named", url, st, tx, query="Uncle Pump")
 
 
+def cap_opensea() -> None:
+    """Mede se a OpenSea pode fazer o que a Rarible faz no jogo-alvo (10/09:
+    a Rarible só tem Free = 100 pedidos/MÊS e Enterprise por contacto):
+      · pesquisa por texto FILTRADA por cadeia (search guard: o alvo tem de
+        aparecer ao pesquisar o próprio nome; a pista não o pode trazer);
+      · pesquisa SEM filtro de cadeia (unicidade do nome);
+      · GET do item por cadeia, incluindo a forma do 404 (sonda de cadeia).
+    O que o parser precisa de encontrar na resposta da pesquisa: contrato,
+    identifier e cadeia de cada NFT. Cabeçalhos x-ratelimit-* ficam no _meta
+    (a quota por janela decide se chega para uma hunt)."""
+    key = _env("OPENSEA_API_KEY")
+    if not key:
+        print("  OPENSEA_API_KEY em falta — salto a secção opensea")
+        return
+    headers = {"X-API-KEY": key}
+    base = "https://api.opensea.io/api/v2"
+    name = "Ancient Future"               # FND #1 (token vivo da captura rpc)
+    q = urllib.parse.quote(name)
+    for tag, url in (
+        ("opensea_search_ethereum",
+         f"{base}/search?query={q}&chains=ethereum&asset_types=nft&limit=50"),
+        ("opensea_search_all",
+         f"{base}/search?query={q}&asset_types=nft&limit=50"),
+        # uma frase de pista, filtrada: a forma de "nada relevante"
+        ("opensea_search_clue",
+         f"{base}/search?query={urllib.parse.quote('where calendars run out of pages')}"
+         f"&chains=ethereum&asset_types=nft&limit=50"),
+    ):
+        st, tx, rate = _call_h(url, headers=headers)
+        _save(tag, url, st, tx, query=name, rate=rate)
+    for ch in ("ethereum", "base", "matic", "arbitrum", "optimism", "zora"):
+        url = f"{base}/chain/{ch}/contract/{FND.lower()}/nfts/1"
+        st, tx, rate = _call_h(url, headers=headers)
+        _save(f"opensea_item_{ch}", url, st, tx, chain=ch, rate=rate)
+    url = f"{base}/chain/nope/contract/{FND.lower()}/nfts/1"
+    st, tx, rate = _call_h(url, headers=headers)
+    _save("opensea_item_bad_chain", url, st, tx, rate=rate)
+
+
 def cap_pages(name: str, urls: list[str]) -> None:
     if not urls:
         print(f"  {name}: sem URLs — passa-os como argumentos "
@@ -303,11 +359,12 @@ def cap_pages(name: str, urls: list[str]) -> None:
 
 
 def main(argv: list[str]) -> int:
-    sections = {"rpc": cap_rpc, "gateways": cap_gateways, "rarible": cap_rarible}
+    sections = {"rpc": cap_rpc, "gateways": cap_gateways, "rarible": cap_rarible,
+                "opensea": cap_opensea}
     wanted = [a for a in argv if a in sections or a in ("foundation", "superrare")]
     urls = [a for a in argv if a.startswith("http")]
     if not wanted:
-        wanted = ["foundation", "superrare", "rarible", "rpc", "gateways"]
+        wanted = ["foundation", "superrare", "rarible", "opensea", "rpc", "gateways"]
     print(f"capturas → {OUT}")
     for w in wanted:
         print(f"[{w}]")

@@ -29,7 +29,8 @@ the caller passes, so it cannot drift from the commitment.
 
 The marketplace adapter is injected; RaribleSearch mirrors the measured
 request shape from relic_findability.py (2026-08-25: X-API-KEY header,
-`fullText` filter, 429 retry).
+`fullText` filter, 429 retry); OpenSeaSearch (10/09) is the surface the
+wiring prefers — same ports, shape pinned by fixtures opensea_search_*.json.
 """
 
 from __future__ import annotations
@@ -211,6 +212,124 @@ class RaribleSearch:
             meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
             out.append((str(item.get("id", "")), str(meta.get("name", "") or "")))
         return out
+
+
+# OpenSea's chain slugs for the chains the game knows (the same vocabulary
+# as adapters.RARIBLE_CHAIN). Polygon is 'matic' on OpenSea.
+OPENSEA_CHAIN = {"ethereum": "ethereum", "polygon": "matic", "base": "base",
+                 "arbitrum": "arbitrum", "optimism": "optimism", "zora": "zora"}
+# Measured 10/09: the API path says 'matic' but result URLs say 'polygon' —
+# both must read back as the game's 'polygon'.
+_OPENSEA_SLUG_TO_CHAIN = {v: k for k, v in OPENSEA_CHAIN.items()} | {"polygon": "polygon"}
+
+
+class OpenSeaSearch:
+    """The same two questions asked of OpenSea — GET /api/v2/search with
+    `asset_types=nft` — with the MEASURED response shape (capturar_target.py
+    `opensea`, 2026-09-10, fixtures opensea_search_*.json): `results[]` of
+    {type:'nft', nft:{identifier, contract, name, collection, image_url,
+    opensea_url}}. There is NO chain field: the chain is read from the
+    `opensea_url` path ('/assets/<slug>/<contract>/<id>'), falling back to
+    the `image_url` path ('/<slug>/<contract>/…'). Measured: the target
+    (FND #1) surfaces for its own name, filtered and unfiltered; a clue
+    sentence yields an empty `results`; quota is 120 requests per 60 s
+    window (x-ratelimit-* headers).
+
+    Why it exists (10/09): Rarible's public plans are Free = 100 requests a
+    MONTH or Enterprise by contact; a target hunt spends 40-200. Same ports
+    as RaribleSearch, same id format ('CHAIN:0xcontract:tokenId' upper-
+    cased), same contract: raise on transport failure, never guess.
+
+    `http_get(url, headers: dict) -> str` is injected; the process-wide
+    transport already sends a browser User-Agent (Cloudflare 403s without)."""
+
+    def __init__(self, *, http_get, api_key: str,
+                 base_url: str = "https://api.opensea.io/api/v2",
+                 size: int = 50):
+        if not api_key:
+            raise ValueError("OpenSeaSearch needs an api key — without one the "
+                             "guard would fail every clue, stalling the hunt")
+        self._get = http_get
+        self._key = api_key
+        self._base = base_url.rstrip("/")
+        self._size = max(1, min(int(size), 50))       # documented maximum
+
+    def item_ids(self, text: str, *, chain: str) -> set[str]:
+        slug = OPENSEA_CHAIN.get(chain.lower())
+        if slug is None:
+            # a chain OpenSea has no slug for: unverifiable, never "absent"
+            raise ValueError("chain not searchable on this surface")
+        rows = self._search(text, chains=slug)
+        out: set[str] = set()
+        for nft in rows:
+            found = _opensea_chain_of(nft) or chain
+            ident = _opensea_id(nft, found)
+            if ident:
+                out.add(ident)
+        return out
+
+    def named_items(self, text: str) -> list[tuple[str, str]]:
+        """NameSearch: UNFILTERED (all chains — the hunter's view). An item
+        whose chain cannot be read is kept under 'UNKNOWN:' — it still
+        counts as another bearer of the name, which is the conservative
+        reading for a uniqueness verdict."""
+        out: list[tuple[str, str]] = []
+        for nft in self._search(text, chains=None):
+            ident = _opensea_id(nft, _opensea_chain_of(nft) or "unknown")
+            if ident:
+                out.append((ident, str(nft.get("name") or "")))
+        return out
+
+    def _search(self, text: str, *, chains: str | None) -> list[dict]:
+        from urllib.parse import quote
+        url = (f"{self._base}/search?query={quote(text)}"
+               f"&asset_types=nft&limit={self._size}")
+        if chains:
+            url += f"&chains={chains}"
+        raw = self._get(url, {"X-API-KEY": self._key,
+                              "Accept": "application/json"})
+        payload = json.loads(raw or "{}")
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("search response without a results list")
+        rows: list[dict] = []
+        for r in payload["results"]:
+            if not isinstance(r, dict):
+                continue
+            nft = r.get("nft")
+            if isinstance(nft, dict) and (r.get("type") in (None, "nft")):
+                rows.append(nft)
+        return rows
+
+
+def _opensea_chain_of(nft: dict) -> str:
+    """The chain name read from the URLs OpenSea puts on every result —
+    the game's name for the chains it knows ('ethereum', 'polygon', …),
+    OpenSea's own slug for the ones it doesn't (measured: 'soneium'), so
+    a homonym on any chain still counts as another bearer; '' when neither
+    URL carries a slug."""
+    from urllib.parse import urlsplit
+    for key, marker in (("opensea_url", "/assets/"), ("image_url", "/")):
+        path = urlsplit(str(nft.get(key) or "")).path
+        if marker == "/assets/":
+            if "/assets/" not in path:
+                continue
+            slug = path.split("/assets/", 1)[1].split("/", 1)[0]
+        else:
+            slug = path.strip("/").split("/", 1)[0]
+        slug = slug.lower()
+        if slug in _OPENSEA_SLUG_TO_CHAIN:
+            return _OPENSEA_SLUG_TO_CHAIN[slug]
+        if slug.isalpha() and key == "opensea_url":
+            return slug
+    return ""
+
+
+def _opensea_id(nft: dict, chain: str) -> str:
+    contract = str(nft.get("contract") or "").strip().lower()
+    ident = str(nft.get("identifier") or "").strip()
+    if not (contract.startswith("0x") and ident):
+        return ""
+    return f"{chain}:{contract}:{ident}".upper()
 
 
 # --------------------------------------------------------------------------- #

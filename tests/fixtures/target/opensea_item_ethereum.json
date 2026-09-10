@@ -1,0 +1,49 @@
+{
+ "_meta": {
+  "url": "https://api.opensea.io/api/v2/chain/ethereum/contract/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/nfts/1",
+  "status": 200,
+  "captured_at": "2026-09-10T20:52:56.267075+00:00",
+  "chain": "ethereum",
+  "rate": {
+   "x-ratelimit-limit": "120",
+   "x-ratelimit-remaining": "119",
+   "x-ratelimit-reset": "1789073636"
+  }
+ },
+ "body": {
+  "nft": {
+   "identifier": "1",
+   "collection": "fnd",
+   "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+   "token_standard": "erc721",
+   "name": "Ancient Future",
+   "description": "Here at the nexus of infinity, we inscribe ourselves upon the sacred discs. For We are the Ancients of a Future Civilization. \n\nSingle Edition VHS Text Art by Sarah Zucker, 2020. Created in studio with Hi8 Camcorder Title Feedback, digital animation and analog processing on VHS. Filmed in 4K from vintage CRT TV screen.",
+   "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/39a885fee3be8aab5224a132725180/0f39a885fee3be8aab5224a132725180.webp",
+   "display_image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/39a885fee3be8aab5224a132725180/0f39a885fee3be8aab5224a132725180.webp",
+   "display_animation_url": null,
+   "metadata_url": "https://api.networked.art/foundation-metadata/1",
+   "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/1",
+   "updated_at": "2026-09-10T20:52:56.319421",
+   "is_disabled": false,
+   "is_nsfw": false,
+   "original_image_url": "https://cdn.evm.now/tokens/5905b1c13406b7f5ae6f3bf32c4d6223ea40c13ebbdeb82fdbc86550041f0a69_lg.webp",
+   "original_animation_url": "ipfs://QmXRmfvvenqr4eJ62vjxvYqc5eWp6i2MjpkTh9VZcLiuTi/nft.mp4",
+   "traits": [],
+   "estimated_value_usd": null,
+   "decimals": null,
+   "animation_url": null,
+   "is_suspicious": false,
+   "creator": "",
+   "owners": [
+    {
+     "address": "0xa9468e128edf50bb2a5b8aa88565ec2a0cc3816b",
+     "quantity": 1,
+     "quantity_string": "1"
+    }
+   ],
+   "rarity": null,
+   "subscription": null,
+   "agent_binding": null
+  }
+ }
+}

@@ -30,6 +30,7 @@ from .adapters import (
     GenericMetadata,
     JsonRpc,
     MarketplaceLinkResolver,
+    OpenSeaChainProbe,
     Provider,
     RaribleChainProbe,
     RotatingLiveCheck,
@@ -54,7 +55,12 @@ from .hunt import (
 )
 from .integration import ArtworkUnusable, TargetPorts
 from .pipeline import PipelineReport, SnapshotPipeline
-from .search_guard import ClueSearchGuard, MarketNameUniqueness, RaribleSearch
+from .search_guard import (
+    ClueSearchGuard,
+    MarketNameUniqueness,
+    OpenSeaSearch,
+    RaribleSearch,
+)
 from .selector import CurationEpoch
 from .snapshot import Snapshot, SnapshotStore, StratumGateReport, stratum_gate
 from .sources import (
@@ -90,6 +96,9 @@ class TargetWiring:
     uniqueness_rates: dict
     # built and tested, NOT wired into ports (decision 10/09: reveal = link only)
     fetch_artwork: Callable | None = None
+    # which marketplace serves the search guard / uniqueness / chain probe
+    # ('opensea' or 'rarible') — for /status, never for a public post
+    market_surface: str = ""
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -218,13 +227,27 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     )
 
     # -- marketplace: search guard, uniqueness, chain probe (one key) ------- #
+    # One surface serves all three, chosen by the key present — OpenSea
+    # first (10/09: measured against FND #1, 120 requests/min on the
+    # approved key; Rarible's public plans are 100/MONTH or Enterprise).
+    # config.target_missing() guarantees at least one key is set.
     page = 50
-    rarible = RaribleSearch(http_post=http_post, api_key=s.rarible_api_key,
-                            size=page)
-    search_guard = ClueSearchGuard(search=rarible)
-    uniqueness = MarketNameUniqueness(search=rarible, page_size=page)
+    if s.opensea_api_key:
+        market_surface = "opensea"
+        market = OpenSeaSearch(http_get=http_get, api_key=s.opensea_api_key,
+                               size=page)
+        chain_probe = OpenSeaChainProbe(http_get=http_get,
+                                        api_key=s.opensea_api_key)
+    else:
+        market_surface = "rarible"
+        market = RaribleSearch(http_post=http_post, api_key=s.rarible_api_key,
+                               size=page)
+        chain_probe = RaribleChainProbe(http_get=http_get,
+                                        api_key=s.rarible_api_key)
+    search_guard = ClueSearchGuard(search=market)
+    uniqueness = MarketNameUniqueness(search=market, page_size=page)
     resolver = MarketplaceLinkResolver(
-        chain_probe=RaribleChainProbe(http_get=http_get, api_key=s.rarible_api_key),
+        chain_probe=chain_probe,
         page_resolvers={},          # Foundation/SuperRare: after their capture
     )
 
@@ -355,7 +378,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         scan_blocks=int(s.target_scan_blocks),
                         writability_rates=s.target_writability_rate_map,
                         uniqueness_rates=s.target_uniqueness_rate_map,
-                        fetch_artwork=fetch_artwork)
+                        fetch_artwork=fetch_artwork,
+                        market_surface=market_surface)
 
 
 # Type alias for main.py readers

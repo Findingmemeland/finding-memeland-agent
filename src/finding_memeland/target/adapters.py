@@ -688,6 +688,55 @@ class RaribleChainProbe:
         return hits[0] if len(hits) == 1 else None
 
 
+class OpenSeaChainProbe:
+    """The same question asked of OpenSea: GET /api/v2/chain/{slug}/contract/
+    {contract}/nfts/{tokenId} per known chain. MEASURED 2026-09-10
+    (fixtures opensea_item_*.json): a hit is a 200 whose `nft.contract` and
+    `nft.identifier` echo the asked item; a miss is a 404 {'errors':
+    ['Item with identifier N not found']}; an unknown slug is a 400
+    ('Unrecognized chain') — treated as ambiguous like any other failure,
+    never as a miss. Same verdict rules as RaribleChainProbe: exactly ONE
+    hit → that chain; zero or several → None; any non-404 failure → None.
+    Six GETs per probe, on a 120-per-minute quota: a shotgun of chainless
+    links degrades to 'ambiguous' claims, never to a wrong chain."""
+
+    def __init__(self, *, http_get: HttpGet, api_key: str,
+                 base_url: str = "https://api.opensea.io/api/v2",
+                 chains: Sequence[str] = tuple(RARIBLE_CHAIN)):
+        if not api_key:
+            raise ValueError("OpenSeaChainProbe needs an API key")
+        from .search_guard import OPENSEA_CHAIN
+        self._get = http_get
+        self._key = api_key
+        self._base = base_url.rstrip("/")
+        self._chains = tuple(c for c in chains if c in OPENSEA_CHAIN)
+        self._slugs = OPENSEA_CHAIN
+
+    def __call__(self, contract: str, token_id: int) -> str | None:
+        hits: list[str] = []
+        want_c = contract.lower()
+        for chain in self._chains:
+            slug = self._slugs[chain]
+            url = f"{self._base}/chain/{slug}/contract/{want_c}/nfts/{int(token_id)}"
+            try:
+                text = self._get(url, {"X-API-KEY": self._key,
+                                       "Accept": "application/json"})
+            except Exception as e:  # noqa: BLE001
+                if _is_not_found(e):
+                    continue
+                return None                      # unasked chain: ambiguous
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                return None
+            nft = doc.get("nft") if isinstance(doc, dict) else None
+            if (isinstance(nft, dict)
+                    and str(nft.get("contract", "")).lower() == want_c
+                    and str(nft.get("identifier", "")) == str(int(token_id))):
+                hits.append(chain)
+        return hits[0] if len(hits) == 1 else None
+
+
 def _is_not_found(e: Exception) -> bool:
     code = getattr(e, "code", None) or getattr(e, "status", None)
     return code == 404

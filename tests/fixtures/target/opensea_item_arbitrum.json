@@ -1,0 +1,18 @@
+{
+ "_meta": {
+  "url": "https://api.opensea.io/api/v2/chain/arbitrum/contract/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/nfts/1",
+  "status": 404,
+  "captured_at": "2026-09-10T20:52:56.969153+00:00",
+  "chain": "arbitrum",
+  "rate": {
+   "x-ratelimit-limit": "120",
+   "x-ratelimit-remaining": "117",
+   "x-ratelimit-reset": "1789073637"
+  }
+ },
+ "body": {
+  "errors": [
+   "Item with identifier 1 not found"
+  ]
+ }
+}

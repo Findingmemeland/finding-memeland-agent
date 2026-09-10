@@ -1,0 +1,567 @@
+{
+ "_meta": {
+  "url": "https://api.opensea.io/api/v2/search",
+  "status": 200,
+  "captured_at": "2026-09-10T20:52:54.197519+00:00",
+  "query": "Ancient Future",
+  "rate": {
+   "x-ratelimit-limit": "120",
+   "x-ratelimit-remaining": "119",
+   "x-ratelimit-reset": "1789073633"
+  }
+ },
+ "body": {
+  "results": [
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "382483",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/37fdd5305173c608b043258f1974eb/2f37fdd5305173c608b043258f1974eb.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/382483"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "1",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/39a885fee3be8aab5224a132725180/0f39a885fee3be8aab5224a132725180.webp",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/1"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "92750",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "The Ancient Future.",
+     "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/3f4091eb187e160db9f8b9f324b13c/863f4091eb187e160db9f8b9f324b13c.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/92750"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "45389",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient Future | The Grow",
+     "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/a050abea3443110352a6478dfa9f11/3ea050abea3443110352a6478dfa9f11.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/45389"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "68894",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient Future | The Grow: Birch",
+     "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/41cf6236cabed3fc82b8338c545dc4/1341cf6236cabed3fc82b8338c545dc4.webp",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/68894"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "67250",
+     "collection": "makersplace",
+     "contract": "0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756",
+     "name": "Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756/1dd77e3077861089824b0682292419/b11dd77e3077861089824b0682292419.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756/67250"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "2439",
+     "collection": "makersplace",
+     "contract": "0x2963ba471e265e5f51cafafca78310fe87f8e6d1",
+     "name": "Ancient Future.",
+     "image_url": "https://i2c.seadn.io/ethereum/0x2963ba471e265e5f51cafafca78310fe87f8e6d1/5ed2af587d58a693fd1e5ac77d3abd/0d5ed2af587d58a693fd1e5ac77d3abd.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x2963ba471e265e5f51cafafca78310fe87f8e6d1/2439"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "38000038",
+     "collection": "new-lands-by-miboso",
+     "contract": "0xdfde78d2baec499fe18f2be74b6c287eed9511d7",
+     "name": "Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0xdfde78d2baec499fe18f2be74b6c287eed9511d7/3b0bd4c182f77f754edd8c514b2295/493b0bd4c182f77f754edd8c514b2295.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xdfde78d2baec499fe18f2be74b6c287eed9511d7/38000038"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "38000087",
+     "collection": "new-lands-by-miboso",
+     "contract": "0xdfde78d2baec499fe18f2be74b6c287eed9511d7",
+     "name": "Relic of the Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0xdfde78d2baec499fe18f2be74b6c287eed9511d7/ad030d98e7a0f6c371205fbf8c3d76/a2ad030d98e7a0f6c371205fbf8c3d76.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xdfde78d2baec499fe18f2be74b6c287eed9511d7/38000087"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "96823",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient to the Future",
+     "image_url": "https://raw2.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/a91aadec344eaf936289443013baa9/58a91aadec344eaf936289443013baa9.mp4",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/96823"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "97124",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient to the Future 02",
+     "image_url": "https://i2c.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/fb19e835a47395f6022f8132259088/2cfb19e835a47395f6022f8132259088.webp",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/97124"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "97629",
+     "collection": "fnd",
+     "contract": "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
+     "name": "Ancient to the Future 03",
+     "image_url": "https://raw2.seadn.io/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/1d1d87a52edff942f6d8ac7ece8618/581d1d87a52edff942f6d8ac7ece8618.mp4",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x3b3ee1931dc30c1957379fac9aba94d1c48a5405/97629"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "48492",
+     "collection": "makersplace",
+     "contract": "0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756",
+     "name": "Future Ancient Technology",
+     "image_url": "https://i2c.seadn.io/ethereum/0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756/2b48c36460d141f96780cfc3cb7bc7/7e2b48c36460d141f96780cfc3cb7bc7.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x2a46f2ffd99e19a89476e2f62270e0a35bbf0756/48492"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "720549",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 1",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/cf59982c0b501f50f08d462d6de88471.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/720549"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "720530",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 19.",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/9811243bcd46ecc48af6bd7cf5856222.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/720530"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "43226",
+     "collection": "rarible",
+     "contract": "0xd07dc4262bcdbf85190c01c996b4c06a461d2430",
+     "name": "Ancient Future // AR-3D-LIVE ART // Pumayana",
+     "image_url": "https://i2c.seadn.io/ethereum/0xd07dc4262bcdbf85190c01c996b4c06a461d2430/87b4d197508cdc5457e2829f08fde5/5e87b4d197508cdc5457e2829f08fde5.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xd07dc4262bcdbf85190c01c996b4c06a461d2430/43226"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "724289",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 15",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/9b14e0036578f156639a3795f611adeb.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/724289"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "720547",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 46",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/23c422f8bea43764cadc9e40e39088a4.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/720547"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "720554",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 45",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/d5044f7f760aa557a56156303748f980.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/720554"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "215944",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Broken Mask.",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/bc06cfa36bd2e3a00f4429a1ea662f63.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/215944"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "720567",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Ancient Future. Mask 40",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/6a05417e8dfd1e83e36d39d2247e7a8a.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/720567"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "1068872",
+     "collection": "rarible",
+     "contract": "0x60f80121c31a0d46b5279700f9df786054aa5ee5",
+     "name": "Album Futurs Anciens - Dirty Zoo",
+     "image_url": "https://i2c.seadn.io/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/7bc4facfc3f0e70c1cfb55ad747eda58.gif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x60f80121c31a0d46b5279700f9df786054aa5ee5/1068872"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "5631",
+     "collection": "makersplace-v2",
+     "contract": "0xcd51b81ac1572707b7f3051aa97a31e2afb27d45",
+     "name": "Ancient Futures",
+     "image_url": "https://i2c.seadn.io/ethereum/0xcd51b81ac1572707b7f3051aa97a31e2afb27d45/e1a03cad334178e0db10f17c4b7e7d/ffe1a03cad334178e0db10f17c4b7e7d.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xcd51b81ac1572707b7f3051aa97a31e2afb27d45/5631"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "98011445685584682196764101960202166372982727294156002872960660006635829198849",
+     "collection": "x-ai-2-KnfqMuv3Sf",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "ancient future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/91db46bb92ffedf82ec792e64dc763/9791db46bb92ffedf82ec792e64dc763.avif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/98011445685584682196764101960202166372982727294156002872960660006635829198849"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "59313464970882747606825172179401614047334454359181428944368545351331339042817",
+     "collection": "lheu-collection",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Ancient future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/ed71d5cce4d2b65b9393721c0c0f44/6bed71d5cce4d2b65b9393721c0c0f44.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/59313464970882747606825172179401614047334454359181428944368545351331339042817"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "68975153643892460180420600949643323904348293602672920832073825343771879931905",
+     "collection": "itsmetansu-collection",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/2aebaed905aa69773a978656432ea2/8b2aebaed905aa69773a978656432ea2.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/68975153643892460180420600949643323904348293602672920832073825343771879931905"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "3",
+     "collection": "sci-fi-worlds-1",
+     "contract": "0x0f4771c4bdb3d087daac6ef965e5e3352b46ca3a",
+     "name": "Ancient Future ",
+     "image_url": "https://i2c.seadn.io/ethereum/0x0f4771c4bdb3d087daac6ef965e5e3352b46ca3a/4ddce01687a82ce3cfeb0116c7f98c2b.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x0f4771c4bdb3d087daac6ef965e5e3352b46ca3a/3"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "59313464970882747606825172179401614047334454359181428944368545352430850670593",
+     "collection": "lheu-collection",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Ancient Future II",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/a73dc6981d9d683d25215a4767dee0/faa73dc6981d9d683d25215a4767dee0.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/59313464970882747606825172179401614047334454359181428944368545352430850670593"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "7",
+     "collection": "the-beginning-end-00000",
+     "contract": "0xf5beeecc5e4c1af4d4a7592fc1e115600134f4bf",
+     "name": "The Ancient Future ",
+     "image_url": "https://i2c.seadn.io/ethereum/0xf5beeecc5e4c1af4d4a7592fc1e115600134f4bf/99a18590d3c89d0d7f565086864050/ff99a18590d3c89d0d7f565086864050.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xf5beeecc5e4c1af4d4a7592fc1e115600134f4bf/7"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "54860062890499311100100475162491370443034746087335164525557117002351269380097",
+     "collection": "ancient-future-memories",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "ancient future City3",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/2a679927ac850308845695e2dbc202/7e2a679927ac850308845695e2dbc202.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/54860062890499311100100475162491370443034746087335164525557117002351269380097"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "2",
+     "collection": "ghost78s-art",
+     "contract": "0x950cf158d36adb6f9c99ad197b50e1b4d92fef7c",
+     "name": "Manifest-Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x950cf158d36adb6f9c99ad197b50e1b4d92fef7c/0c6ceb3fac37d92d7b018aad184f0692.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x950cf158d36adb6f9c99ad197b50e1b4d92fef7c/2"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "41100780522298578915396705983570967631644208586597672540991662948625820942361",
+     "collection": "marcelo-pinel-edition",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "GENESIS The Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/dfe7be9c6712ac93e0af89891a9bb0/f4dfe7be9c6712ac93e0af89891a9bb0.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/41100780522298578915396705983570967631644208586597672540991662948625820942361"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "12",
+     "collection": "visions-of-teknochtitlan",
+     "contract": "0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43",
+     "name": "Visitor from ancient future",
+     "image_url": "https://i2c.seadn.io/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/d7d306ab540e38cc1dff3e624816a6a5.gif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/12"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "7913402202769379533690164279743878593095549349620263384589944208893451173889",
+     "collection": "the-ancient-future-2",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "the ancient Future #24442",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/ade2f410ddd56f4a04c56c55e52a07/69ade2f410ddd56f4a04c56c55e52a07.jpeg",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/7913402202769379533690164279743878593095549349620263384589944208893451173889"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "13",
+     "collection": "visions-of-teknochtitlan",
+     "contract": "0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43",
+     "name": "Visitor from ancient future",
+     "image_url": "https://i2c.seadn.io/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/36807a378380309e11832e86f6035e/9a36807a378380309e11832e86f6035e.gif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/13"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "2825450458975858653613323881333569816752557271528974240885548459458796978177",
+     "collection": "asamuraicollection-9cHtg3CXOh",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Afro Samurai #2 Ancient Future",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/193668c37dbb8abba2c24ee149c52e/76193668c37dbb8abba2c24ee149c52e.avif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/2825450458975858653613323881333569816752557271528974240885548459458796978177"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "40591134379222980614973896827378258115349120312927298994818825090023378911233",
+     "collection": "untitled-collection-465434362",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "ancient future painting😌✨",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/4448aec896b46a8c8f827a90866a84/b04448aec896b46a8c8f827a90866a84.gif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/40591134379222980614973896827378258115349120312927298994818825090023378911233"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "11",
+     "collection": "visions-of-teknochtitlan",
+     "contract": "0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43",
+     "name": "Visitor from the ancient future",
+     "image_url": "https://i2c.seadn.io/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/4d62987236dbb550603f9b7eec7a535c.gif",
+     "opensea_url": "https://opensea.io/assets/ethereum/0xb92dafe6c472a4b493c8392d8f5e0a2ca5213c43/11"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543560782741504005",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Concubine of Ancient Future Armory #1",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/5a93443ce0bc41ce3fd009f4fc742e/085a93443ce0bc41ce3fd009f4fc742e.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543560782741504005"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263264018375563542548",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Senator of Ancient Future Armory #5",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/8866c65f2b2fd5785dfaa9369b64c1/4c8866c65f2b2fd5785dfaa9369b64c1.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263264018375563542548"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263263986489726337044",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "King of Ancient Future Armory #3",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/d9b43911989e61269fc7df2b3d6208/52d9b43911989e61269fc7df2b3d6208.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263263986489726337044"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263264016176540286996",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Senator of Ancient Future Armory #3",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/1d4424c77cd8f7e3d1f2674a9f43db/0c1d4424c77cd8f7e3d1f2674a9f43db.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263264016176540286996"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543543190555459589",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Outlaw of Ancient Future Armory #8",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/d188861d8b4d524770b00df1fc1c34/70d188861d8b4d524770b00df1fc1c34.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543543190555459589"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263264081047726325780",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Senator of Ancient Future Armory #20",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/87dcd22a04b52fc21d298f64b22e9f/4387dcd22a04b52fc21d298f64b22e9f.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263264081047726325780"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263264079948214698004",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Senator of Ancient Future Armory #19",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/34048a573a49372cc9ff612de78c63/9a34048a573a49372cc9ff612de78c63.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263264079948214698004"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543550887136854021",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "King of Ancient Future Armory #1",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/89b4c41f42d01ef46fea5ba3e85bb9/9589b4c41f42d01ef46fea5ba3e85bb9.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543550887136854021"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543546489090342917",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Outlaw of Ancient Future Armory #11",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/30d675c2f71b415b6b4e7d6704923a/a930d675c2f71b415b6b4e7d6704923a.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543546489090342917"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543497011067092997",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Bishop of Ancient Future Armory #3",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/a8c1ed569ad4d58d6be57e81d3eb22/b3a8c1ed569ad4d58d6be57e81d3eb22.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543497011067092997"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "6707350417824786680802926726469567792984494911981524607503543549787625226245",
+     "collection": "armor-of-tomorrow-YqGuwntzt1",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Detective of Ancient Future Armory #2",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/a3825dee38bfeb9e29bd4ea29502dd/55a3825dee38bfeb9e29bd4ea29502dd.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/6707350417824786680802926726469567792984494911981524607503543549787625226245"
+    }
+   },
+   {
+    "type": "nft",
+    "nft": {
+     "identifier": "60250514276465456497734228060493620063292440818885981121263263991987284475924",
+     "collection": "ancient-future-armory",
+     "contract": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+     "name": "Queen of Ancient Future Armory #2",
+     "image_url": "https://i2c.seadn.io/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/ad4f9d283ac832c29e27a854ced68b/d6ad4f9d283ac832c29e27a854ced68b.png",
+     "opensea_url": "https://opensea.io/assets/ethereum/0x495f947276749ce646f68ac8c248420045cb7b5e/60250514276465456497734228060493620063292440818885981121263263991987284475924"
+    }
+   }
+  ]
+ }
+}

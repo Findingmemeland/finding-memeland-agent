@@ -1,0 +1,16 @@
+{
+ "_meta": {
+  "url": "https://api.opensea.io/api/v2/search",
+  "status": 200,
+  "captured_at": "2026-09-10T20:52:56.042731+00:00",
+  "query": "Ancient Future",
+  "rate": {
+   "x-ratelimit-limit": "120",
+   "x-ratelimit-remaining": "119",
+   "x-ratelimit-reset": "1789073634"
+  }
+ },
+ "body": {
+  "results": []
+ }
+}

@@ -250,9 +250,11 @@ class Settings(BaseSettings):
             missing.append("eth_rpc_url")
         if not self.target_epoch_id:
             missing.append("target_epoch_id")
-        # search guard + uniqueness + chain probe all speak Rarible
-        if not self.rarible_api_key:
-            missing.append("rarible_api_key (search guard is mandatory)")
+        # search guard + uniqueness + chain probe: ONE marketplace surface,
+        # OpenSea preferred (10/09), Rarible accepted — never named by hand
+        # alone (the relic-mode lesson below, paid once already)
+        if not (self.opensea_api_key or self.rarible_api_key):
+            missing.append("opensea_api_key or rarible_api_key (search guard is mandatory)")
         if not (self.target_canary_block and self.target_canary_mints):
             missing.append("target_canary_block AND target_canary_mints (both ≠ 0)")
         if not self.target_writability_rate_map:

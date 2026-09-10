@@ -938,6 +938,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     g = target_wiring.gate_now()
                     lines.append(
                         f"target: launch {'ON' if s.target_launch else 'off'} | "
+                        f"market {target_wiring.market_surface or '?'} | "
                         + ("sem snapshot — /scan, /snapshot" if g is None else
                            f"gate {g.verdict} (efectivo {g.total_effective:,}) — {g.detail}")
                     )
