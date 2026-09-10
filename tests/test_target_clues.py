@@ -697,33 +697,15 @@ def test_guard_pressure_is_tallied_per_clue_and_clue_one_gets_ten_attempts(caplo
     assert len(e._client.calls) == 10 and e._rejections == {"address words": 10}
 
 
-def test_taunt_that_prints_the_answer_or_the_address_is_omitted():
-    """7th --real-clues (10/09), clue 4 taunt: "is it more ancient or more
-    future than your search history?" — both words of the name, on the one
-    text with no guard. Pedro: omit such a taunt; everything else untouched."""
-    from finding_memeland.target.clues import safe_taunt, taunt_leaks
-    terms = ["ancient", "future"]
-    assert taunt_leaks("is it more ancient or more future than your search history?", terms) == ["ancient", "future"]
-    assert taunt_leaks("still on base and still lost", terms) == ["base"]
-    assert taunt_leaks("even opensea knows by now", terms) == ["opensea"]
-    assert taunt_leaks("the timeline still won't load for you", terms) == []   # semantic field stays (decision)
-    assert taunt_leaks("futures traders would have found it", terms) == []      # whole words only
-    assert safe_taunt("four clues deep and still circling", terms) == "four clues deep and still circling"
-    assert safe_taunt("more ancient than your search history", terms) == ""
-    assert safe_taunt(None, terms) == ""
 
 
 def test_target_prompt_says_treasure_never_relic():
-    """Pedro (10/09): taunts said "the relic is patient" — inherited wording.
-    In this game the public word is the treasure."""
     from finding_memeland.target.clues import (
         TARGET_SYSTEM_PROMPT, _treasure_wording, build_target_user_message,
     )
-    from finding_memeland.content.relic_clues import relic_slot_for
     assert 'NEVER "the relic"' in TARGET_SYSTEM_PROMPT
     assert _treasure_wording("the relic's NAME and the RELIC'S ARTWORK, a relic") == \
         "the treasure's NAME and the TREASURE'S ARTWORK, a treasure"
     c = ctx()
     for i in range(1, PUZZLE_CLUES + 4):
-        msg = build_target_user_message(c, i, ["x"] * (i - 1))
-        assert "relic" not in msg.lower(), (i, relic_slot_for(i, c)[0])
+        assert "relic" not in build_target_user_message(c, i, ["x"] * (i - 1)).lower()

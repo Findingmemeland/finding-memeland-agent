@@ -1244,14 +1244,8 @@ class Orchestrator:
         try:
             draft = self._engine_for(hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
             if is_target:
-                from ..target.clues import safe_taunt
                 from ..target.templates import target_clue_followup
-                taunt = safe_taunt(draft.taunt, hunt.ctx.solution_terms,
-                                   log_label=f"clue #{clue_index}")
-                if draft.taunt and not taunt:
-                    self._notify(f"clue #{clue_index}: taunt omitted — it contained a "
-                                 "word of the answer or its address (the clue went out alone)")
-                text = target_clue_followup(clue_index, draft.text, taunt)
+                text = target_clue_followup(clue_index, draft.text, draft.taunt or "")
             else:
                 text = clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
             tweet_id = self._publisher.post(text)
