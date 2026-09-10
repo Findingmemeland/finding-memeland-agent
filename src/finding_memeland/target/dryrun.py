@@ -269,10 +269,14 @@ class ScenarioReport:
 
 
 def _secrecy(rep: ScenarioReport, world: TargetWorld, target_name: str) -> None:
-    """Every scenario: the operator channel never carries the name, and no
-    public post before the reveal/void carries it either."""
-    rep.check("operator notices never name the target",
-              all(target_name not in m for m in world.notices()))
+    """Every scenario: the operator channel never carries the name — nor any
+    WORD of it (audit 10/09: a notice carried 'Ancient' alone and the
+    full-name check let it through)."""
+    words = [w for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", target_name)]
+    rep.check("operator notices never name the target (nor a word of it)",
+              all(target_name not in m
+                  and not any(re.search(r"\b" + re.escape(w) + r"\b", m, re.I) for w in words)
+                  for m in world.notices()))
 
 
 # --------------------------------------------------------------------------- #

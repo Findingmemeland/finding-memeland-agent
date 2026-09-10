@@ -461,7 +461,10 @@ def parse_target_clue(text: str):
     from ..content.clue_engine import ClueDraft, _strip_leading_meta
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        raise ValueError(f"no JSON object in clue response: {text[:200]!r}")
+        # NEVER the text: the writer's reasoning names the answer, and this
+        # message reaches the operator channel (audit 10/09: the 4th
+        # real-clues run printed 'Looking at "Ancient"…' to the notifier)
+        raise ValueError(f"no JSON object in clue response ({len(text)} chars)")
     data = json.loads(text[start:end + 1])
     clue = _strip_leading_meta(str(data.get("clue", "")).strip())
     if not clue:
@@ -886,7 +889,7 @@ class AnthropicTruthJudge:
                 end = text.rfind("}")
                 start = text.rfind("{", 0, end) if end != -1 else -1
                 if start == -1:
-                    raise ValueError(f"no JSON in judge answer (last 80 chars: {text[-80:]!r})")
+                    raise ValueError(f"no JSON in judge answer ({len(text)} chars)")   # never the text
                 doc = json.loads(text[start:end + 1])
                 return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
             except Exception as e:  # noqa: BLE001 — retried, then fail closed
@@ -919,6 +922,11 @@ class TargetClueEngine(RelicClueEngine):
         self._forbidden_hits: dict[str, int] = {}
 
     CLUE_ONE_ATTEMPTS = 10     # a refusal at clue 1 costs a draw; try harder there
+
+    # the relic engine logs the blind solver's guesses (they name the
+    # answer; "fica nos logs" was acceptable for a relic). A target's name
+    # never reaches a log mid-hunt (audit 10/09).
+    LOG_SOLVER_GUESSES = False
 
     def next_clue(self, persona, clue_index, prior_clues, *, max_attempts: int = 6):
         """GUARD PRESSURE IS MEASURED, NOT GUESSED (Pedro, 09/09: "a hunt

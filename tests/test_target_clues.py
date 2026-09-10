@@ -632,7 +632,7 @@ def test_anthropic_truth_judge_parses_and_fails_to_none():
     naps = []
     g = _C("garbage")
     v = AnthropicTruthJudge(g, "m", sleep=naps.append).check("c", name="n", word=None, artwork="")
-    assert v.consistent is None and "no JSON in judge answer" in v.reason and "garbage" in v.reason
+    assert v.consistent is None and "no JSON in judge answer" in v.reason and "garbage" not in v.reason
     assert len(g.calls) == 3 and naps == [2.0, 4.0]
     v = AnthropicTruthJudge(_C(RuntimeError("503 overloaded")), "m", sleep=lambda s: None).check(
         "c", name="n", word=None, artwork="")
@@ -709,3 +709,41 @@ def test_target_prompt_says_treasure_never_relic():
     c = ctx()
     for i in range(1, PUZZLE_CLUES + 4):
         assert "relic" not in build_target_user_message(c, i, ["x"] * (i - 1)).lower()
+
+
+def test_no_message_carries_the_writers_or_judges_raw_text(caplog):
+    """Audit 10/09 (secrecy): the writer's non-JSON answer ('Looking at
+    "Ancient"…') reached the operator notifier through the ValueError; the
+    judge's raw answer could reach it through 'guard detail'; the relic
+    engine's solver log names the answer. None of the three carries text now."""
+    import logging
+    from finding_memeland.target.clues import AnthropicTruthJudge, parse_target_clue
+    with pytest.raises(ValueError) as e:
+        parse_target_clue('Looking at "Ancient" — I need a checkable claim about its letters')
+    assert "Ancient" not in str(e.value) and "chars" in str(e.value)
+    j = AnthropicTruthJudge(_JudgeText("FUTURE ends with E, so yes"), "m", sleep=lambda s: None)
+    v = j.check("c", name="Ancient Future", word="Future", artwork="")
+    assert v.consistent is None and "FUTURE" not in v.reason and "chars" in v.reason
+    # solver guesses are not logged by the target engine
+
+    class _Solver:
+        name = "fake"
+        calls = 0
+
+        def guess(self, clues, n):
+            self.calls += 1
+            return ["harbor", "salt harbor"] if self.calls == 1 else ["coin", "patience"]
+    e = TargetClueEngine(FakeAnthropic(["a lighthouse guards the coin", "patience is a coin nobody spends"]),
+                         "m", search_guard=False, truth_judge=False, solver=_Solver())
+    with caplog.at_level(logging.INFO):
+        e.next_clue(ctx(), 2, ["x"])
+    assert not any("harbor" in r.message.lower() for r in caplog.records)
+    assert any("hit_alone=True" in r.message for r in caplog.records)
+
+
+class _JudgeText:
+    def __init__(self, text):
+        class _M:
+            def create(_s, **kw):
+                return _Resp(text)
+        self.messages = _M()

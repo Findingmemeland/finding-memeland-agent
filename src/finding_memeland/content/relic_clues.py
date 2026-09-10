@@ -781,11 +781,17 @@ class RelicClueEngine(ClueEngine):
             return []
         hits_alone = solver_hits(alone, targets)
         hits_acc = solver_hits(accumulated, targets)
-        # Como nas razões dos guardrails: isto nomeia a resposta, fica nos logs.
-        log.info(
-            "blind solver clue #%s: alone=%s accumulated=%s hits_alone=%s hits_acc=%s",
-            clue_index, alone, accumulated, hits_alone, hits_acc,
-        )
+        # Como nas razões dos guardrails: isto nomeia a resposta, fica nos logs
+        # — só no motor relic; o motor-alvo desliga (LOG_SOLVER_GUESSES=False)
+        # e regista apenas se houve hit, nunca as palavras.
+        if getattr(self, "LOG_SOLVER_GUESSES", True):
+            log.info(
+                "blind solver clue #%s: alone=%s accumulated=%s hits_alone=%s hits_acc=%s",
+                clue_index, alone, accumulated, hits_alone, hits_acc,
+            )
+        else:
+            log.info("blind solver clue #%s: hit_alone=%s hit_acc=%s",
+                     clue_index, bool(hits_alone), bool(hits_acc))
         if hits_alone:
             return [
                 "a BLIND SOLVER holding ONLY this clue named the target word in its "
