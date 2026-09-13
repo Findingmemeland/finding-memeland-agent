@@ -159,6 +159,9 @@ class RefreshReport:
     transport: int = 0     # metadata fetches lost to RPC/gateway trouble (skipped)
     not_content_addressed: int = 0   # tokenURI or image on a mutable host
     bad_read: int = 0      # a read that raised something that is NOT transport (skipped)
+    # transport failures by cause label ('gateway HTTP 429', …) — counts
+    # only, for the operator: WHICH provider refused, not just how many
+    causes: dict = field(default_factory=dict)
     # gross size per stratum as the lister saw it (totalSupply for an
     # enumerable contract, listed count otherwise) — diagnostic only, so a
     # sampled snapshot reads "15k of 115k" and not "the stratum collapsed"
@@ -168,6 +171,36 @@ class RefreshReport:
 class RefreshFailed(RuntimeError):
     """A platform could not be listed. Fail-closed for the BUILD, not the
     game: the caller keeps serving the previous snapshot."""
+
+
+def _transport_cause(e: BaseException) -> str:
+    """A short, id-free label for the operator's tally: the adapter's own
+    prefix ('gateway', 'rpc:ethereum', 'ethereum') plus the HTTP status
+    found on the cause chain, e.g. 'gateway HTTP 429', 'gateway non-JSON',
+    'rpc:ethereum throttled'. Never a URL, CID, contract or token id: the
+    adapters' messages carry none, and only the first 40 chars are kept."""
+    text = str(e)
+    # the adapters' labels are 'rpc:<chain>: …', '<chain>: …', 'gateway: …'
+    head, sep, rest = text.rpartition(": ")
+    if not sep:
+        head, rest = text, ""
+    head = head.strip()[:40] or "transport"
+    rest = rest.strip()[:40]
+    code = None
+    cur: BaseException | None = e
+    seen = 0
+    while cur is not None and seen < 6:
+        code = getattr(cur, "code", None) or getattr(cur, "status", None) or code
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    if isinstance(code, int):
+        return f"{head} HTTP {code}"
+    return f"{head} {rest}".strip()
+
+
+def _top_causes(report: "RefreshReport", n: int = 4) -> str:
+    top = sorted(report.causes.items(), key=lambda kv: -kv[1])[:n]
+    return ", ".join(f"{k}×{v}" for k, v in top) or "—"
 
 
 def _is_rate_limited(e: BaseException) -> bool:
@@ -423,17 +456,21 @@ class RefreshJob:
                 if done % self._every == 0:
                     self._note(f"refresh: {done:,}/{len(prefiltered):,} lidos, "
                                f"{len(resolved):,} qualificam, "
-                               f"{report.transport:,} transporte, "
-                               f"{report.bad_read:,} ilegíveis")
+                               f"{report.transport:,} transporte"
+                               + (f" ({_top_causes(report)})" if report.transport else "")
+                               + f", {report.bad_read:,} ilegíveis")
                 if isinstance(read, ChainUnavailable):
                     report.transport += 1
+                    cause = _transport_cause(read)
+                    report.causes[cause] = report.causes.get(cause, 0) + 1
                     if served == 0 and report.transport >= self._min_transport:
                         raise RefreshFailed(
                             f"{report.transport} metadata fetches lost to "
                             "transport and NONE served yet — the refresh "
                             "cannot read at all (RPC/gateway/quota); stopped "
-                            f"after {done:,} of {len(prefiltered):,}; snapshot "
-                            "NOT rebuilt; keep serving the previous one")
+                            f"after {done:,} of {len(prefiltered):,}; causes: "
+                            f"{_top_causes(report)}; snapshot NOT rebuilt; "
+                            "keep serving the previous one")
                     continue
                 served += 1
                 if isinstance(read, Exception):
@@ -446,7 +483,8 @@ class RefreshJob:
                 raise RefreshFailed(
                     f"{report.transport} of {done} metadata fetches lost to "
                     "transport — outage, not a smaller pool; stopped after "
-                    f"{done:,} of {len(prefiltered):,}; snapshot NOT rebuilt; "
+                    f"{done:,} of {len(prefiltered):,}; causes: "
+                    f"{_top_causes(report)}; snapshot NOT rebuilt; "
                     "keep serving the previous one")
             if (report.bad_read >= self._min_transport
                     and report.bad_read > self._max_bad_share * max(done, 1)):

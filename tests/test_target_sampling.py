@@ -206,6 +206,40 @@ def test_zero_served_breaker_stops_a_dead_refresh_inside_the_first_chunk():
     assert job._chunk == 250
 
 
+def test_transport_failures_are_tallied_by_cause_without_ids():
+    """13/09 live: 162 of 500 reads lost and the report said only
+    'transport'. The tally names the provider and the HTTP status —
+    never a URL, CID, contract or token id."""
+    from finding_memeland.target.refresh import RefreshFailed, _transport_cause
+    names = {i: distinct(i) for i in range(1, 201)}
+    items = [item(i, names[i]) for i in range(1, 201)]
+    metas = {i: meta_for(names[i]) for i in range(1, 201)}
+
+    class Http(Exception):
+        def __init__(self, code):
+            super().__init__(f"HTTP Error {code}")
+            self.code = code
+
+    def fetch(ch, c, t):
+        if t % 3 == 0:
+            try:
+                raise Http(429)
+            except Http as inner:
+                raise ChainUnavailable("gateway: HTTPError") from inner
+        if t % 7 == 0:
+            raise ChainUnavailable("gateway answered non-JSON")
+        return token(metas[t])
+    job = RefreshJob(listers=(FakeLister("plat", items),), fetch_token=fetch,
+                     owner_is_eoa=lambda ch, c, t: True, now_iso=lambda: "t",
+                     workers=2, retries=0)
+    with pytest.raises(RefreshFailed) as e:
+        job.build(EPOCH)
+    msg = str(e.value)
+    assert "causes:" in msg and "gateway HTTP 429" in msg
+    assert "0x" not in msg and "ipfs" not in msg
+    assert _transport_cause(ChainUnavailable("rpc:ethereum: throttled")) == "rpc:ethereum throttled"
+
+
 def test_rate_limit_opens_one_shared_pause_instead_of_faster_retries():
     """Opus P1-2: a 429 is the provider asking for LESS traffic. The first
     worker to see it pauses everyone; the item is retried after the pause,
