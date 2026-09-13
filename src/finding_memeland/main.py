@@ -320,6 +320,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     # only decides what /launch does. Composition lives in target/wiring.py;
     # a missing piece disables the whole mode and says which piece.
     target_wiring = None
+    target_boot_error = ""
     if s.target_pool_key or s.target_launch:
         from .target.wiring import build_target
 
@@ -338,10 +339,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
                 http_post=_http_post, http_get_bytes=_http_get_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
+                progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),
             )
             print("[target] mode wired (epoch "
                   f"{s.target_epoch_id!r}; launch={'ON' if s.target_launch else 'off'})")
         except Exception as e:  # noqa: BLE001 — the message names config keys only
+            target_boot_error = f"{type(e).__name__}: {str(e)[:160]}"
             print(f"[target] disabled — {e}")
     if s.target_launch and target_wiring is None:
         # Loud at boot, and refused again at /launch: never a silent fallback
@@ -932,13 +935,19 @@ def build_agent(settings: Settings | None = None) -> Agent:
         if s.target_launch or s.target_pool_key:
             if target_wiring is None:
                 lines.append("target: ⛔ não construído — falta: "
-                             + (", ".join(s.target_missing()) or "?"))
+                             + (", ".join(s.target_missing())
+                                or target_boot_error or "?"))
             else:
                 try:
                     g = target_wiring.gate_now()
                     lines.append(
                         f"target: launch {'ON' if s.target_launch else 'off'} | "
                         f"market {target_wiring.market_surface or '?'} | "
+                        f"sample {target_wiring.sample_per_stratum or 'full'} | "
+                        + (f"gate {target_wiring.thresholds.describe()} | "
+                           if target_wiring.thresholds else "")
+                        + (f"cap-exempt {','.join(sorted(target_wiring.cap_exempt))} | "
+                           if target_wiring.cap_exempt else "")
                         + ("sem snapshot — /scan, /snapshot" if g is None else
                            f"gate {g.verdict} (efectivo {g.total_effective:,}) — {g.detail}")
                     )

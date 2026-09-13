@@ -38,6 +38,8 @@ injected; the logic tests offline.
 
 from __future__ import annotations
 
+import random
+
 import json
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Iterator
@@ -243,12 +245,34 @@ class ChainContractLister:
     face."""
 
     def __init__(self, *, rpc: ChainRpc, platform: str, contract: str,
-                 max_tokens: int = 200_000, probe_miss_budget: int = 25):
+                 max_tokens: int = 200_000, probe_miss_budget: int = 25,
+                 sample: int = 0, rng: "random.Random | None" = None):
+        """`sample` > 0 lists a random sample of at most that many tokens
+        instead of the whole contract (13/09: the full listing of epoch 1
+        is ~850k tokens — 40 h and ~$46 of RPC per refresh, and it died to
+        transport at 53%).
+          · enumerable contract: `sample` distinct random INDICES in
+            [0, totalSupply) — uniform over the contract (capped at
+            `max_tokens` indices);
+          · no enumeration: uniform over ids in [1, bound], where `bound`
+            is found by doubling and STOPS at the first empty window of
+            `probe_miss_budget` ids — a contract that minted 1-50 and then
+            200-300 keeps bound ≈ 64 and never samples the high ids. So
+            this branch is uniform over the low, dense part, NOT over the
+            whole contract (Opus P1-5); acceptable for the 2021 tail today
+            (small, dense contracts), to be fixed with a second bound
+            probed from the top when there is time.
+        `gross_total` is set after listing: totalSupply when the contract
+        enumerates, else the number listed — the refresh report shows it
+        next to the sample so "15k of 115k" is never read as a collapse."""
         self.name = platform
         self._rpc = rpc
         self._contract = contract
         self._max = max_tokens
         self._miss_budget = probe_miss_budget
+        self._sample = max(0, int(sample))
+        self._rng = rng or random.SystemRandom()
+        self.gross_total: int | None = None
 
     @property
     def chain(self) -> str:
@@ -261,8 +285,14 @@ class ChainContractLister:
                 f"{self._rpc.chain!r} RPC — wrong chain/address or blind "
                 "endpoint; refusing to list (R2)")
         total = self._try_total_supply()
+        self.gross_total = total
         if total is not None:
-            yield from self._by_index(min(total, self._max))
+            if self._sample and total > self._sample:
+                yield from self._by_index_sampled(min(total, self._max))
+            else:
+                yield from self._by_index(min(total, self._max))
+        elif self._sample:
+            yield from self._by_probe_sampled()
         else:
             yield from self._by_probe()
 
@@ -315,6 +345,56 @@ class ChainContractLister:
             else:
                 misses += 1
 
+    # -- sampling ------------------------------------------------------------ #
+
+    def _by_index_sampled(self, total: int) -> Iterator[PlatformItem]:
+        """`sample` distinct random indices in [0, total) — one tokenByIndex
+        each; an index that reverts is skipped (never falls back to the
+        full listing: the point is the budget)."""
+        for idx in sorted(self._rng.sample(range(total), self._sample)):
+            try:
+                tid = int(self._call(
+                    SEL_TOKENBYINDEX + idx.to_bytes(32, "big").hex()), 16)
+            except ChainUnavailable:
+                raise
+            except Exception:  # noqa: BLE001 — this index reverts; skip it
+                continue
+            yield self._item(tid)
+
+    def _probe_upper_bound(self) -> int:
+        """Smallest id bound for a dense contract: double from 1 while the
+        id (or one of a few ids just below it) exists; O(log n) calls."""
+        hi = 1
+        while hi < self._max:
+            probe = hi * 2
+            alive = any(self._exists(probe - k)
+                        for k in range(min(self._miss_budget, probe)))
+            if not alive:
+                break
+            hi = probe
+        return min(max(hi * 2, 1), self._max)
+
+    def _by_probe_sampled(self) -> Iterator[PlatformItem]:
+        """Random ids under the bound; misses (burns, gaps) are skipped and
+        the attempt budget is 3× the sample so a sparse contract cannot
+        turn the sampling into a full probe."""
+        bound = self._probe_upper_bound()
+        if bound <= self._sample:
+            yield from self._by_probe()
+            return
+        seen: set[int] = set()
+        found = 0
+        attempts = 0
+        while found < self._sample and attempts < 3 * self._sample:
+            tid = self._rng.randint(1, bound)
+            attempts += 1
+            if tid in seen:
+                continue
+            seen.add(tid)
+            if self._exists(tid):
+                found += 1
+                yield self._item(tid)
+
 
 class RegistryStratumLister:
     """PlatformLister over a whole registry stratum: chains the per-contract
@@ -325,33 +405,55 @@ class RegistryStratumLister:
     Contract addresses never appear in `name` or any log-facing field."""
 
     def __init__(self, *, rpcs: dict[str, ChainRpc], stratum: str,
-                 registry: ContractRegistry, per_contract_cap: int = 2_000):
+                 registry: ContractRegistry, per_contract_cap: int = 2_000,
+                 sample: int = 0, rng: "random.Random | None" = None):
         self.name = stratum
         self._rpcs = rpcs
         self._registry = registry
         self._cap = per_contract_cap
+        self._sample = max(0, int(sample))
+        self._rng = rng
+        self.gross_total: int | None = None
 
     def items(self) -> Iterator[PlatformItem]:
-        for chain, contract in self._registry.entries(self.name):
+        entries = list(self._registry.entries(self.name))
+        # sampled: the stratum budget is spread over its contracts (a tail
+        # contract has a handful of tokens; the budget mostly caps the big
+        # Manifold-style ones), never below 1 per contract
+        per = self._cap
+        if self._sample and entries:
+            per = max(1, min(self._cap, self._sample // len(entries)))
+        gross = 0
+        for chain, contract in entries:
             lister = ChainContractLister(
                 rpc=_rpc_for(self._rpcs, chain), platform=self.name,
-                contract=contract, max_tokens=self._cap)
-            yield from lister.items()
+                contract=contract, max_tokens=self._cap,
+                sample=per if self._sample else 0, rng=self._rng)
+            n = 0
+            for it in lister.items():
+                n += 1
+                yield it
+            gross += lister.gross_total if lister.gross_total else n
+        self.gross_total = gross
 
 
 def epoch1_listers(*, rpcs: dict[str, ChainRpc],
-                   registry: ContractRegistry) -> tuple:
+                   registry: ContractRegistry, sample: int = 0,
+                   rng: "random.Random | None" = None) -> tuple:
     """The ratified epoch-1 composition, as refresh-ready listers. `rpcs`
     maps chain -> ChainRpc; every chain the composition touches must be
     present (KeyError otherwise — a missing chain is a configuration error,
-    never a silently absent platform)."""
+    never a silently absent platform). `sample` > 0 = at most that many
+    tokens PER STRATUM, drawn uniformly (config target_sample_per_stratum;
+    0 keeps the full listing)."""
     classic = tuple(
         ChainContractLister(rpc=_rpc_for(rpcs, chain), platform=slug,
-                            contract=addr)
+                            contract=addr, sample=sample, rng=rng)
         for slug, chain, addr in EPOCH1_CLASSIC
     )
     reserved = tuple(
-        RegistryStratumLister(rpcs=rpcs, stratum=s, registry=registry)
+        RegistryStratumLister(rpcs=rpcs, stratum=s, registry=registry,
+                              sample=sample, rng=rng)
         for s in EPOCH1_REGISTRY_STRATA
     )
     return classic + reserved

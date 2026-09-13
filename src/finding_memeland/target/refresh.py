@@ -35,7 +35,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Protocol
 
 from .selector import metadata_hash, name_qualifies, normalize_name
@@ -155,11 +158,33 @@ class RefreshReport:
     unverifiable: int = 0
     transport: int = 0     # metadata fetches lost to RPC/gateway trouble (skipped)
     not_content_addressed: int = 0   # tokenURI or image on a mutable host
+    bad_read: int = 0      # a read that raised something that is NOT transport (skipped)
+    # gross size per stratum as the lister saw it (totalSupply for an
+    # enumerable contract, listed count otherwise) — diagnostic only, so a
+    # sampled snapshot reads "15k of 115k" and not "the stratum collapsed"
+    gross: dict = field(default_factory=dict)
 
 
 class RefreshFailed(RuntimeError):
     """A platform could not be listed. Fail-closed for the BUILD, not the
     game: the caller keeps serving the previous snapshot."""
+
+
+def _is_rate_limited(e: BaseException) -> bool:
+    """A 429 / throttled answer anywhere in the exception chain: the RPC
+    adapter labels it 'throttled' (JSON-RPC -32005/429 bodies); an HTTP 429
+    from urllib carries `.code` on the cause."""
+    seen = 0
+    cur: BaseException | None = e
+    while cur is not None and seen < 6:
+        if getattr(cur, "code", None) == 429 or getattr(cur, "status", None) == 429:
+            return True
+        text = str(cur).lower()
+        if "throttled" in text or "429" in text or "rate limit" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return False
 
 
 class RefreshJob:
@@ -200,13 +225,146 @@ class RefreshJob:
         now_iso: Callable[[], str],
         max_transport_share: float = 0.02,
         min_transport_failures: int = 20,
+        workers: int = 1,
+        retries: int = 0,
+        backoff_s: float = 1.0,
+        progress: Callable[[str], None] | None = None,
+        progress_every: int = 5_000,
+        chunk: int = 250,
+        pause_s: float = 5.0,
+        max_bad_read_share: float = 0.05,
     ):
+        """13/09, after the first live refresh (847k tokens, 40 h, 53% of
+        the metadata reads lost to 429s and to a quota cap), reviewed by
+        Opus the same day:
+          · reads run in CHUNKS of `chunk` items on a pool of `workers`;
+            the transport ceiling (2% and ≥ min_transport) is re-evaluated
+            after EVERY chunk, so an outage fails the build within one
+            chunk, never at the end of the job (P1-1). The chunk is the
+            blast radius (the pool pre-submits it), hence 250, not 2,000;
+          · ZERO-SERVED breaker (Opus, volta 2): once `min_transport`
+            reads have failed and NONE has been served, the build stops at
+            once, inside the chunk — a job that could not read a single
+            piece has no evidence it can read at all (R2 applied to the
+            refresh itself); with the shared pause this fires in minutes,
+            not after a chunk of 60 s waits;
+          · a 429 / "throttled" answer is not retried faster — it sets a
+            pause shared by all workers (`pause_s`, doubling up to 60 s
+            while it keeps happening); 5xx/timeouts retry per item with
+            backoff (P1-2);
+          · a read that raises something that is NOT transport is counted
+            (`bad_read`) and skipped, with its own ceiling, like the owner
+            check — one strange token never throws away a paid job (P1-3);
+          · `progress` gets counts-only lines every `progress_every` items."""
         self._listers = listers
         self._fetch_token = fetch_token
         self._owner_is_eoa = owner_is_eoa
         self._now_iso = now_iso
         self._max_transport_share = max_transport_share
         self._min_transport = min_transport_failures
+        self._workers = max(1, int(workers))
+        self._retries = max(0, int(retries))
+        self._backoff = max(0.0, float(backoff_s))
+        self._progress = progress
+        self._every = max(1, int(progress_every))
+        self._chunk = max(1, int(chunk))
+        self._pause_s = max(0.0, float(pause_s))
+        self._max_bad_share = max_bad_read_share
+        self._pause_lock = threading.Lock()
+        self._pause_until = 0.0
+        self._pause_len = 0.0
+
+    def _note(self, text: str) -> None:
+        if self._progress is not None:
+            try:
+                self._progress(text)
+            except Exception:  # noqa: BLE001 — a progress line never breaks a build
+                pass
+
+    # -- rate limit: one shared pause, never a faster retry (P1-2) ----------- #
+
+    def _wait_pause(self) -> None:
+        while True:
+            with self._pause_lock:
+                remaining = self._pause_until - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 1.0))
+
+    def _throttled(self) -> None:
+        """The first worker to see a 429 opens a pause for everyone; while
+        the provider keeps saying it, the pause doubles (cap 60 s)."""
+        with self._pause_lock:
+            now = time.monotonic()
+            if self._pause_until > now:
+                return                     # a pause is already running
+            self._pause_len = min(60.0, self._pause_len * 2 if self._pause_len else self._pause_s)
+            self._pause_until = now + self._pause_len
+
+    def _served(self) -> None:
+        with self._pause_lock:
+            self._pause_len = 0.0
+
+    def _read_with_retries(self, it: "PlatformItem"):
+        """fetch_token with: shared pause on rate limit; per-item backoff on
+        other transport trouble; raises the last ChainUnavailable."""
+        from .sources import ChainUnavailable
+        for attempt in range(self._retries + 1):
+            self._wait_pause()
+            try:
+                out = self._fetch_token(it.chain, it.contract, it.token_id)
+            except ChainUnavailable as e:
+                if attempt >= self._retries:
+                    raise
+                if _is_rate_limited(e):
+                    self._throttled()      # slow everyone down, then retry
+                else:
+                    time.sleep(self._backoff * (3 ** attempt))
+                continue
+            self._served()
+            return out
+        raise AssertionError("unreachable")
+
+    def _transport_ceiling_hit(self, report: "RefreshReport", attempted: int) -> bool:
+        return (report.transport >= self._min_transport
+                and report.transport > self._max_transport_share * max(attempted, 1))
+
+    def _map(self, fn, items: list) -> Iterable:
+        """Apply `fn` over `items` with the worker pool, yielding (item,
+        result | exception) as they complete; order is irrelevant here."""
+        if self._workers == 1:
+            for it in items:
+                try:
+                    yield it, fn(it)
+                except Exception as e:  # noqa: BLE001 — classified by the caller
+                    yield it, e
+            return
+
+        def _safe(it):
+            try:
+                return it, fn(it)
+            except Exception as e:  # noqa: BLE001
+                return it, e
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            yield from pool.map(_safe, items)
+
+    @staticmethod
+    def _qualify(it, read, resolved: list, report: "RefreshReport",
+                 epoch: CurationEpoch) -> None:
+        """Stage-2 filters for one read token (content-addressed twice,
+        canonical base name); appends to `resolved` when it qualifies."""
+        meta = read.metadata
+        if not (isinstance(meta, dict) and meta.get("image")):
+            return
+        # content-addressed, twice: the URI and the image (see class doc)
+        if content_id(read.token_uri) is None \
+                or not uri_is_content_addressed(str(meta.get("image"))):
+            report.not_content_addressed += 1
+            return
+        base = normalize_name(str(meta.get("name") or "").strip())
+        if not name_qualifies(base, min_words=epoch.min_words):
+            return
+        resolved.append((it, base, read))
 
     def build(self, epoch: CurationEpoch) -> tuple[Snapshot, RefreshReport]:
         from .sources import ChainUnavailable   # local: sources imports PlatformItem
@@ -217,7 +375,13 @@ class RefreshJob:
         pulled: list[PlatformItem] = []
         for lister in self._listers:
             try:
+                before = len(pulled)
                 pulled.extend(lister.items())
+                listed = len(pulled) - before
+                gross = getattr(lister, "gross_total", None)
+                report.gross[lister.name] = int(gross) if gross else listed
+                self._note(f"refresh: {lister.name} listado — {listed:,} tokens"
+                           + (f" (de {int(gross):,})" if gross and gross > listed else ""))
             except Exception as e:  # noqa: BLE001
                 raise RefreshFailed(
                     f"platform {lister.name!r} unlistable "
@@ -245,33 +409,52 @@ class RefreshJob:
         # a collapsed stratum and the operator would go widen sourcing that
         # is not the problem. (Found 06/09 checking Foundation's gateway note.)
         resolved: list[tuple[PlatformItem, str, TokenRead]] = []
-        for it in prefiltered:
-            try:
-                read = self._fetch_token(it.chain, it.contract, it.token_id)
-            except ChainUnavailable:
-                report.transport += 1
-                continue
-            if read is None:
-                continue
-            meta = read.metadata
-            if not (isinstance(meta, dict) and meta.get("image")):
-                continue
-            # content-addressed, twice: the URI and the image (see class doc)
-            if content_id(read.token_uri) is None \
-                    or not uri_is_content_addressed(str(meta.get("image"))):
-                report.not_content_addressed += 1
-                continue
-            base = normalize_name(str(meta.get("name") or "").strip())
-            if not name_qualifies(base, min_words=epoch.min_words):
-                continue
-            resolved.append((it, base, read))
+        self._note(f"refresh: {len(prefiltered):,} tokens listados — a ler metadata")
+        done = 0
+        served = 0
+        # chunked: the pool never holds more than one chunk of futures, and
+        # the ceilings are checked between chunks (P1-1). The counters below
+        # are touched ONLY here, on the consuming thread — the workers
+        # return values, they never share state.
+        for start in range(0, len(prefiltered), self._chunk):
+            chunk = prefiltered[start:start + self._chunk]
+            for it, read in self._map(self._read_with_retries, chunk):
+                done += 1
+                if done % self._every == 0:
+                    self._note(f"refresh: {done:,}/{len(prefiltered):,} lidos, "
+                               f"{len(resolved):,} qualificam, "
+                               f"{report.transport:,} transporte, "
+                               f"{report.bad_read:,} ilegíveis")
+                if isinstance(read, ChainUnavailable):
+                    report.transport += 1
+                    if served == 0 and report.transport >= self._min_transport:
+                        raise RefreshFailed(
+                            f"{report.transport} metadata fetches lost to "
+                            "transport and NONE served yet — the refresh "
+                            "cannot read at all (RPC/gateway/quota); stopped "
+                            f"after {done:,} of {len(prefiltered):,}; snapshot "
+                            "NOT rebuilt; keep serving the previous one")
+                    continue
+                served += 1
+                if isinstance(read, Exception):
+                    report.bad_read += 1       # a strange token, not an outage (P1-3)
+                    continue
+                if read is None:
+                    continue
+                self._qualify(it, read, resolved, report, epoch)
+            if self._transport_ceiling_hit(report, done):
+                raise RefreshFailed(
+                    f"{report.transport} of {done} metadata fetches lost to "
+                    "transport — outage, not a smaller pool; stopped after "
+                    f"{done:,} of {len(prefiltered):,}; snapshot NOT rebuilt; "
+                    "keep serving the previous one")
+            if (report.bad_read >= self._min_transport
+                    and report.bad_read > self._max_bad_share * max(done, 1)):
+                raise RefreshFailed(
+                    f"{report.bad_read} of {done} reads unreadable (not "
+                    "transport) — a parser/shape problem, not a smaller pool; "
+                    "snapshot NOT rebuilt; keep serving the previous one")
         report.after_metadata = len(resolved)
-        if (report.transport >= self._min_transport
-                and report.transport > self._max_transport_share * max(len(prefiltered), 1)):
-            raise RefreshFailed(
-                f"{report.transport} of {len(prefiltered)} metadata fetches lost "
-                "to transport — outage, not a smaller pool; snapshot NOT "
-                "rebuilt; keep serving the previous one")
 
         # -- 3. in-pool dedupe on the CANONICAL base name: a base name seen
         # twice kills every bearer (what clues cipher must be unique) ------ #
@@ -285,10 +468,15 @@ class RefreshJob:
         # -- 4. owner is an EOA (chain call, our RPC). Global uniqueness is
         # deliberately NOT here — see the class docstring ------------------- #
         entries: list[SnapshotEntry] = []
-        for it, base, read in resolved:
+        self._note(f"refresh: {len(resolved):,} únicos no pool — a verificar donos")
+        by_key = {(it.chain, it.contract, it.token_id): (it, base, read)
+                  for it, base, read in resolved}
+        keys = list(by_key)
+        for key, eoa in self._map(
+                lambda k: self._owner_is_eoa(k[0], k[1], k[2]), keys):
+            it, base, read = by_key[key]
             meta = read.metadata
-            eoa = self._owner_is_eoa(it.chain, it.contract, it.token_id)
-            if eoa is None:
+            if isinstance(eoa, Exception) or eoa is None:
                 report.unverifiable += 1
                 continue
             if eoa is not True:

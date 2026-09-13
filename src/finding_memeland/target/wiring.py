@@ -94,6 +94,9 @@ class TargetWiring:
     scan_blocks: int
     writability_rates: dict
     uniqueness_rates: dict
+    cap_exempt: frozenset = EPOCH1_CAP_EXEMPT
+    thresholds: object = None              # snapshot.GateThresholds
+    sample_per_stratum: int = 0
     # built and tested, NOT wired into ports (decision 10/09: reveal = link only)
     fetch_artwork: Callable | None = None
     # which marketplace serves the search guard / uniqueness / chain probe
@@ -108,8 +111,9 @@ class TargetWiring:
             return None
         return stratum_gate(snap, self.writability_rates,
                             uniqueness_rates=self.uniqueness_rates,
-                            cap_exempt=EPOCH1_CAP_EXEMPT,
-                            epoch=self.epoch, now_iso=_now_iso())
+                            cap_exempt=self.cap_exempt,
+                            epoch=self.epoch, now_iso=_now_iso(),
+                            thresholds=self.thresholds)
 
     def snapshot_fingerprint(self) -> str:
         """Binds a /launch confirmation to the snapshot it was shown over:
@@ -153,7 +157,8 @@ def _media_kind(data: bytes) -> str:
 
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                  get_artwork_bytes=None, solver=None,
-                 rng: random.Random | None = None) -> TargetWiring:
+                 rng: random.Random | None = None,
+                 progress=None) -> TargetWiring:
     """Compose target mode from Settings `s` and injected clients.
 
     http_get(url, headers) -> str · http_post(url, body, headers) -> str ·
@@ -211,6 +216,18 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         return dict(cipher=cipher, read=lambda: repo.get_blob(key),
                     write=lambda payload: repo.put_blob(key, payload))
 
+    # gate numbers + cap exemption from config (defaults = ratified); an
+    # exemption naming an unknown stratum is loud, like the rate keys (P1-3)
+    try:
+        thresholds = s.target_gate_thresholds
+    except ValueError as e:                  # P1-4: inverted bands refuse at boot
+        raise RuntimeError(f"target gate config refused: {e}") from e
+    cap_exempt = s.target_cap_exempt_set
+    unknown_exempt = sorted(cap_exempt - EPOCH1_STRATA)
+    if unknown_exempt:
+        raise RuntimeError(
+            f"target_cap_exempt names strata epoch 1 cannot produce: {unknown_exempt}")
+
     snapshot_store = SnapshotStore(**store(BLOB_SNAPSHOT))
     pipeline = SnapshotPipeline(
         discovery=discovery,
@@ -223,7 +240,13 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         now_iso=_now_iso,
         writability_rates=s.target_writability_rate_map,
         uniqueness_rates=s.target_uniqueness_rate_map,
-        cap_exempt=EPOCH1_CAP_EXEMPT,
+        cap_exempt=cap_exempt,
+        thresholds=thresholds,
+        sample_per_stratum=int(s.target_sample_per_stratum),
+        workers=int(s.target_refresh_workers),
+        retries=int(s.target_refresh_retries),
+        progress=progress,
+        rng=rng,
     )
 
     # -- marketplace: search guard, uniqueness, chain probe (one key) ------- #
@@ -344,10 +367,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         snapshot_store=snapshot_store,
         writability_rates=s.target_writability_rate_map,
         uniqueness_rates=s.target_uniqueness_rate_map,
-        cap_exempt=EPOCH1_CAP_EXEMPT,
+        cap_exempt=cap_exempt,
         judge=AnthropicBatchJudge(anthropic, s.target_judge_model),
         name_is_unique=uniqueness,
-        now_iso=_now_iso, rng=rng)
+        now_iso=_now_iso, rng=rng, thresholds=thresholds)
 
     ports = TargetPorts(
         epoch=epoch,
@@ -378,6 +401,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         scan_blocks=int(s.target_scan_blocks),
                         writability_rates=s.target_writability_rate_map,
                         uniqueness_rates=s.target_uniqueness_rate_map,
+                        cap_exempt=cap_exempt, thresholds=thresholds,
+                        sample_per_stratum=int(s.target_sample_per_stratum),
                         fetch_artwork=fetch_artwork,
                         market_surface=market_surface)
 

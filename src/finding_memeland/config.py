@@ -183,6 +183,22 @@ class Settings(BaseSettings):
     target_uniqueness_rates: str = Field(default="")
     # Blocks scanned per /scan run (Alchemy free: one block per eth_getLogs).
     target_scan_blocks: int = Field(default=300)
+    # /snapshot by SAMPLING (13/09): at most this many tokens PER STRATUM,
+    # drawn uniformly, instead of the full listing (epoch 1 = ~850k tokens,
+    # 40 h and ~$46 of RPC, died to transport). 0 = full listing.
+    target_sample_per_stratum: int = Field(default=0)
+    # Refresh transport: parallel reads and retries with backoff on 429/5xx.
+    target_refresh_workers: int = Field(default=4)
+    target_refresh_retries: int = Field(default=3)
+    # Gate thresholds (snapshot.GateThresholds). Defaults = the ratified
+    # 04-05/09 numbers; set per epoch/test hunt, printed by /status so the
+    # choice is explicit. target_cap_exempt = strata the SOFT share cap
+    # does not bind (default tail2021, ratified 05/09).
+    target_gate_green_min: int = Field(default=100_000)
+    target_gate_red_max: int = Field(default=20_000)
+    target_gate_max_share: float = Field(default=0.40)
+    target_gate_hard_share: float = Field(default=0.70)
+    target_cap_exempt: str = Field(default="tail2021")
     # GENERIC read paths for the live check and the image fetch — public RPCs
     # and public IPFS gateways, NO KEY (they read the target inside its decoy
     # batch; nothing carrying our identity may read it). Comma-separated,
@@ -239,6 +255,18 @@ class Settings(BaseSettings):
     @property
     def target_ipfs_gateway_list(self) -> list[str]:
         return self._csv(self.target_ipfs_gateways)
+
+    @property
+    def target_cap_exempt_set(self) -> frozenset[str]:
+        return frozenset(self._csv(self.target_cap_exempt))
+
+    @property
+    def target_gate_thresholds(self):
+        from .target.snapshot import GateThresholds
+        return GateThresholds(green_min=int(self.target_gate_green_min),
+                              red_max=int(self.target_gate_red_max),
+                              max_share=float(self.target_gate_max_share),
+                              hard_share=float(self.target_gate_hard_share))
 
     def target_missing(self) -> list[str]:
         """What a target launch still lacks — config names only. Used by

@@ -382,13 +382,46 @@ def _age_days(built_at: str, now_iso: str) -> float | None:
         return None
 
 
+@dataclass(frozen=True)
+class GateThresholds:
+    """The gate's numbers, as ONE object so a caller cannot override half
+    of them. Defaults are the ratified 04-05/09 values; an epoch (or a
+    test hunt — Pedro, 13/09: "100.000 é excesso de zelo") may run with
+    others through config (target_gate_*), which /status prints so the
+    choice is visible, never implicit."""
+
+    green_min: int = GATE_GREEN_MIN
+    red_max: int = GATE_RED_MAX
+    max_share: float = GATE_MAX_STRATUM_SHARE
+    hard_share: float = GATE_HARD_STRATUM_SHARE
+
+    def __post_init__(self) -> None:
+        """Invariants (Opus P1-4, 13/09): with red_max ≥ green_min the GREEN
+        branch is evaluated first and a pool inside the RED band comes out
+        GREEN in silence — the only thing that can refuse a launch would
+        approve everything. Loud at construction, i.e. at boot."""
+        if not (0 < self.red_max < self.green_min):
+            raise ValueError(
+                f"gate thresholds: need 0 < red_max ({self.red_max:,}) < "
+                f"green_min ({self.green_min:,})")
+        if not (0 < self.max_share <= self.hard_share <= 1.0):
+            raise ValueError(
+                f"gate shares: need 0 < max_share ({self.max_share}) <= "
+                f"hard_share ({self.hard_share}) <= 1.0")
+
+    def describe(self) -> str:
+        return (f"green ≥{self.green_min:,} · red ≤{self.red_max:,} · "
+                f"share ≤{self.max_share:.0%} (hard {self.hard_share:.0%})")
+
+
 def stratum_gate(snapshot: Snapshot,
                  writability_rates: dict[str, float],
                  *,
                  uniqueness_rates: dict[str, float],
                  cap_exempt: frozenset[str] = frozenset(),
                  epoch: CurationEpoch | None = None,
-                 now_iso: str | None = None) -> StratumGateReport:
+                 now_iso: str | None = None,
+                 thresholds: GateThresholds | None = None) -> StratumGateReport:
     """Count the REAL pool per stratum (entries carry the platform slug the
     refresh stamped) and apply the gate: total >= GATE_GREEN_MIN, no stratum
     above GATE_MAX_STRATUM_SHARE of the effective pool. `writability_rates`
@@ -417,6 +450,7 @@ def stratum_gate(snapshot: Snapshot,
     'o risco e a defesa estão no mesmo sítio' — exempting it is Opus's own
     side-note made mechanical. Exemptions are epoch configuration, decided
     by humans, never inferred."""
+    t = thresholds or GateThresholds()
     counts: dict[str, int] = {}
     for e in snapshot.entries:
         counts[e.platform or "unknown"] = counts.get(e.platform or "unknown", 0) + 1
@@ -435,9 +469,9 @@ def stratum_gate(snapshot: Snapshot,
         full.append(StratumRow(stratum=stratum, entries=n,
                                writability_rate=w, uniqueness_rate=u,
                                effective=eff, share=share))
-        if share > GATE_HARD_STRATUM_SHARE:
-            over.append(f"{stratum} (hard {GATE_HARD_STRATUM_SHARE:.0%})")
-        elif share > GATE_MAX_STRATUM_SHARE and stratum not in cap_exempt:
+        if share > t.hard_share:
+            over.append(f"{stratum} (hard {t.hard_share:.0%})")
+        elif share > t.max_share and stratum not in cap_exempt:
             over.append(stratum)
 
     # -- the snapshot itself must be the one the selector would accept ------ #
@@ -459,27 +493,29 @@ def stratum_gate(snapshot: Snapshot,
             stale = (f"snapshot com {age:.0f}d (> {max_age}d) — refresh "
                      "antes de lançar; a janela de mutação cresce com a idade")
 
-    if total >= GATE_GREEN_MIN and not over and not stale:
+    if total >= t.green_min and not over and not stale:
         verdict, detail = "GREEN", "launchable"
-    elif total <= GATE_RED_MAX:
+    elif total <= t.red_max:
         verdict = "RED"
-        detail = (f"total <= {GATE_RED_MAX:,} — do not launch; widen "
+        detail = (f"total <= {t.red_max:,} — do not launch; widen "
                   "sourcing (never loosen quality filters)")
     elif over:
         verdict = "AMBER"
         hard_hit = any("(hard" in o for o in over)
-        cap_label = (f"HARD stratum share cap {GATE_HARD_STRATUM_SHARE:.0%}"
+        cap_label = (f"HARD stratum share cap {t.hard_share:.0%}"
                      if hard_hit else
-                     f"stratum share cap {GATE_MAX_STRATUM_SHARE:.0%}")
+                     f"stratum share cap {t.max_share:.0%}")
         detail = (f"{cap_label} exceeded by: {', '.join(over)} — widen the "
                   "OTHER strata")
     elif stale:
         verdict, detail = "AMBER", stale
     else:
         verdict = "AMBER"
-        detail = (f"total below {GATE_GREEN_MIN:,} — widen sourcing and "
+        detail = (f"total below {t.green_min:,} — widen sourcing and "
                   "re-measure before launching")
     if stale and verdict != "RED" and stale not in detail:
         detail = f"{detail}; {stale}"
+    if t != GateThresholds():
+        detail = f"{detail} [gate: {t.describe()}]"
     return StratumGateReport(rows=tuple(full), total_effective=total,
                              verdict=verdict, detail=detail)

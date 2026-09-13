@@ -377,11 +377,13 @@ class TargetHuntPreparer:
                  name_is_unique: NameIsUnique,
                  now_iso: Callable[[], str],
                  decoys: int = 7,
-                 rng: random.Random | None = None):
+                 rng: random.Random | None = None,
+                 thresholds=None):
         self._store = snapshot_store
         self._rates = dict(writability_rates)
         self._uniq_rates = dict(uniqueness_rates)
         self._cap_exempt = cap_exempt
+        self._thresholds = thresholds        # snapshot.GateThresholds | None
         self._judge = judge
         self._name_is_unique = name_is_unique
         self._now_iso = now_iso
@@ -401,7 +403,8 @@ class TargetHuntPreparer:
         gate = stratum_gate(snap, self._rates,
                             uniqueness_rates=self._uniq_rates,
                             cap_exempt=self._cap_exempt,
-                            epoch=epoch, now_iso=self._now_iso())
+                            epoch=epoch, now_iso=self._now_iso(),
+                            thresholds=self._thresholds)
         if gate.verdict != "GREEN":
             raise LaunchRefused("gate is not GREEN — launch refused\n"
                                 + gate.render())

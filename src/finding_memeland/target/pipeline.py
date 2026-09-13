@@ -19,7 +19,7 @@ Everything effectful is injected; the wiring logic tests offline.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .discovery import DiscoveryState, EraDiscovery, ScanOutcome
 from .refresh import RefreshFailed, RefreshJob
@@ -43,6 +43,7 @@ class PipelineReport:
     blocks_failed: int = 0
     scan_canary_ok: bool = True
     zero_mint_blocks: int = 0
+    gross: dict = field(default_factory=dict)   # stratum -> size as listed (diagnostic)
 
     def render(self) -> str:
         if not self.scan_canary_ok:
@@ -64,6 +65,9 @@ class PipelineReport:
             f"snapshot: {self.snapshot_size:,} entradas "
             + ("(fresco)" if self.snapshot_is_fresh
                else "(ANTERIOR — refresh falhou, ver nota)"))
+        if self.gross:
+            lines.append("bruto por estrato: "
+                         + ", ".join(f"{k}={v:,}" for k, v in sorted(self.gross.items())))
         if self.note:
             lines.append(f"nota: {self.note}")
         if self.gate is not None:
@@ -97,6 +101,12 @@ class SnapshotPipeline:
         writability_rates: dict[str, float],
         uniqueness_rates: dict[str, float],
         cap_exempt: frozenset[str],
+        thresholds=None,
+        sample_per_stratum: int = 0,
+        workers: int = 1,
+        retries: int = 0,
+        progress=None,
+        rng: random.Random | None = None,
     ):
         self._discovery = discovery
         self._dstore = discovery_store
@@ -109,6 +119,12 @@ class SnapshotPipeline:
         self._rates = dict(writability_rates)
         self._uniq_rates = dict(uniqueness_rates)
         self._cap_exempt = cap_exempt
+        self._thresholds = thresholds          # snapshot.GateThresholds | None
+        self._sample = max(0, int(sample_per_stratum))
+        self._workers = workers
+        self._retries = retries
+        self._progress = progress              # counts-only lines → operator
+        self._rng = rng
 
     def run(self, epoch: CurationEpoch, *, scan_blocks: int = 300,
             rng: random.Random | None = None) -> PipelineReport:
@@ -155,7 +171,8 @@ class SnapshotPipeline:
         note = ""
         try:
             try:
-                listers = epoch1_listers(rpcs=self._rpcs, registry=registry)
+                listers = epoch1_listers(rpcs=self._rpcs, registry=registry,
+                                         sample=self._sample, rng=self._rng)
             except Exception as e:  # noqa: BLE001 — configuração
                 raise RefreshFailed(
                     f"listers unconstructible ({type(e).__name__}: "
@@ -167,12 +184,17 @@ class SnapshotPipeline:
                 fetch_token=self._fetch_token,
                 owner_is_eoa=self._owner_is_eoa,
                 now_iso=self._now_iso,
+                workers=self._workers,
+                retries=self._retries,
+                progress=self._progress,
             )
-            snapshot, _refresh_report = job.build(epoch)
+            snapshot, refresh_report = job.build(epoch)
+            gross = dict(refresh_report.gross)
             self._sstore.save(snapshot)
         except RefreshFailed as e:
             fresh = False
             note = str(e)[:200]
+            gross = {}
             snapshot = self._sstore.load()
 
         # 4) gate por estrato — sobre o pool que REALMENTE se serve, com a
@@ -189,7 +211,8 @@ class SnapshotPipeline:
         gate = stratum_gate(snapshot, self._rates,
                             uniqueness_rates=self._uniq_rates,
                             cap_exempt=self._cap_exempt,
-                            epoch=epoch, now_iso=self._now_iso())
+                            epoch=epoch, now_iso=self._now_iso(),
+                            thresholds=self._thresholds)
         return PipelineReport(blocks_scanned=outcome.scanned,
                               registry_counts=registry.counts(),
                               snapshot_is_fresh=fresh,
@@ -197,4 +220,5 @@ class SnapshotPipeline:
                               gate=gate, note=note,
                               blocks_failed=outcome.failed,
                               scan_canary_ok=outcome.canary_ok,
-                              zero_mint_blocks=outcome.zero_mint_blocks)
+                              zero_mint_blocks=outcome.zero_mint_blocks,
+                              gross=gross)
