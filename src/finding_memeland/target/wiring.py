@@ -247,6 +247,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         retries=int(s.target_refresh_retries),
         progress=progress,
         rng=rng,
+        max_transport_share=float(s.target_refresh_max_transport_share),
     )
 
     # -- marketplace: search guard, uniqueness, chain probe (one key) ------- #

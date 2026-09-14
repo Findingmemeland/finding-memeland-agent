@@ -107,6 +107,7 @@ class SnapshotPipeline:
         retries: int = 0,
         progress=None,
         rng: random.Random | None = None,
+        max_transport_share: float = 0.02,
     ):
         self._discovery = discovery
         self._dstore = discovery_store
@@ -123,6 +124,7 @@ class SnapshotPipeline:
         self._sample = max(0, int(sample_per_stratum))
         self._workers = workers
         self._retries = retries
+        self._max_transport_share = float(max_transport_share)
         self._progress = progress              # counts-only lines → operator
         self._rng = rng
 
@@ -187,6 +189,7 @@ class SnapshotPipeline:
                 workers=self._workers,
                 retries=self._retries,
                 progress=self._progress,
+                max_transport_share=self._max_transport_share,
             )
             snapshot, refresh_report = job.build(epoch)
             gross = dict(refresh_report.gross)

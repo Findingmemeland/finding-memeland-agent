@@ -340,6 +340,33 @@ def test_thresholds_refuse_a_red_band_above_green():
     GateThresholds(green_min=2000, red_max=500, max_share=1.0, hard_share=1.0)
 
 
+def test_transport_share_is_configurable_for_sampled_mode():
+    """14/09 live: 33 of 500 reads lost (6.6%) on the public gateway, and
+    the 2% rule — written for the full listing — aborted a 1,000-token
+    sample. The share is config; the pipeline hands it to the job."""
+    from test_target_wiring import build, settings
+    w = build(settings(target_refresh_max_transport_share=0.25))
+    assert w.pipeline._max_transport_share == 0.25
+    names = {i: distinct(i) for i in range(1, 501)}
+    items = [item(i, names[i]) for i in range(1, 501)]
+    metas = {i: meta_for(names[i]) for i in range(1, 501)}
+
+    def fetch(ch, c, t):
+        if t % 15 == 0:                               # ~6.6% lost
+            raise ChainUnavailable("gateway: HTTPError")
+        return token(metas[t])
+    strict = RefreshJob(listers=(FakeLister("plat", items),), fetch_token=fetch,
+                        owner_is_eoa=lambda ch, c, t: True, now_iso=lambda: "t")
+    from finding_memeland.target.refresh import RefreshFailed
+    with pytest.raises(RefreshFailed):
+        strict.build(EPOCH)
+    lenient = RefreshJob(listers=(FakeLister("plat", items),), fetch_token=fetch,
+                         owner_is_eoa=lambda ch, c, t: True, now_iso=lambda: "t",
+                         max_transport_share=0.25)
+    snap, report = lenient.build(EPOCH)
+    assert snap.size() == 467 and report.transport == 33
+
+
 def test_launch_and_status_read_the_same_thresholds():
     from test_target_wiring import build, settings
     w = build(settings(target_gate_green_min=2000, target_gate_red_max=500))

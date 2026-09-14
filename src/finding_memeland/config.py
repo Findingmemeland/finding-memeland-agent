@@ -190,6 +190,12 @@ class Settings(BaseSettings):
     # Refresh transport: parallel reads and retries with backoff on 429/5xx.
     target_refresh_workers: int = Field(default=4)
     target_refresh_retries: int = Field(default=3)
+    # Share of metadata reads that may be lost to transport before the
+    # build aborts as an outage (default 2%, the full-listing rule). In
+    # SAMPLED mode (14/09) a public gateway drops a few percent by design;
+    # 0.25 lets a small sample through — the pool is only "honestly
+    # smaller" by that share, which a 1,000-token sample does not care about.
+    target_refresh_max_transport_share: float = Field(default=0.02)
     # Gate thresholds (snapshot.GateThresholds). Defaults = the ratified
     # 04-05/09 numbers; set per epoch/test hunt, printed by /status so the
     # choice is explicit. target_cap_exempt = strata the SOFT share cap
