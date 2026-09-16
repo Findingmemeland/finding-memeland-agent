@@ -544,6 +544,27 @@ class ContentRefused(RuntimeError):
         self.reason = reason[:160]
 
 
+def _fetch_cause(e: BaseException) -> str:
+    """A label for a failed image read — HTTP code, 'timeout' or the
+    exception type — read through the cause chain. Never a URL: the label
+    lands in the operator's refusal message."""
+    seen = 0
+    cur: BaseException | None = e
+    while cur is not None and seen < 6:
+        code = getattr(cur, "code", None)
+        if isinstance(code, int):
+            return f"HTTP {code}"
+        if isinstance(cur, TimeoutError) or "timed out" in str(cur).lower():
+            return "timeout"
+        reason = getattr(cur, "reason", None)     # urllib.error.URLError
+        if isinstance(reason, BaseException):
+            cur = reason
+        else:
+            cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return type(e).__name__
+
+
 def describe_image_batched(*, target_image_url: str,
                            decoy_image_urls: Sequence[str],
                            fetch_bytes_generic: Callable[[str], bytes | None],
@@ -551,14 +572,23 @@ def describe_image_batched(*, target_image_url: str,
                            decoys: int = 7,
                            rng: random.Random | None = None,
                            content_ok: Callable[[bytes], "bool | None"] | None = None,
-                           target_id: str = "") -> str:
+                           target_id: str = "",
+                           rounds: int = 3, pause_s: float = 10.0,
+                           sleep: Callable[[float], None] = time.sleep) -> str:
     """Fetch the target's image inside a shuffled batch of decoy images (from
     snapshot entries) through a generic public gateway, then describe ONLY
     the target's bytes with the vision callable (our own provider, our own
     key — that is fine; it is the marketplace/gateway that must not learn
-    the target). Decoy fetch results are discarded; a decoy failure is
-    noise. Raises ImageUnavailable when the target's bytes cannot be
-    fetched or the description is empty.
+    the target). Decoy fetch results are discarded. Raises ImageUnavailable
+    when the target's bytes cannot be fetched or the description is empty.
+
+    RETRY ROUNDS (Hunt #11, 16/09): the public gateway timed out on the
+    artwork twice in a row (one read, 25 s, fail-closed). Reads that failed
+    are retried for up to `rounds` passes with `pause_s` between passes —
+    EVERY failed read, decoy or target alike, whether or not the target
+    already came back: the gateway only ever sees "failed reads get
+    retried", never which one we cared about. The refusal carries the
+    MEASURED causes (HTTP code / timeout counts), never a URL.
 
     CONTENT GUARD (Opus, 06/09): text cannot see NSFW or stolen art, and
     this is the one place the target's IMAGE is already in hand, inside a
@@ -579,17 +609,37 @@ def describe_image_batched(*, target_image_url: str,
             "shrinks the anonymity set; refusing")
     batch = rng.sample(others, decoys) + [target_image_url]
     rng.shuffle(batch)
-    target_bytes: bytes | None = None
-    for url in batch:
-        try:
-            data = fetch_bytes_generic(url)
-        except Exception:  # noqa: BLE001 — a decoy's failure is noise
-            data = None
-        if url == target_image_url:
-            target_bytes = data
+    got: dict[str, bytes] = {}
+    causes: dict[str, int] = {}
+    pending = list(batch)
+    for r in range(max(1, rounds)):
+        if r:
+            sleep(pause_s)
+        still: list[str] = []
+        for url in pending:
+            try:
+                data = fetch_bytes_generic(url)
+            except Exception as e:  # noqa: BLE001 — counted, retried next round
+                causes[_fetch_cause(e)] = causes.get(_fetch_cause(e), 0) + 1
+                data = None
+            else:
+                if not data:
+                    causes["empty"] = causes.get("empty", 0) + 1
+            if data:
+                got[url] = data
+            else:
+                still.append(url)
+        pending = still
+        if not pending:
+            break
+    target_bytes = got.get(target_image_url)
     if not target_bytes:
-        raise ImageUnavailable("artwork bytes unavailable via the generic "
-                               "gateway — not launching without the art")
+        tally = ", ".join(f"{k}×{v}" for k, v in
+                          sorted(causes.items(), key=lambda kv: -kv[1])) or "none"
+        raise ImageUnavailable(
+            "artwork bytes unavailable via the generic gateway after "
+            f"{max(1, rounds)} rounds ({len(pending)} of {len(batch)} reads still "
+            f"failing; causes: {tally}) — not launching without the art")
     if content_ok is not None:
         verdict = content_ok(target_bytes)
         if verdict is None:

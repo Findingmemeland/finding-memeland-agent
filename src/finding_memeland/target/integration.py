@@ -161,7 +161,7 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
     # The content guard lives on the image pass (Opus, 06/09): a refused
     # artwork excludes its id and the draw runs again — bounded, so a pool
     # full of refusals refuses the launch instead of grinding.
-    from .clues import ContentRefused
+    from .clues import ContentRefused, ImageUnavailable
     from .hunt import LaunchRefused
     refused = 0
     while True:
@@ -169,6 +169,12 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         try:
             image_description = ports.describe_image(sealed)
             break
+        except ImageUnavailable as e:
+            # Hunt #11 (16/09): this surfaced as "HUNT DIED … players may be
+            # mid-game" — nothing had been posted or written yet (the hunt
+            # row is created BELOW). It is a refusal, and the operator reads
+            # the measured cause. `from None`: the message carries no id.
+            raise LaunchRefused(f"artwork unreadable — {e}") from None
         except ContentRefused as e:
             refused += 1
             exclude = exclude | frozenset({e.target_id})

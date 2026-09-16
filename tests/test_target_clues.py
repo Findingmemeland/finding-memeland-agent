@@ -119,11 +119,12 @@ def test_describe_image_batched_decoy_failure_is_noise_target_failure_is_not():
     assert describe_image_batched(
         target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1", "ipfs://d2"],
         fetch_bytes_generic=fetch, describe=lambda b: "fine", decoys=2,
-        rng=random.Random(0)) == "fine"
+        rng=random.Random(0), pause_s=0.0) == "fine"
     with pytest.raises(ImageUnavailable):
         describe_image_batched(
             target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1"],
-            fetch_bytes_generic=lambda u: None, describe=lambda b: "fine", decoys=1)
+            fetch_bytes_generic=lambda u: None, describe=lambda b: "fine", decoys=1,
+            pause_s=0.0)
     with pytest.raises(ImageUnavailable):
         describe_image_batched(
             target_image_url="ipfs://target", decoy_image_urls=[],
@@ -825,3 +826,62 @@ def test_exhaustion_log_withholds_the_reasons_in_target_mode(caplog):
             e.next_clue(ctx(), 1, [])
     errs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
     assert errs and all("withheld" in m and "blockchain" not in m for m in errs)
+
+
+def test_image_batch_retries_every_failed_read_symmetrically_with_a_pause():
+    """Hunt #11 (16/09): the public gateway timed out on the artwork twice —
+    one read, fail-closed. Failed reads now get up to `rounds` passes with a
+    pause between them, and the retry set is EVERY failure (decoys included,
+    even after the target came back), so the gateway never learns which
+    read mattered. Here the target fails once and a decoy fails twice."""
+    calls: dict[str, int] = {}
+    slept: list[float] = []
+
+    def fetch(url):
+        n = calls[url] = calls.get(url, 0) + 1
+        if url == "ipfs://target" and n < 2:
+            raise TimeoutError("timed out")
+        if url == "ipfs://d1" and n < 3:
+            raise TimeoutError("timed out")
+        return b"bytes"
+
+    text = describe_image_batched(
+        target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1", "ipfs://d2"],
+        fetch_bytes_generic=fetch, describe=lambda b: "fine", decoys=2,
+        rng=random.Random(0), rounds=3, pause_s=7.0, sleep=slept.append)
+    assert text == "fine"
+    assert calls == {"ipfs://target": 2, "ipfs://d1": 3, "ipfs://d2": 1}
+    assert slept == [7.0, 7.0]                       # one pause per extra round
+
+
+def test_image_batch_refusal_names_measured_causes_never_a_url():
+    """After the last round the refusal says how many reads still fail and
+    why (HTTP code / timeout counts), so the operator reads the gateway's
+    behaviour — and never a URL, which would be the target's or a decoy's."""
+    import urllib.error
+
+    def fetch(url):
+        if url == "ipfs://target":
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    slept: list[float] = []
+    with pytest.raises(ImageUnavailable) as e:
+        describe_image_batched(
+            target_image_url="ipfs://target", decoy_image_urls=["ipfs://d1"],
+            fetch_bytes_generic=fetch, describe=lambda b: "fine", decoys=1,
+            rng=random.Random(0), rounds=2, pause_s=1.0, sleep=slept.append)
+    msg = str(e.value)
+    assert "after 2 rounds" in msg and "2 of 2 reads still failing" in msg
+    assert "HTTP 429×2" in msg and "timeout×2" in msg
+    assert "ipfs://" not in msg and "target" not in msg and "d1" not in msg
+    assert slept == [1.0]
+
+
+def test_image_batch_default_is_three_rounds_and_a_real_pause():
+    """The production defaults are what the doctrine promises: three passes,
+    ten seconds apart, through the same gateway."""
+    import inspect
+    sig = inspect.signature(describe_image_batched)
+    assert sig.parameters["rounds"].default == 3
+    assert sig.parameters["pause_s"].default == 10.0

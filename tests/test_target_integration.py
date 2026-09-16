@@ -79,6 +79,28 @@ def test_content_guard_refusal_redraws_with_the_id_excluded_and_is_bounded():
     assert "content guard refused 3" in str(e.value)
 
 
+def test_unreadable_artwork_is_a_launch_refusal_with_no_row_and_the_cause():
+    """Hunt #11 (16/09): the image batch raised ImageUnavailable and the
+    thread's last net reported "HUNT DIED … players may be mid-game" —
+    false: the hunt row is created AFTER the image pass, nothing was
+    posted. It is a LaunchRefused now, with the batch's measured cause
+    and no id, and the repo stays empty."""
+    from finding_memeland.target.clues import ImageUnavailable
+    from finding_memeland.target.hunt import LaunchRefused
+    w = World()
+
+    def unreadable(sealed):
+        raise ImageUnavailable("artwork bytes unavailable via the generic gateway "
+                               "after 3 rounds (1 of 8 reads still failing; "
+                               "causes: timeout×3) — not launching without the art")
+    w.ports.describe_image = unreadable
+    with pytest.raises(LaunchRefused) as e:
+        w.orch._prepare(200)
+    assert "artwork unreadable" in str(e.value) and "timeout×3" in str(e.value)
+    assert e.value.__cause__ is None                       # from None
+    assert not w.rig.repo.hunts and not w.rig.publisher.posts
+
+
 def test_gateway_outage_at_void_time_is_printed_as_ours_never_as_a_burn():
     """P0 (auditoria 09/09): três coisas somavam-se — live_hash None para
     burn E para gateway em baixo, ipfs.io morto por omissão, e o template a
@@ -668,3 +690,17 @@ def test_r9_credit_lookup_has_a_deadline(monkeypatch):
     assert integ.resolve_credit(w.orch, hunt) == ""
     assert time.monotonic() - t0 < 1.5
     assert any("credit lookup failed" in m and "TimeoutError" in m for m in w.rig.notifier.messages)
+
+
+def test_main_hunt_thread_reports_a_launch_refusal_not_a_death():
+    """The hunt thread's last net in main.py prints "HUNT DIED … intervene
+    NOW" for anything unclassified. A LaunchRefused raised at prepare must
+    be caught BEFORE that net (nothing posted, nothing written). main.py
+    needs live clients to build, so the source is pinned statically."""
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "src" / "finding_memeland" / "main.py"
+    text = src.read_text()
+    refused = text.index("except LaunchRefused as e:")
+    died = text.index("HUNT DIED with an unhandled error")
+    assert refused < died
+    assert "nothing was posted, nothing" in text[refused:died]

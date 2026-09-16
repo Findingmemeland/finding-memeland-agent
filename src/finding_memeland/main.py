@@ -36,13 +36,24 @@ _BROWSER_UA = (
 )
 
 
-def _http_get_bytes(url: str, headers: dict | None = None) -> bytes:
+def _http_get_bytes(url: str, headers: dict | None = None, *,
+                    timeout: float = 25) -> bytes:
     import urllib.request
 
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
-    with urllib.request.urlopen(req, timeout=25) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+# Artwork bytes (the image batch at prepare, the reveal's picture): a public
+# gateway serving a cold multi-MB file needs more than the 25 s that metadata
+# JSON gets — Hunt #11 died twice on that timeout (16/09).
+IMAGE_FETCH_TIMEOUT_S = 60
+
+
+def _http_get_image_bytes(url: str, headers: dict | None = None) -> bytes:
+    return _http_get_bytes(url, headers, timeout=IMAGE_FETCH_TIMEOUT_S)
 
 
 def _http_get(url: str, headers: dict | None = None) -> str:
@@ -337,7 +348,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         try:
             target_wiring = build_target(
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
-                http_post=_http_post, http_get_bytes=_http_get_bytes,
+                http_post=_http_post, http_get_bytes=_http_get_image_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
                 progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),
             )
@@ -691,6 +702,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             # Last line of defence: the loop itself survives transient errors,
             # but if anything DOES escape (bug, unrecoverable failure), the
             # operator must hear about it on Telegram — never a silent death.
+            from .target.hunt import LaunchRefused
             from .target.integration import GoLiveRefused
             try:
                 orchestrator.run_hunt(
@@ -702,6 +714,13 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 # clue 1 never came out: nothing posted, no prize moved — the
                 # operator already got the specific reason from the orchestrator
                 notifier.notify(f"launch refused ({e}) — nothing was posted.")
+            except LaunchRefused as e:
+                # Refused at PREPARE (gate, decoys, artwork unreadable): no hunt
+                # row, nothing posted. Its messages are written leak-free
+                # (counts and causes, never a name or id) — Hunt #11 (16/09)
+                # saw this as "HUNT DIED … players mid-game", which was false.
+                notifier.notify(f"⛔ launch refused — nothing was posted, nothing "
+                                f"written. {e}")
             except Exception as e:  # noqa: BLE001
                 import traceback
                 import uuid

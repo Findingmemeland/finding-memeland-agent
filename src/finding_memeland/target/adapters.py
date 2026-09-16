@@ -608,17 +608,17 @@ class GenericMetadata:
 
     def fetch_bytes(self, url: str) -> bytes | None:
         """Image bytes via the batch's gateway (ipfs://… rewritten; plain
-        https fetched as-is). Outside a batch: refused, like reads."""
+        https fetched as-is). Outside a batch: refused, like reads. A
+        transport failure PROPAGATES (16/09): the image batch counts the
+        cause (HTTP code / timeout) and retries the read in its next round —
+        swallowing it here left the refusal saying only "unavailable"."""
         if self._current is None:
             raise RuntimeError("generic fetch outside a batch")
         p = self._current[0]
         target = gateway_url(url, p.gateway)
         if target is None:
             return None
-        try:
-            return self._get_bytes(target, {})
-        except Exception:  # noqa: BLE001 — the image batch treats None as miss
-            return None
+        return self._get_bytes(target, {})
 
 
 class RotatingLiveCheck:
