@@ -53,6 +53,13 @@ class MarketSearch(Protocol):
 
     def item_ids(self, text: str, *, chain: str) -> set[str]: ...
 
+    # The marketplace's OWN cap on a query, in characters; 0 = none.
+    # MEASURED 17/09: OpenSea answers `{"errors": ["Query must not exceed
+    # 100 characters"]}` with an HTTP 400. The limit belongs to the
+    # adapter because it is the marketplace's; what to DO about it belongs
+    # to the guard, because it is a question about the clue.
+    max_query_chars: int
+
 
 @dataclass(frozen=True)
 class SearchGuardVerdict:
@@ -106,7 +113,7 @@ class ClueSearchGuard:
 
         # -- 1. canary: can this index see the target at all? ------------- #
         try:
-            seen = self._search_with_retries(target_name_onchain, chain)
+            seen = self._search_all(target_name_onchain, chain)
         except _Unverifiable as e:
             return SearchGuardVerdict(ok=False, found=None, detail=str(e))
         if want not in seen:
@@ -120,7 +127,7 @@ class ClueSearchGuard:
 
         # -- 2. the clue itself ------------------------------------------- #
         try:
-            ids = self._search_with_retries(clue_text, chain)
+            ids = self._search_all(clue_text, chain)
         except _Unverifiable as e:
             return SearchGuardVerdict(ok=False, found=None, detail=str(e))
         if want in ids:
@@ -131,6 +138,36 @@ class ClueSearchGuard:
         return SearchGuardVerdict(
             ok=True, found=False,
             detail=f"canary ok; target absent from {len(ids)} search results")
+
+    def _search_all(self, text: str, chain: str) -> set[str]:
+        """The WHOLE clue, tested — in as many queries as the marketplace's
+        limit forces.
+
+        THE BUG THIS EXISTS FOR (measured 17/09): OpenSea rejects any query
+        over 100 characters with an HTTP 400. Every clue is longer than
+        that. So every clue-phase check 400ed, every 400 read as "could not
+        verify", and the guard has been fail-closed — holding hunts — since
+        OpenSea became the surface on 10/09. The canary never showed it: a
+        piece NAME is two or three words and always fit.
+
+        Truncating to 100 would have been one line and a silent weakening
+        of a guard: the untested tail is exactly where a writer puts the
+        literal description. Keyword extraction is the other easy answer
+        and the file's first rule forbids it — we test the artefact the
+        public would see, not our summary of it.
+
+        So the clue is cut into OVERLAPPING windows on word boundaries and
+        every one is searched; the target surfacing in ANY of them rejects
+        the clue. The overlap is what keeps a phrase that straddles a cut
+        from escaping. Cost: two or three queries instead of one, against a
+        120/minute quota."""
+        limit = int(getattr(self._search, "max_query_chars", 0) or 0)
+        if not limit or len(text) <= limit:
+            return self._search_with_retries(text, chain)
+        out: set[str] = set()
+        for window in _windows(text, limit):
+            out |= self._search_with_retries(window, chain)
+        return out
 
     def _search_with_retries(self, text: str, chain: str) -> set[str]:
         last_err = "unknown"
@@ -145,6 +182,33 @@ class ClueSearchGuard:
         raise _Unverifiable(
             f"unverifiable after {self._retries + 1} attempts ({last_err}) "
             "— fail-closed, piece not publishable")
+
+
+def _windows(text: str, limit: int, *, overlap_words: int = 4) -> list[str]:
+    """`text` cut into pieces of at most `limit` characters, on word
+    boundaries, each sharing its last few words with the next.
+
+    The overlap is the point: a cut between "the keeper's" and "last light"
+    would let the phrase through untested, and a phrase is exactly what a
+    marketplace index matches. A single word longer than the limit is
+    truncated — nothing else can be done with it, and it is not a phrase."""
+    words = text.split()
+    if not words:
+        return []
+    out: list[str] = []
+    cur: list[str] = []
+    for word in words:
+        word = word[:limit]
+        candidate = " ".join(cur + [word])
+        if cur and len(candidate) > limit:
+            out.append(" ".join(cur))
+            cur = cur[-overlap_words:] if len(cur) > overlap_words else cur[:]
+            while cur and len(" ".join(cur + [word])) > limit:
+                cur.pop(0)
+        cur.append(word)
+    if cur:
+        out.append(" ".join(cur))
+    return out
 
 
 def _canonical(item_id: str) -> str:
@@ -172,6 +236,8 @@ class RaribleSearch:
     upper-cased chain slug ('ETHEREUM', 'BASE', 'POLYGON').
 
     `http_post(url, body: bytes, headers: dict) -> str` is injected."""
+
+    max_query_chars = 0          # none measured on this surface
 
     def __init__(self, *, http_post, api_key: str,
                  base_url: str = "https://api.rarible.org/v0.1",
@@ -250,6 +316,11 @@ class OpenSeaSearch:
 
     `http_get(url, headers: dict) -> str` is injected; the process-wide
     transport already sends a browser User-Agent (Cloudflare 403s without)."""
+
+    # MEASURED 17/09 against the live API, and the reason /prepare could
+    # never write a Clue 1: {"errors": ["Query must not exceed 100
+    # characters"]}, HTTP 400, deterministic.
+    max_query_chars = 100
 
     def __init__(self, *, http_get, api_key: str,
                  base_url: str = "https://api.opensea.io/api/v2",

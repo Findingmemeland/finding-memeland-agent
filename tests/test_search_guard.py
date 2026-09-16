@@ -228,3 +228,90 @@ def test_a_failed_canary_is_flagged_blind_and_a_dead_market_is_not():
 class _Boom:
     def item_ids(self, text, *, chain):
         raise TimeoutError("marketplace down")
+
+
+# --------------------------------------------------------------------------- #
+# The 100-character cap (measured 17/09) — the bug that silenced the guard    #
+# --------------------------------------------------------------------------- #
+
+CLUE = ("It sits where the water gives up its salt and the light gives up its "
+        "watch, a place named twice over for what it keeps and what it cannot "
+        "hold, and the second word is the one that remembers the first")
+
+
+class _Capped:
+    """A marketplace that refuses any query over 100 characters — which is
+    what OpenSea actually does: HTTP 400, {"errors": ["Query must not
+    exceed 100 characters"]}. Every clue is longer than that."""
+
+    max_query_chars = 100
+
+    def __init__(self, hits=None):
+        self.hits = hits or {}
+        self.queries: list[str] = []
+
+    def item_ids(self, text, *, chain):
+        if self.max_query_chars and len(text) > self.max_query_chars:
+            raise ValueError("HTTP Error 400: Query must not exceed 100 characters")
+        self.queries.append(text)
+        return {i for phrase, ids in self.hits.items()
+                if phrase in text.lower() for i in ids}
+
+
+def test_a_long_clue_is_tested_whole_instead_of_400ing():
+    """THE BUG: OpenSea caps a query at 100 chars, every clue is longer,
+    so every clue-phase check 400ed and read as "could not verify". The
+    guard has been fail-closed — holding hunts — since OpenSea became the
+    surface on 10/09. The canary never showed it: a piece NAME is two or
+    three words and always fit."""
+    m = _Capped({"salt harbor": {TARGET}})
+    v = check(guard(search=m), CLUE)
+    assert v.ok is True and v.found is False
+    assert all(len(q) <= 100 for q in m.queries)
+    assert len(m.queries) > 2, "the clue went out in one piece — it cannot have"
+
+
+def test_every_word_of_the_clue_reaches_the_marketplace():
+    """Truncating to 100 would have been one line and a silent weakening:
+    the untested tail is exactly where a writer puts the literal
+    description of the picture."""
+    m = _Capped({"salt harbor": {TARGET}})
+    check(guard(search=m), CLUE)
+    sent = {w for q in m.queries[1:] for w in q.split()}   # [0] is the canary
+    assert set(CLUE.split()) <= sent
+
+
+def test_the_target_surfacing_in_ANY_window_rejects_the_clue():
+    """A phrase that only appears in the tail must still reject. Otherwise
+    the windowing would be the truncation it replaced."""
+    tail = "remembers the first"
+    m = _Capped({"salt harbor": {TARGET}, tail: {TARGET}})
+    v = check(guard(search=m), CLUE)
+    assert v.ok is False and v.found is True
+
+
+def test_windows_overlap_so_a_phrase_across_a_cut_is_still_tested():
+    """A cut between "the keeper's" and "last light" would let the phrase
+    through untested — and a phrase is exactly what an index matches."""
+    from finding_memeland.target.search_guard import _windows
+    ws = _windows(CLUE, 100)
+    assert all(len(w) <= 100 for w in ws)
+    for a, b in zip(ws, ws[1:]):
+        assert set(a.split()) & set(b.split()), "windows do not overlap"
+
+
+def test_a_surface_without_a_cap_still_sends_the_clue_in_one_piece():
+    """Rarible has no measured cap. The windowing is the marketplace's
+    limit, not our policy — where there is no limit there is no splitting,
+    and the guard tests the exact artefact the public would see."""
+    m = _Capped({"salt harbor": {TARGET}})
+    m.max_query_chars = 0
+    check(guard(search=m), CLUE)
+    assert CLUE in m.queries
+
+
+def test_windows_handle_the_degenerate_shapes():
+    from finding_memeland.target.search_guard import _windows
+    assert _windows("", 100) == []
+    assert _windows("A short name", 100) == ["A short name"]
+    assert [len(w) for w in _windows("x" * 250, 100)] == [100]
