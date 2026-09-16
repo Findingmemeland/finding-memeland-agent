@@ -55,7 +55,10 @@ from .hunt import (
     TargetHuntPreparer,
 )
 from .integration import ArtworkUnusable, TargetPorts
-from .prepare import SOURCES, Larder, LarderStore, TargetFinder
+from .prepare import (
+    PREPARED_TTL_HOURS, SOURCES, Larder, LarderStore, Prepared,
+    PreparedStore, TargetFinder, TargetPreparer as LarderPreparer, used_hmac,
+)
 from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import (
     ClueSearchGuard,
@@ -79,11 +82,13 @@ BLOB_DISCOVERY = "target:discovery"
 BLOB_REGISTRY = "target:registry"
 BLOB_SNAPSHOT = "target:snapshot"
 BLOB_LARDER = "target:larder"
+BLOB_PREPARED = "target:prepared"
 PROBE_BYTES = 4096
 # 8 s, measured 17/09: of 282 s over 20 draws, ~100 went to gateways that were
 # never going to answer. A ranged 4 KB read that has not arrived in 8 s is not
 # arriving, and a dead pin gets the same verdict either way.
 PROBE_TIMEOUT_S = 8.0
+MAX_IMAGE_BYTES = 24 * 1024 * 1024   # vision's ceiling; 171 MB measured 16/09
 MAX_ARTWORK_BYTES = 5 * 1024 * 1024      # X image limit; bigger → link only
 ARTWORK_TIMEOUT_S = 10                   # a winner is waiting; the picture is optional
 
@@ -116,6 +121,54 @@ class TargetWiring:
     # THE NEXT THIRTY ANSWERS — encrypted, never rendered, counts only.
     finder: TargetFinder | None = None
     larder_store: LarderStore | None = None
+    prepared_store: PreparedStore | None = None
+    larder_preparer: object = None            # prepare.TargetPreparer
+    pool_key: str = ""
+
+    # -- the prepared hunt: read from the DATABASE, never from memory ------ #
+
+    def prepared(self) -> Prepared | None:
+        """What `/launch` will publish. A restart between the day before and
+        the hour must not lose it (Fable, 17/09)."""
+        if self.prepared_store is None:
+            return None
+        return self.prepared_store.load()
+
+    def prepared_line(self) -> str:
+        """One /status line — times and counts, never the target."""
+        try:
+            p = self.prepared()
+        except Exception as e:  # noqa: BLE001 — counts only
+            return f"preparado: ilegível ({type(e).__name__}) — corre /prepare"
+        if p is None:
+            return "preparado: nenhum — corre /prepare"
+        left = self.prepared_hours_left(p)
+        return (f"preparado às {p.prepared_at[11:16] or '??:??'} UTC "
+                f"({p.attempts} tentativa(s)) · "
+                + (f"válido mais {left:.0f}h" if left > 0
+                   else "EXPIRADO — corre /prepare outra vez"))
+
+    @staticmethod
+    def prepared_hours_left(p: Prepared) -> float:
+        from datetime import datetime, timezone
+        try:
+            made = datetime.fromisoformat(p.prepared_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError, TypeError):
+            return -1.0        # unreadable stamp counts as expired (R8)
+        age = (datetime.now(timezone.utc) - made).total_seconds() / 3600
+        return PREPARED_TTL_HOURS - age
+
+    def prepare(self) -> str:
+        """Draw one from the larder, re-verify it, write Clue 1, seal it to
+        the database. Replaces the whole snapshot+gate path."""
+        if self.larder_preparer is None or self.larder_store is None:
+            return "preparação não configurada"
+        larder: Larder = self.larder_store.load()
+        prepared, larder = self.larder_preparer.prepare(larder)
+        self.larder_store.save(larder)          # the target is spent
+        self.prepared_store.save(prepared)
+        return (f"prepare: alvo selado à {prepared.attempts}.ª tentativa · "
+                f"despensa {larder.size()} · válido {PREPARED_TTL_HOURS}h")
 
     def larder_size(self) -> int:
         if self.larder_store is None:
@@ -461,8 +514,36 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
         rng=rng, now_iso=_now_iso)
 
-    return TargetWiring(finder=finder,
-                        larder_store=LarderStore(**store(BLOB_LARDER)),
+    larder_store = LarderStore(**store(BLOB_LARDER))
+    def fetch_artwork_once(uri: str) -> bytes | None:
+        """The FULL artwork, once, for the accepted candidate — the only
+        place a whole image is downloaded. Capped: vision cannot use more,
+        and 171 MB was measured in the wild (16/09)."""
+        url = gateway_url(uri, s.target_ipfs_gateway)
+        if url is None:
+            return None
+        data = get_art(url, {})
+        if not data or len(data) > MAX_IMAGE_BYTES or sniff_media_type(data) is None:
+            return None
+        return data
+
+    def _clue_one_not_wired(_target, _description):
+        # The clue engine lands with the /launch commit. Raising here means
+        # a premature /prepare refuses loudly instead of sealing a hunt with
+        # no Clue 1 — the kind of half-built path that killed 16/09.
+        raise RuntimeError("clue engine not wired into /prepare yet")
+
+    larder_preparer = LarderPreparer(
+        finder=finder, fetch_image=fetch_artwork_once, describe=vision,
+        write_clue_one=_clue_one_not_wired,
+        epoch_id=s.target_epoch_id, key=s.target_pool_key,
+        used_hmacs=lambda: repo.used_target_hmacs(),
+        now_iso=_now_iso, rng=rng)
+
+    return TargetWiring(finder=finder, larder_store=larder_store,
+                        prepared_store=PreparedStore(**store(BLOB_PREPARED)),
+                        larder_preparer=larder_preparer,
+                        pool_key=s.target_pool_key,
                         ports=ports, pipeline=pipeline, epoch=epoch,
                         snapshot_store=snapshot_store,
                         scan_blocks=int(s.target_scan_blocks),

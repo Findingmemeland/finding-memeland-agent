@@ -95,6 +95,23 @@ class Repo:
         return int(top or 0) + 1
 
     # --- target hunts (Option A, soldadura 5/6) ---
+    def used_target_hmacs(self, n: int = 500) -> list[str]:
+        """Keyed fingerprints of every target this project has already used.
+
+        The larder remembers what it spent, but a blob is MUTABLE: restore a
+        backup from before a hunt and a target that was already named in a
+        reveal comes back to life. The hunt table only ever GROWS, so it is
+        the authority (Fable, 17/09). The column holds an HMAC, never an id
+        — a plain hash would let anyone enumerate the sources and read every
+        past target off this table."""
+        resp = (
+            self._db.table("hunts").select("target_used_hmac")
+            .not_.is_("target_used_hmac", "null")
+            .order("id", desc=True).limit(n).execute()
+        )
+        return [str(r["target_used_hmac"]) for r in (resp.data or [])
+                if r.get("target_used_hmac")]
+
     def recent_target_voids(self, n: int = 10) -> list[str]:
         """Target ids of hunts voided over the target's mutation/burn,
         newest first — the next prepare EXCLUDES them (relaunch must never

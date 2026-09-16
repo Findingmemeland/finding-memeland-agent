@@ -336,3 +336,12 @@ create table if not exists target_blobs (
   payload     text not null,
   updated_at  timestamptz not null default now()
 );
+
+-- 17/09: the larder. `target_used_hmac` is HMAC-SHA256(chain:contract:tokenId)
+-- keyed with TARGET_POOL_KEY — the hunt table is the authority on what has
+-- already been used, because a restored larder backup is not. Keyed, not
+-- hashed: a bare digest would let anyone enumerate the sources and read every
+-- past target off this column (and confirm a guess about a live hunt).
+alter table hunts add column if not exists target_used_hmac text;
+create index if not exists hunts_target_used_hmac_idx
+    on hunts (target_used_hmac) where target_used_hmac is not null;
