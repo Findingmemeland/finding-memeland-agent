@@ -569,6 +569,10 @@ class GenericMetadata:
         self._current: tuple[Provider, Erc721Metadata] | None = None
         self.provider_log: list[str] = []
 
+    @property
+    def providers(self) -> list:
+        return list(self._providers)
+
     def _next(self) -> Provider:
         with self._lock:
             p = self._providers[self._i % len(self._providers)]
@@ -622,19 +626,44 @@ class GenericMetadata:
 
 
 class RotatingLiveCheck:
-    """`LiveCheck` whose 8 reads share ONE provider (the batch), rotating
-    between checks — RPC only (tokenURI + ownerOf), CID comparison, no
-    gateway. Built here so `TargetPorts.live_check` stays the
-    `.check(sealed)` shape the integration already tests."""
+    """The live check: ONE RPC read of the target (tokenURI + ownerOf, CID
+    comparison, no gateway), with FAILOVER across the public providers.
+
+    Why failover is now allowed — and required (Fable, 17/09). The old rule
+    said "never change provider mid-batch", because switching split the
+    batch of 8 across providers and broke the anonymity set. With the
+    decoys gone there is no batch to split, so the rule has no subject
+    left — and what it was costing is real: one public RPC having a bad
+    minute on clue 3 meant `unavailable → hold → no clue`, a hunt stopping
+    for a reason that has nothing to do with the target. That is the same
+    class of failure the larder work just removed twice.
+
+    So: try the next provider in the rotation before giving up. HOLD is
+    reserved for ALL of them being down, which is the only case where we
+    genuinely cannot know.
+
+    THE ROTATION IS THE SECURITY PROPERTY, NOT AN OPTIMISATION. Reading the
+    same token every clue from ONE provider hands that provider the answer
+    to every hunt, in real time; spread across five, no one of them sees a
+    series. Do not collapse this to a single provider, and above all not to
+    our keyed RPC."""
 
     def __init__(self, *, generic: GenericMetadata, rng=None):
         from .hunt import LiveCheck
         self._generic = generic
-        self._inner = LiveCheck(read_live=generic.read_live, rng=rng)
+        self._rng = rng
 
     def check(self, sealed):
-        with self._generic.batch():
-            return self._inner.check(sealed)
+        from .hunt import LIVE_UNAVAILABLE, LiveCheck
+        last = None
+        for _ in range(max(1, len(self._generic.providers))):
+            with self._generic.batch() as read:
+                verdict = LiveCheck(read_live=self._generic.read_live,
+                                    rng=self._rng).check(sealed)
+            if verdict.status != LIVE_UNAVAILABLE:
+                return verdict          # measured: intact, mutated or burned
+            last = verdict              # this provider could not answer
+        return last                     # all of them down: hold (R8)
 
 
 # --------------------------------------------------------------------------- #

@@ -354,9 +354,19 @@ def test_generic_reads_outside_a_batch_are_refused():
         assert generic.fetch_bytes("ipfs://Qi0").startswith(b"\x89PNG")
 
 
-def test_no_failover_inside_a_batch_provider_down_is_unavailable():
-    """Um fornecedor em baixo NÃO passa o lote para outro (partiria o lote):
-    a leitura do alvo é UNAVAILABLE (→ hold), e o lote seguinte roda."""
+def test_the_live_check_fails_over_and_holds_only_when_all_are_down():
+    """THE OPPOSITE of the old rule, deliberately (Fable, 17/09).
+
+    "Never change provider mid-batch" existed because switching split the
+    batch of 8 across providers. With the decoys gone there is no batch to
+    split, and what the rule cost was real: one public RPC having a bad
+    minute on clue 3 meant unavailable → hold → no clue — a hunt stopping
+    for a reason that has nothing to do with the target.
+
+    So a provider that is down moves to the next one; HOLD is reserved for
+    all of them being down, which is the only case where we cannot know.
+    The ROTATION stays, and it is the security property: reading the same
+    token every clue from ONE provider hands it the answer to every hunt."""
     sealed, uris, metas = sealed_with()
     tr = Transport(uris, metas)
     down = {"rpc0"}
@@ -365,12 +375,16 @@ def test_no_failover_inside_a_batch_provider_down_is_unavailable():
         if url.split("//")[1].split("/")[0] in down:
             raise ConnectionError("down")
         return tr.post(url, body, headers)
+
     generic = GenericMetadata(providers=_providers(2), http_get=tr.get,
                               http_post=post, http_get_bytes=tr.get_bytes)
     lc = RotatingLiveCheck(generic=generic, rng=random.Random(0))
-    assert lc.check(sealed).status == LIVE_UNAVAILABLE      # p0 down
-    assert lc.check(sealed).status == LIVE_INTACT           # p1 serves the next batch
-    assert generic.provider_log == ["p0", "p1"]
+    # p0 is down: the clue still goes out, served by p1
+    assert lc.check(sealed).status == LIVE_INTACT
+    assert generic.provider_log[:2] == ["p0", "p1"]
+
+    down |= {"rpc1"}
+    assert lc.check(sealed).status == LIVE_UNAVAILABLE       # all down → hold
 
 
 def test_image_batch_shares_the_live_check_provider_rule():

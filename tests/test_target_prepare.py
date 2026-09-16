@@ -37,7 +37,7 @@ class World:
         self._unique = unique
         self._eoa = eoa
         self.probes: list[str] = []
-        self.batches: list[list[str]] = []
+        self.full_reads: list[str] = []
         self.paid_calls = 0
 
     def total_supply(self, chain, contract):
@@ -61,9 +61,9 @@ class World:
             return None
         return PNG, self.size_of.get(url, 4096)
 
-    def fetch_images(self, urls):
-        self.batches.append(list(urls))
-        return {u: (None if u in self.dead else PNG) for u in urls}
+    def fetch_image(self, url):
+        self.full_reads.append(url)
+        return None if url in self.dead else PNG
 
     def owner_is_eoa(self, chain, contract, token_id):
         return self._eoa
@@ -90,7 +90,7 @@ def _finder(world, **kw):
 
 def _preparer(world, finder, **kw):
     return TargetPreparer(
-        finder=finder, fetch_images=world.fetch_images,
+        finder=finder, fetch_image=world.fetch_image,
         describe=world.describe, write_clue_one=world.write_clue_one,
         rng=random.Random(11), **kw)
 
@@ -202,39 +202,29 @@ def test_prepare_re_verifies_and_drops_a_candidate_that_died_in_the_larder():
     assert prepared.target.image not in world.dead
 
 
-def test_the_full_image_read_is_padded_with_four_decoys():
+def test_the_artwork_is_read_once_and_only_the_target():
+    """No decoys anywhere (17/09). What hid the target from a provider was
+    never the padding — it is the ROTATION on the live check, which four
+    decoys could never match in scale. Here: one read, the target's."""
     world = World()
     finder = _finder(world)
     larder = Larder()
-    finder.fill(larder, want=8, max_draws=200)
-    _preparer(world, finder, decoys=4).prepare(larder)
-    assert world.batches and all(len(b) == 5 for b in world.batches)
+    finder.fill(larder, want=4, max_draws=120)
+    prepared, _ = _preparer(world, finder).prepare(larder)
+    assert world.full_reads == [prepared.target.image]
 
 
-def test_the_decoys_come_from_the_larder_so_the_fill_mixing_survives():
-    """Fable, 17/09: on fill day the target hides among ~150 CIDs. If the
-    day-before read touches ONE CID, the intersection of the two days has a
-    single element — the target. Larder members were read on fill day; fresh
-    draws were not."""
+def test_a_small_larder_still_prepares_a_hunt():
+    """The floor of five went away with the decoys: the critical path can no
+    longer refuse for a reason that has nothing to do with the target — the
+    failure that lost draw 5 of the 16/09 live run."""
     world = World()
     finder = _finder(world)
     larder = Larder()
-    finder.fill(larder, want=8, max_draws=200)
-    in_larder = {c.image for c in larder.candidates}
-    prepared, _ = _preparer(world, finder, decoys=4).prepare(larder)
-    assert len(world.batches[-1]) == 5
-    assert set(world.batches[-1]) <= in_larder
-    assert all(d.image in in_larder for d in prepared.decoys)
-
-
-def test_a_larder_too_small_refuses_rather_than_reading_the_target_alone():
-    world = World()
-    finder = _finder(world)
-    larder = Larder()
-    finder.fill(larder, want=3, max_draws=80)       # 3 < target + 4 decoys
-    with pytest.raises(PrepareRefused) as e:
-        _preparer(world, finder, decoys=4).prepare(larder)
-    assert "fill" in str(e.value).lower()
+    finder.fill(larder, want=1, max_draws=40)
+    assert larder.size() == 1
+    prepared, larder = _preparer(world, finder).prepare(larder)
+    assert prepared.target.name_onchain and larder.size() == 0
 
 
 def test_an_empty_larder_refuses_and_says_to_fill():

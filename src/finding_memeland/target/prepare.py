@@ -37,17 +37,28 @@ TWO MEASUREMENTS THAT SHAPED THIS FILE (live runs, 16-17/09):
     exist and to refuse what vision could never process. The full download
     happens once, for the accepted candidate.
 
-DECOYS, AND WHERE THEY ARE NOT (Opus, 17/09, walking back part of his own
-advice). Padding the image probe during verification bought nothing: the
-candidate's METADATA read already goes to the gateway on its own, so the
-gateway has seen it before any batch is assembled. Padding one and not the
-other was theatre, and it cost ~10 gateway calls per draw where 2 suffice.
-Decoys now live only where they do real work:
-  · the vision read of the ACCEPTED candidate — one batch of five;
-  · the sealed batch the live check reuses every clue (RPC, no gateway).
-And filling the larder weeks before a hunt weakens the gateway correlation
-by itself: it sees reads on a day when there is no hunt to correlate them
-with.
+NO DECOYS ANYWHERE (Opus + Fable, 17/09 — removing a design Opus argued
+for, on the evidence). What padding bought was hiding WHICH token is the
+target from an infrastructure provider. What it cost, measured: the P0-A
+intersection bug, its mirror at the judge, theatre at verification, a batch
+that failed when a decoy was dead, and a floor of five on the larder.
+Attacks prevented: none. So:
+
+  · the vision read is ONE read of the target, once, on the day before;
+  · the live check is ONE RPC read per clue.
+
+WHAT ACTUALLY DOES THE WORK IS THE ROTATION, AND IT ALWAYS DID. The
+repeated read during a hunt goes through PUBLIC RPCs in rotation, so no
+single provider ever sees the pattern — provider A answers clue 1,
+provider B clue 3, none of them sees a series. Four decoys never had the
+scale to do that: they divide by five a thing that needs dividing by a
+thousand (the guess budget is ~5,000).
+
+So the line that must not be touched is the rotation. Anyone who
+"simplifies" the live check onto ONE provider — and above all onto our own
+keyed RPC — is handing that provider the answer to every hunt, in real
+time, with our identity attached. No amount of padding restores that. If
+the live check ever moves to the keyed RPC, this decision reverses.
 
 Everything effectful is injected; the logic tests offline.
 """
@@ -451,20 +462,11 @@ class TargetFinder:
 
 
 @dataclass(frozen=True)
-class Decoy:
-    chain: str
-    contract: str
-    token_id: int
-    image: str
-
-
-@dataclass(frozen=True)
 class Prepared:
     """What `/launch` publishes. Clue 1 is already written and judged; launch
     adds a live check (RPC, seconds) and the post."""
 
     target: Target
-    decoys: tuple[Decoy, ...]
     clue_one: object
     image_description: str
     attempts: int
@@ -473,53 +475,26 @@ class Prepared:
 class TargetPreparer:
     """Extra ports on top of the finder's:
 
-      fetch_images(urls) -> dict[url, bytes | None]
-          The FULL images, ONE gateway batch: the accepted candidate plus
-          its decoys. The only place a whole artwork is downloaded, and the
-          only gateway read that is padded (see the module docstring).
+      fetch_image(url) -> bytes | None
+          The FULL artwork, ONCE, for the accepted candidate. The only
+          place a whole image is downloaded.
       describe(image_bytes)                     -> str
       write_clue_one(target, description)       -> ClueDraft (raises)
     """
 
-    def __init__(self, *, finder: TargetFinder, fetch_images, describe,
-                 write_clue_one, epoch_id: str = "e1", decoys: int = 4,
-                 max_attempts: int = 6, max_decoy_draws: int = 24,
+    def __init__(self, *, finder: TargetFinder, fetch_image, describe,
+                 write_clue_one, epoch_id: str = "e1",
+                 max_attempts: int = 6,
                  rng: random.Random | None = None,
                  notify: Callable[[str], None] | None = None):
         self._finder = finder
-        self._fetch_images = fetch_images
+        self._fetch_image = fetch_image
         self._describe = describe
         self._write_clue_one = write_clue_one
         self._epoch = epoch_id
-        self._n_decoys = max(0, int(decoys))
         self._max_attempts = max(1, int(max_attempts))
-        self._max_decoy_draws = max(1, int(max_decoy_draws))
         self._rng = rng or random.SystemRandom()
         self._notify = notify or (lambda _t: None)
-
-    def _decoys_from_larder(self, larder: Larder, exclude: str) -> list[Decoy]:
-        """Padding for the day-before reads — taken FROM THE LARDER, not drawn
-        fresh (Fable, 17/09, and he is right).
-
-        Two reasons, and the first is the one that matters:
-
-        · IT KEEPS THE FILL'S MIXING. On fill day the target is one CID among
-          ~150 read that day — good cover. If the prepare re-reads ONE CID,
-          the intersection of "read on fill day" and "re-read on D-1" has a
-          single element, and that element is the target. Fresh decoys do not
-          fix it: they were never in the fill set. Larder members were.
-        · THEY ARE PROVEN ALIVE. A quarter of 2021 artwork no longer serves
-          its bytes, so four freshly drawn decoys are all alive only ~32% of
-          the time (0.75^4) — and a batch where only the target is served is
-          the 16/09 bug one floor down.
-
-        The decoys must also go through the SAME gateway the fill used: keyed
-        for one and generic for the other would leave the target as the only
-        CID present in both logs."""
-        others = [c for c in larder.candidates if c.id() != exclude]
-        self._rng.shuffle(others)
-        return [Decoy(chain=c.chain, contract=c.contract, token_id=c.token_id,
-                      image=c.image) for c in others[:self._n_decoys]]
 
     def prepare(self, larder: Larder) -> tuple[Prepared, Larder]:
         """Take one from the larder, RE-VERIFY it (pins expire, pieces get
@@ -550,20 +525,7 @@ class TargetPreparer:
                 larder.consume(cand.id())
                 continue
 
-            decoys = self._decoys_from_larder(larder, fresh.id())
-            if len(decoys) < self._n_decoys:
-                raise PrepareRefused(
-                    f"a despensa tem {larder.size()} alvo(s): preciso de "
-                    f"{self._n_decoys + 1} para o lote da véspera não deixar o "
-                    "alvo sozinho no gateway. Corre /fill")
-            urls = [fresh.image] + [d.image for d in decoys]
-            self._rng.shuffle(urls)
-            try:
-                served = self._fetch_images(urls)
-            except Exception:  # noqa: BLE001
-                raise PrepareRefused(
-                    "o lote de imagens falhou (gateway) — nada foi consumido")
-            target_bytes = served.get(fresh.image)
+            target_bytes = self._fetch_image(fresh.image)
             if not target_bytes:
                 tally.image += 1
                 larder.consume(cand.id())
@@ -575,8 +537,8 @@ class TargetPreparer:
             larder.consume(cand.id())
             self._notify(f"prepare: alvo selado à {attempt}.ª tentativa · "
                          f"despensa {larder.size()}")
-            return Prepared(target=target, decoys=tuple(decoys),
-                            clue_one=clue_one, image_description=description,
+            return Prepared(target=target, clue_one=clue_one,
+                            image_description=description,
                             attempts=attempt), larder
 
         raise PrepareRefused(
