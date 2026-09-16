@@ -229,6 +229,81 @@ def test_a_candidate_vision_cannot_describe_is_dropped_not_launched():
     assert larder.size() == before - 2          # both are spent, only one used
 
 
+def test_a_huge_artwork_is_resized_not_refused():
+    """MEASURED (16/09): artworks of 14, 19 and 171 MB, and a vision API
+    that takes about 5 MB. The first /prepare died on a bare
+    BadRequestError because the two ceilings were confused — how much we
+    are willing to DOWNLOAD is not what the provider will ACCEPT.
+
+    A clue about a lighthouse does not need the pixels the collector paid
+    for, so the artwork is resized rather than thrown away."""
+    import io
+
+    from PIL import Image
+
+    from finding_memeland.target.adapters import (
+        VISION_MAX_BYTES, shrink_for_vision, sniff_media_type,
+    )
+    buf = io.BytesIO()
+    Image.new("RGB", (6000, 6000), (200, 30, 30)).save(buf, format="PNG")
+    out = shrink_for_vision(buf.getvalue())
+    assert out is not None
+    assert len(out) <= VISION_MAX_BYTES
+    assert sniff_media_type(out) is not None
+    assert max(Image.open(io.BytesIO(out)).size) <= 1568
+
+
+def test_an_image_already_small_enough_is_not_re_encoded():
+    """Re-encoding costs quality for nothing and would make every reveal's
+    bytes differ from the artist's."""
+    import io
+
+    from PIL import Image
+
+    from finding_memeland.target.adapters import shrink_for_vision
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 400), (10, 90, 200)).save(buf, format="PNG")
+    data = buf.getvalue()
+    assert shrink_for_vision(data) is data or shrink_for_vision(data) == data
+
+
+def test_bytes_that_are_not_an_image_are_refused_not_described():
+    """The 4 KB probe sniffs magic bytes; the rest of the file can still be
+    anything. Vision must never be handed a throttle page."""
+    from finding_memeland.target.adapters import shrink_for_vision
+    assert shrink_for_vision(b"\x89PNG\r\n\x1a\nnot actually a png") is None
+    assert shrink_for_vision(b"") is None
+
+
+def test_the_vision_refusing_one_artwork_names_the_measured_cause():
+    """`/prepare FALHOU (BadRequestError)` told the operator nothing —
+    not the size, not the format, not which half of the pipeline. R8 is
+    for us too: a 4xx is about THIS payload, so the candidate goes and the
+    message carries the numbers."""
+    class BadRequestError(Exception):
+        pass
+
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+    calls = {"n": 0}
+
+    def describe(data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise BadRequestError("image exceeds 5 MB maximum")
+        return "an artwork"
+    world.describe = describe
+    said: list[str] = []
+    prepared, larder = _preparer(world, finder,
+                                 notify=said.append).prepare(larder)
+    assert prepared.image_description == "an artwork"
+    assert larder.size() == before - 2          # the refused one is spent
+    assert any("visão recusou" in m and "bytes" in m for m in said)
+
+
 def test_our_own_outage_never_eats_the_larder():
     """MEASURED (first live /fill, 17/09): 442 of 600 draws lost at the
     metadata read, against 1 in 20 on a laptop the same day. That is a

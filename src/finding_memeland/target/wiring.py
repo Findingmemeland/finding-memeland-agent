@@ -40,6 +40,7 @@ from .adapters import (
     abi_uint,
     gateway_url,
     mint_fetcher,
+    shrink_for_vision,
     sniff_media_type,
 )
 from .clues import AnthropicTruthJudge, TargetClueEngine, describe_image_batched
@@ -57,7 +58,8 @@ from .hunt import (
 from .integration import ArtworkUnusable, TargetPorts
 from .prepare import (
     PREPARED_TTL_HOURS, SOURCES, Larder, LarderStore, Prepared,
-    PreparedStore, TargetFinder, TargetPreparer as LarderPreparer, used_hmac,
+    PrepareRefused, PreparedStore, TargetFinder,
+    TargetPreparer as LarderPreparer, used_hmac,
 )
 from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import (
@@ -176,7 +178,16 @@ class TargetWiring:
         if self.larder_preparer is None or self.larder_store is None:
             return "preparação não configurada"
         larder: Larder = self.larder_store.load()
-        prepared, larder = self.larder_preparer.prepare(larder)
+        try:
+            prepared, larder = self.larder_preparer.prepare(larder)
+        except PrepareRefused as e:
+            # A REFUSAL IS A RESULT, NOT A CRASH. Its messages are written
+            # leak-free by construction (counts and causes, never a name),
+            # so unlike a raw exception they can reach the operator whole —
+            # `/prepare FALHOU (PrepareRefused)` would repeat the 16/09
+            # mistake of reporting a type where a reason was needed.
+            self.larder_store.save(larder)      # whatever it did drop, keep dropped
+            return f"⛔ prepare recusado — {e}"
         self.larder_store.save(larder)          # the target is spent
         self.prepared_store.save(prepared)
         return (f"prepare: alvo selado à {prepared.attempts}.ª tentativa · "
@@ -550,15 +561,23 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     prepared_store = PreparedStore(**store(BLOB_PREPARED))
     def fetch_artwork_once(uri: str) -> bytes | None:
         """The FULL artwork, once, for the accepted candidate — the only
-        place a whole image is downloaded. Capped: vision cannot use more,
-        and 171 MB was measured in the wild (16/09)."""
+        place a whole image is downloaded, and then SHRUNK to what the
+        vision API takes.
+
+        Two different ceilings, and 16/09 proved they must not be confused:
+        MAX_IMAGE_BYTES is how much we are willing to DOWNLOAD (171 MB was
+        measured in the wild); VISION_MAX_BYTES is what the provider will
+        ACCEPT. A 6 MB artwork sailed past the first and came back from the
+        API as a bare BadRequestError. Now it gets resized instead — a clue
+        about a lighthouse does not need the pixels the collector paid
+        for."""
         url = gateway_url(uri, s.target_ipfs_gateway)
         if url is None:
             return None
         data = get_art(url, {})
         if not data or len(data) > MAX_IMAGE_BYTES or sniff_media_type(data) is None:
             return None
-        return data
+        return shrink_for_vision(data)
 
     def write_clue_one(target, description: str):
         """Clue 1, written and put through every guard, ON THE DAY BEFORE.

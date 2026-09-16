@@ -909,6 +909,53 @@ def sniff_media_type(data: bytes) -> str | None:
     return None
 
 
+# What the vision API will actually accept. These are NOT our numbers —
+# they are the provider's, and the 24 MB we allow through the probe is our
+# own ceiling on how much we are willing to download, a different thing.
+# Confusing the two is what broke /prepare on 16/09: a 6 MB artwork was
+# fetched happily and then refused by the API with a bare BadRequestError.
+VISION_MAX_BYTES = 3_500_000        # ~5 MB once base64 inflates it by 4/3
+VISION_MAX_EDGE = 1568              # the provider's own "no gain above this"
+
+
+def shrink_for_vision(data: bytes, *, max_bytes: int = VISION_MAX_BYTES,
+                      max_edge: int = VISION_MAX_EDGE) -> bytes | None:
+    """Make an artwork small enough to describe, or say it cannot be.
+
+    1/1 art is enormous — 14 MB, 19 MB, one of 171 MB, all measured in the
+    wild on 16/09. The vision API takes about 5 MB and gains nothing above
+    ~1568 px on the long edge, so we resize rather than refuse: a clue
+    about a lighthouse does not need the pixels the collector paid for.
+
+    Returns None only when the bytes cannot be opened as an image at all —
+    which is the candidate's problem (an SVG, a video, a throttle page
+    that happened to start with image magic), not ours. Without Pillow it
+    degrades to a plain size cap instead of failing.
+    """
+    if not data:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:                       # degrade, never crash
+        return data if len(data) <= max_bytes else None
+    import io
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+            if (len(data) <= max_bytes and max(im.size) <= max_edge
+                    and sniff_media_type(data)):
+                return data                   # already fine: don't re-encode
+            im = im.convert("RGB")
+            im.thumbnail((max_edge, max_edge))
+            out = io.BytesIO()
+            im.save(out, format="JPEG", quality=85, optimize=True)
+            shrunk = out.getvalue()
+    except Exception:  # noqa: BLE001 — not an image we can read
+        return None
+    return shrunk if len(shrunk) <= max_bytes else None
+
+
 CONTENT_PROMPT = ("Content review for a public treasure hunt that will point "
                   "a thousand strangers at this artwork. Answer ONLY a JSON "
                   "object {\"content_ok\": true|false, \"reason\": \"...\"}. "

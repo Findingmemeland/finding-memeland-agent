@@ -9,6 +9,12 @@ anthropic>=0.34.0
 # Image generation — persona avatars
 openai>=1.40.0
 
+# Image resizing before the vision call. 1/1 art is enormous (14 MB, 19 MB,
+# one of 171 MB, measured 16/09) and the vision API takes about 5 MB — a
+# 6 MB artwork came back as a bare BadRequestError and killed /prepare.
+# Degrades to a plain size cap if absent (target/adapters.shrink_for_vision).
+pillow>=10.4.0
+
 # Orchestration
 langgraph>=0.2.0
 

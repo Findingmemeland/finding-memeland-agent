@@ -729,7 +729,30 @@ class TargetPreparer:
             # something else (an SVG, a video, a throttle page). Clue 1
             # about an artwork nobody described is a clue about nothing:
             # drop the candidate, take the next.
-            description = self._describe(target_bytes)
+            try:
+                description = self._describe(target_bytes)
+            except Exception as e:  # noqa: BLE001
+                # R8 ON OURSELVES (16/09): `/prepare FALHOU (BadRequestError)`
+                # told the operator nothing at all — not the size, not the
+                # format, not which half of the pipeline. The MEASURED cause
+                # travels here. A 4xx is about THIS payload (the candidate
+                # goes); anything else is the provider being down (it stays).
+                why = (f"{type(e).__name__} · {len(target_bytes):,} bytes")
+                if type(e).__name__ in {"BadRequestError", "UnprocessableEntityError"}:
+                    self._notify(f"prepare: a visão recusou a arte ({why}) — "
+                                 "candidato descartado, tento outro")
+                    tally.image += 1
+                    larder.consume(cand.id())
+                    continue
+                unavailable += 1
+                self._notify(f"prepare: visão indisponível ({why}) — candidato "
+                             "MANTIDO na despensa, tento outro")
+                if unavailable >= max_unavailable:
+                    raise PrepareRefused(
+                        f"{unavailable} falhas seguidas por nossa causa "
+                        "(visão/gateway/RPC) — despensa INTACTA. Tenta daqui "
+                        "a pouco.") from None
+                continue
             if not str(description or "").strip():
                 tally.metadata += 1
                 larder.consume(cand.id())
