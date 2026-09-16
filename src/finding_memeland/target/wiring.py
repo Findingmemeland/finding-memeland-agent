@@ -131,6 +131,7 @@ class TargetWiring:
     prepared_store: PreparedStore | None = None
     larder_preparer: object = None            # prepare.TargetPreparer
     pool_key: str = ""
+    notify: object = None        # progress lines for /fill and /prepare
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -210,7 +211,8 @@ class TargetWiring:
             return "despensa não configurada"
         larder: Larder = self.larder_store.load()
         try:
-            tally = self.finder.fill(larder, want=want, max_draws=12 * want)
+            tally = self.finder.fill(larder, want=want, max_draws=12 * want,
+                                     notify=self.notify, every=25)
         finally:
             self.larder_store.save(larder)      # keep whatever was found
         return f"fill: {tally.render()} · despensa {larder.size()}"
@@ -596,14 +598,21 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                             metadata=None)
         return clue_engine.next_clue(ctx, 1, [])
 
+    # THE PREPARER MUST BE ABLE TO SPEAK (17/09). Every measured cause in
+    # prepare.py — which candidate died of what, which read was ours — was
+    # written to a notifier that was never wired, so the first live refusal
+    # arrived as a bare tally with nothing behind it. R8 is not just about
+    # writing the cause down; it is about it reaching the operator.
+    say = progress or (lambda _line: None)
     larder_preparer = LarderPreparer(
         finder=finder, fetch_image=fetch_artwork_once, describe=vision,
         write_clue_one=write_clue_one,
         epoch_id=s.target_epoch_id, key=s.target_pool_key,
         used_hmacs=lambda: repo.used_target_hmacs(),
-        now_iso=_now_iso, rng=rng)
+        now_iso=_now_iso, rng=rng, notify=say)
 
     return TargetWiring(finder=finder, larder_store=larder_store,
+                        notify=say,
                         prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,

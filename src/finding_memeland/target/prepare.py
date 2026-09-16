@@ -294,6 +294,13 @@ class Tally:
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
     unique: int = 0          # another piece carries the same base name
     duplicate: int = 0       # already in the larder or already used
+    # /prepare only, and each one is a DIFFERENT symptom. Folding them into
+    # the counters above is what made the first refusal unreadable (17/09):
+    # "nome 3" could have meant three bad names or three clues the guards
+    # refused to write, and those two call for opposite responses.
+    blind: int = 0           # vision refused the bytes (4xx / empty answer)
+    unwritable: int = 0      # guards exhausted: no clue can be written here
+    unavailable: int = 0     # OURS (gateway/RPC/guard down) — candidate KEPT
     found: int = 0
 
     def render(self) -> str:
@@ -301,7 +308,9 @@ class Tally:
             ("metadata", self.metadata), ("nome", self.name),
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
-            ("repetido", self.duplicate)) if v)
+            ("repetido", self.duplicate), ("visão-recusou", self.blind),
+            ("sem-pista", self.unwritable),
+            ("indisponível-NOSSO", self.unavailable)) if v)
         return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
                 + (f" — {causes}" if causes else ""))
 
@@ -722,6 +731,7 @@ class TargetPreparer:
                                             tally, strict=True)
             except ReadUnavailable as e:
                 unavailable += 1
+                tally.unavailable += 1
                 self._notify(f"prepare: leitura indisponível ({e}) — candidato "
                              "MANTIDO na despensa, tento outro")
                 if unavailable >= max_unavailable:
@@ -758,10 +768,11 @@ class TargetPreparer:
                 if type(e).__name__ in {"BadRequestError", "UnprocessableEntityError"}:
                     self._notify(f"prepare: a visão recusou a arte ({why}) — "
                                  "candidato descartado, tento outro")
-                    tally.image += 1
+                    tally.blind += 1
                     larder.consume(cand.id())
                     continue
                 unavailable += 1
+                tally.unavailable += 1
                 self._notify(f"prepare: visão indisponível ({why}) — candidato "
                              "MANTIDO na despensa, tento outro")
                 if unavailable >= max_unavailable:
@@ -771,7 +782,7 @@ class TargetPreparer:
                         "a pouco.") from None
                 continue
             if not str(description or "").strip():
-                tally.metadata += 1
+                tally.blind += 1
                 larder.consume(cand.id())
                 continue
             try:
@@ -785,6 +796,7 @@ class TargetPreparer:
                 # a void, and the next candidate gets its turn.
                 if _is_guard_unavailable(e):
                     unavailable += 1
+                    tally.unavailable += 1
                     self._notify(f"prepare: guarda nossa indisponível "
                                  f"({type(e).__name__}) — candidato MANTIDO "
                                  "na despensa, tento outro")
@@ -796,7 +808,7 @@ class TargetPreparer:
                     continue
                 self._notify(f"prepare: Clue 1 impossível para este alvo "
                              f"({type(e).__name__}) — descartado, tento outro")
-                tally.name += 1
+                tally.unwritable += 1
                 larder.consume(cand.id())
                 continue
             # The commitment is PUBLISHED IN CLUE 1, so it is born here, with
@@ -813,6 +825,13 @@ class TargetPreparer:
                             attempts=attempt, salt=salt, commitment=commitment,
                             prepared_at=self._now()), larder
 
+        # The tally is the diagnosis, so it has to name the RIGHT cause:
+        # "sem-pista" (the guards refuse every draft for this target) and
+        # "nome" (the name itself does not qualify) call for opposite
+        # responses, and folding them together — as this did until 17/09 —
+        # leaves the operator with a number and no move.
         raise PrepareRefused(
             f"{self._max_attempts} candidatos da despensa falharam a "
-            f"re-verificação — {tally.render()}; corre /fill")
+            f"re-verificação — {tally.render()}"
+            + ("; as leituras NOSSAS falharam, tenta outra vez daqui a pouco"
+               if tally.unavailable >= tally.draws / 2 else "; corre /fill"))

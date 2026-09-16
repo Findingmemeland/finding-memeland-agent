@@ -343,3 +343,41 @@ def test_the_prepare_path_is_actually_callable_not_just_composed(monkeypatch):
     # ONE engine, shared: the guards a clue must pass cannot depend on
     # which command asked for it.
     assert w.ports.clue_engine is not None
+
+
+def test_the_preparer_and_the_filler_can_actually_speak():
+    """17/09, live: `/prepare` refused with a bare tally and nothing behind
+    it. Every measured cause in prepare.py — which candidate died of what,
+    which read was OURS — was written to a notifier that build_target never
+    wired, so it all went to a no-op lambda.
+
+    R8 is not satisfied by writing the cause down. It is satisfied when the
+    cause reaches the operator."""
+    said: list[str] = []
+
+    def progress(line):                 # a bound method is a NEW object on
+        said.append(line)               # every attribute access — never `is`
+
+    w = build_with_progress(progress)
+    w.larder_preparer._notify("from the preparer")   # noqa: SLF001
+    assert w.notify is progress
+    assert said == ["from the preparer"]
+
+
+def build_with_progress(progress):
+    return build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                        http_get=lambda u, h: "{}", http_post=rpc_ok,
+                        http_get_bytes=lambda u, h: b"", progress=progress)
+
+
+def test_the_tally_never_folds_two_different_symptoms_together():
+    """"nome 3" could have meant three bad names or three clues the guards
+    refused to write — and those call for opposite responses (run /fill vs
+    look at the clue engine). A number with no move is not a diagnosis."""
+    from finding_memeland.target.prepare import Tally
+    t = Tally(draws=6, name=1, blind=1, unwritable=3, unavailable=1)
+    out = t.render()
+    assert "nome 1" in out
+    assert "sem-pista 3" in out
+    assert "visão-recusou 1" in out
+    assert "indisponível-NOSSO 1" in out
