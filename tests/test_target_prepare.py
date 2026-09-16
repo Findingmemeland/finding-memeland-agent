@@ -182,7 +182,7 @@ def test_prepare_seals_a_target_and_consumes_it():
     world = World()
     finder = _finder(world)
     larder = Larder()
-    finder.fill(larder, want=4, max_draws=80)
+    finder.fill(larder, want=8, max_draws=200)
     before = larder.size()
     prepared, larder = _preparer(world, finder).prepare(larder)
     assert prepared.target.name_onchain
@@ -196,7 +196,7 @@ def test_prepare_re_verifies_and_drops_a_candidate_that_died_in_the_larder():
     world = World()
     finder = _finder(world)
     larder = Larder()
-    finder.fill(larder, want=4, max_draws=80)
+    finder.fill(larder, want=8, max_draws=200)
     world.dead = {larder.candidates[0].image}
     prepared, larder = _preparer(world, finder).prepare(larder)
     assert prepared.target.image not in world.dead
@@ -206,9 +206,35 @@ def test_the_full_image_read_is_padded_with_four_decoys():
     world = World()
     finder = _finder(world)
     larder = Larder()
-    finder.fill(larder, want=3, max_draws=80)
+    finder.fill(larder, want=8, max_draws=200)
     _preparer(world, finder, decoys=4).prepare(larder)
     assert world.batches and all(len(b) == 5 for b in world.batches)
+
+
+def test_the_decoys_come_from_the_larder_so_the_fill_mixing_survives():
+    """Fable, 17/09: on fill day the target hides among ~150 CIDs. If the
+    day-before read touches ONE CID, the intersection of the two days has a
+    single element — the target. Larder members were read on fill day; fresh
+    draws were not."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    in_larder = {c.image for c in larder.candidates}
+    prepared, _ = _preparer(world, finder, decoys=4).prepare(larder)
+    assert len(world.batches[-1]) == 5
+    assert set(world.batches[-1]) <= in_larder
+    assert all(d.image in in_larder for d in prepared.decoys)
+
+
+def test_a_larder_too_small_refuses_rather_than_reading_the_target_alone():
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=3, max_draws=80)       # 3 < target + 4 decoys
+    with pytest.raises(PrepareRefused) as e:
+        _preparer(world, finder, decoys=4).prepare(larder)
+    assert "fill" in str(e.value).lower()
 
 
 def test_an_empty_larder_refuses_and_says_to_fill():

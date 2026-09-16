@@ -497,33 +497,29 @@ class TargetPreparer:
         self._rng = rng or random.SystemRandom()
         self._notify = notify or (lambda _t: None)
 
-    def _fresh_decoys(self, exclude: str) -> list[Decoy]:
-        """Padding for the ONE full-image batch. Two demands only: metadata
-        resolves and the image is content-addressed."""
-        out: list[Decoy] = []
-        seen = {exclude}
-        for _ in range(self._max_decoy_draws):
-            if len(out) >= self._n_decoys:
-                break
-            drawn = self._finder.draw()
-            if drawn is None:
-                continue
-            src, tid = drawn
-            key = f"{src.chain}:{src.contract.lower()}:{tid}"
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                read = self._finder._read_token(src.chain, src.contract, tid)  # noqa: SLF001
-            except Exception:  # noqa: BLE001
-                continue
-            if read is None or not isinstance(read.metadata, dict):
-                continue
-            image = str(read.metadata.get("image") or "")
-            if uri_is_content_addressed(image):
-                out.append(Decoy(chain=src.chain, contract=src.contract.lower(),
-                                 token_id=tid, image=image))
-        return out
+    def _decoys_from_larder(self, larder: Larder, exclude: str) -> list[Decoy]:
+        """Padding for the day-before reads — taken FROM THE LARDER, not drawn
+        fresh (Fable, 17/09, and he is right).
+
+        Two reasons, and the first is the one that matters:
+
+        · IT KEEPS THE FILL'S MIXING. On fill day the target is one CID among
+          ~150 read that day — good cover. If the prepare re-reads ONE CID,
+          the intersection of "read on fill day" and "re-read on D-1" has a
+          single element, and that element is the target. Fresh decoys do not
+          fix it: they were never in the fill set. Larder members were.
+        · THEY ARE PROVEN ALIVE. A quarter of 2021 artwork no longer serves
+          its bytes, so four freshly drawn decoys are all alive only ~32% of
+          the time (0.75^4) — and a batch where only the target is served is
+          the 16/09 bug one floor down.
+
+        The decoys must also go through the SAME gateway the fill used: keyed
+        for one and generic for the other would leave the target as the only
+        CID present in both logs."""
+        others = [c for c in larder.candidates if c.id() != exclude]
+        self._rng.shuffle(others)
+        return [Decoy(chain=c.chain, contract=c.contract, token_id=c.token_id,
+                      image=c.image) for c in others[:self._n_decoys]]
 
     def prepare(self, larder: Larder) -> tuple[Prepared, Larder]:
         """Take one from the larder, RE-VERIFY it (pins expire, pieces get
@@ -554,11 +550,12 @@ class TargetPreparer:
                 larder.consume(cand.id())
                 continue
 
-            decoys = self._fresh_decoys(fresh.id())
+            decoys = self._decoys_from_larder(larder, fresh.id())
             if len(decoys) < self._n_decoys:
                 raise PrepareRefused(
-                    "não consegui montar o lote de imagens (gateway) — "
-                    "tenta outra vez daqui a pouco; nada foi consumido")
+                    f"a despensa tem {larder.size()} alvo(s): preciso de "
+                    f"{self._n_decoys + 1} para o lote da véspera não deixar o "
+                    "alvo sozinho no gateway. Corre /fill")
             urls = [fresh.image] + [d.image for d in decoys]
             self._rng.shuffle(urls)
             try:

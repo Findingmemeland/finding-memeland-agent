@@ -83,7 +83,7 @@ def _http_get_artwork(url: str, headers: dict | None = None) -> bytes:
         return r.read(MAX_ARTWORK_BYTES + 1)
 
 
-def _http_get_range(url: str, headers: dict | None = None) -> bytes:
+def _http_get_range(url: str, headers: dict | None = None) -> tuple[bytes, int]:
     """A RANGED read for the larder's image probe: a few KB and a short
     timeout. Proving that an artwork's bytes exist (Hunt #11) must not cost
     a 15 MB download — measured 16/09: 14 MB, 19 MB, one of 171 MB, and the
@@ -94,7 +94,14 @@ def _http_get_range(url: str, headers: dict | None = None) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
     with urllib.request.urlopen(req, timeout=8) as r:
-        return r.read(8192)
+        # read(N) is not optional: a gateway that IGNORES Range answers 200
+        # with the whole body, and without the cap the 171 MB piece comes
+        # back anyway (Fable, 17/09).
+        head = r.read(8192)
+        span = r.headers.get("Content-Range") or ""
+        size = (int(span.rsplit("/", 1)[-1]) if "/" in span
+                else int(r.headers.get("Content-Length") or 0))
+    return head, size
 
 
 def _http_post(url: str, body: bytes, headers: dict) -> str:

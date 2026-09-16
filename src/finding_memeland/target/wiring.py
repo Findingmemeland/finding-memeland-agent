@@ -440,10 +440,11 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         url = gateway_url(uri, s.target_ipfs_gateway)
         if url is None:
             return None
-        head = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
+        got = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
+        head, size = got if isinstance(got, tuple) else (got, 0)
         if not head or sniff_media_type(head) is None:
             return None
-        return head, 0
+        return head, size
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
     # called enumerable_sources() here and made boot depend on an RPC round
