@@ -43,7 +43,12 @@ from .adapters import (
     shrink_for_vision,
     sniff_media_type,
 )
-from .clues import AnthropicTruthJudge, TargetClueEngine, describe_image_batched
+from .clues import (
+    AnthropicTruthJudge,
+    TargetClueContext,
+    TargetClueEngine,
+    describe_image_batched,
+)
 from .discovery import DiscoveryStateStore, EraDiscovery
 from .hunt import (
     LIVE_HASH_RESOLVED,

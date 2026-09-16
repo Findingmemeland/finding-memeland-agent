@@ -623,6 +623,23 @@ class PreparedStore:
                 "or corrupted store; run /prepare again") from e
 
 
+def _is_guard_unavailable(exc: BaseException) -> bool:
+    """Is this OUR service failing, or this target being impossible?
+
+    ClueGuardUnavailable (the search guard blind, the consistency judge
+    down) is ours: R8 says we do not publish — or discard — on a cause we
+    could not measure. Anything else from the clue engine means the guards
+    did their job and this target cannot be written about under our rules.
+
+    Imported lazily: prepare.py must not drag the clue engine into every
+    import of the larder."""
+    try:
+        from ..content.relic_clues import ClueGuardUnavailable
+    except Exception:  # noqa: BLE001 — cannot tell → treat as ours (keep it)
+        return True
+    return isinstance(exc, ClueGuardUnavailable)
+
+
 class TargetPreparer:
     """Extra ports on top of the finder's:
 
@@ -757,7 +774,31 @@ class TargetPreparer:
                 tally.metadata += 1
                 larder.consume(cand.id())
                 continue
-            clue_one = self._write_clue_one(target, description)
+            try:
+                clue_one = self._write_clue_one(target, description)
+            except Exception as e:  # noqa: BLE001
+                # THE SAME SPLIT AS THE VISION CALL, and it used to live at
+                # launch (5th --real-clues, 09/09): a GUARD OF OURS that
+                # cannot verify is our outage — the candidate stays and we
+                # try again later. Guardrail EXHAUSTION is about this target:
+                # under our rules it is unwritable, so it goes, exactly like
+                # a void, and the next candidate gets its turn.
+                if _is_guard_unavailable(e):
+                    unavailable += 1
+                    self._notify(f"prepare: guarda nossa indisponível "
+                                 f"({type(e).__name__}) — candidato MANTIDO "
+                                 "na despensa, tento outro")
+                    if unavailable >= max_unavailable:
+                        raise PrepareRefused(
+                            f"{unavailable} falhas seguidas por nossa causa "
+                            "(guardas/visão/gateway) — despensa INTACTA. "
+                            "Tenta daqui a pouco.") from None
+                    continue
+                self._notify(f"prepare: Clue 1 impossível para este alvo "
+                             f"({type(e).__name__}) — descartado, tento outro")
+                tally.name += 1
+                larder.consume(cand.id())
+                continue
             # The commitment is PUBLISHED IN CLUE 1, so it is born here, with
             # the clue — not at launch. Same v2 formula as ever: nothing
             # about the protocol changes because the moment moved.

@@ -302,3 +302,44 @@ def test_wiring_credit_reads_token_creator_on_the_keyed_rpcs():
     sealed = SealedTarget(target=t, salt="s" * 32, commitment="c" * 64)
     assert w.ports.creator_credit(sealed) == "0x1111…1111"      # no ENS resolver → address
     assert seen[0] == ("https://alchemy.example/v2/key", C, "0x40c1a064")   # keyed, not public
+
+
+def test_the_prepare_path_is_actually_callable_not_just_composed(monkeypatch):
+    """16/09, live: `/prepare FALHOU (NameError)` — the clue-writing closure
+    referenced a name the module never imported. Everything imported, every
+    test passed, the graph composed; the bug lived in a function that no
+    test had ever CALLED.
+
+    So call the REAL closure. Only the engine class is swapped, before
+    build_target runs, so what executes here is the production code and not
+    a copy of it — a copy is a test that can pass while production fails."""
+    seen = {}
+
+    class FakeEngine:
+        def __init__(self, *a, **kw):
+            pass
+
+        def next_clue(self, ctx, i, prior):
+            seen["ctx"], seen["i"], seen["prior"] = ctx, i, prior
+            return type("Draft", (), {"text": "a clue"})()
+
+    import finding_memeland.target.wiring as wiring
+    monkeypatch.setattr(wiring, "TargetClueEngine", FakeEngine)
+    w = build()
+
+    from finding_memeland.target.selector import Target
+    target = Target(chain="ethereum", contract=C, token_id=7,
+                    name="Iron Lighthouse", name_onchain="Iron Lighthouse #7",
+                    description="a tower", image="ipfs://img",
+                    metadata_sha256="a" * 64, epoch="e1",
+                    token_uri="ipfs://meta", content_id="cid", artist="")
+    draft = w.larder_preparer._write_clue_one(target, "a lighthouse")  # noqa: SLF001
+
+    assert draft.text == "a clue"
+    assert seen["i"] == 1 and seen["prior"] == []
+    assert seen["ctx"].display_name == "Iron Lighthouse"
+    assert seen["ctx"].image_description == "a lighthouse"
+    assert seen["ctx"].target_id == target.id()
+    # ONE engine, shared: the guards a clue must pass cannot depend on
+    # which command asked for it.
+    assert w.ports.clue_engine is not None

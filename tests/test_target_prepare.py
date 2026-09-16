@@ -239,10 +239,12 @@ def test_a_huge_artwork_is_resized_not_refused():
     for, so the artwork is resized rather than thrown away."""
     import io
 
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")
 
     from finding_memeland.target.adapters import (
-        VISION_MAX_BYTES, shrink_for_vision, sniff_media_type,
+        VISION_MAX_BYTES,
+        shrink_for_vision,
+        sniff_media_type,
     )
     buf = io.BytesIO()
     Image.new("RGB", (6000, 6000), (200, 30, 30)).save(buf, format="PNG")
@@ -258,7 +260,7 @@ def test_an_image_already_small_enough_is_not_re_encoded():
     bytes differ from the artist's."""
     import io
 
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")
 
     from finding_memeland.target.adapters import shrink_for_vision
     buf = io.BytesIO()
@@ -269,7 +271,15 @@ def test_an_image_already_small_enough_is_not_re_encoded():
 
 def test_bytes_that_are_not_an_image_are_refused_not_described():
     """The 4 KB probe sniffs magic bytes; the rest of the file can still be
-    anything. Vision must never be handed a throttle page."""
+    anything — an SVG, a video, a throttle page wearing a PNG header.
+    Vision must never be handed one.
+
+    This is the check that NEEDS Pillow: without it the fallback can only
+    measure size, and a file that lies in its first eight bytes goes
+    through. Pillow is a requirement now for exactly this reason, and the
+    skip below says so out loud instead of passing quietly."""
+    pytest.importorskip("PIL.Image",
+                        reason="without Pillow the size cap is all we have")
     from finding_memeland.target.adapters import shrink_for_vision
     assert shrink_for_vision(b"\x89PNG\r\n\x1a\nnot actually a png") is None
     assert shrink_for_vision(b"") is None
@@ -302,6 +312,56 @@ def test_the_vision_refusing_one_artwork_names_the_measured_cause():
     assert prepared.image_description == "an artwork"
     assert larder.size() == before - 2          # the refused one is spent
     assert any("visão recusou" in m and "bytes" in m for m in said)
+
+
+def test_a_target_nobody_can_write_a_clue_about_is_dropped_not_launched():
+    """5th --real-clues (09/09): six attempts on clue 1, every one caught by
+    the blind solver — every SEMANTIC FIELD piece was a definition in
+    disguise. In production that surfaced as '🚨 HUNT DIED'. It is not a
+    death: the guards did their job, and under our rules this target is
+    unwritable. It goes, and the next candidate gets its turn.
+
+    It used to happen at launch, with an audience. Now it happens the day
+    before, with nobody waiting — which is the whole point."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+    calls = {"n": 0}
+
+    def write(target, description):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("clue #1 failed guardrails after 6 attempts")
+        return {"text": "clue", "for": target.id()}
+    world.write_clue_one = write
+    said: list[str] = []
+    prepared, larder = _preparer(world, finder, notify=said.append).prepare(larder)
+    assert prepared.clue_one["text"] == "clue"
+    assert larder.size() == before - 2          # the unwritable one is spent
+    assert any("impossível para este alvo" in m for m in said)
+
+
+def test_a_guard_of_ours_being_down_keeps_the_candidate():
+    """The mirror of the test above, and the distinction is the whole R8:
+    the search guard blind or the consistency judge down says NOTHING about
+    this target. Discarding a verified target for our own outage would empty
+    the larder during a marketplace 429."""
+    from finding_memeland.content.relic_clues import ClueGuardUnavailable
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+
+    def write(target, description):
+        raise ClueGuardUnavailable("marketplace 429 — canary blind")
+    world.write_clue_one = write
+    with pytest.raises(PrepareRefused) as e:
+        _preparer(world, finder).prepare(larder)
+    assert "INTACTA" in str(e.value)
+    assert larder.size() == before              # not one candidate spent
 
 
 def test_our_own_outage_never_eats_the_larder():

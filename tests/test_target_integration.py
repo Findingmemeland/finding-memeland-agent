@@ -51,54 +51,15 @@ def test_prepare_seals_the_row_and_clue_one_is_v2():
     assert hunt.state is HuntState.LIVE
 
 
-def test_content_guard_refusal_redraws_with_the_id_excluded_and_is_bounded():
-    """Opus 06/09: o content_ok vive na passagem de visão (a imagem já está
-    em mãos, dentro de um lote que já existe). Chumbo ⇒ novo sorteio com o
-    id em exclude; três chumbos seguidos ⇒ launch recusado, nunca moído."""
-    from finding_memeland.target.clues import ContentRefused
-    from finding_memeland.target.hunt import LaunchRefused
-    w = World()
-    seen: list[str] = []
-
-    def describe(sealed):
-        seen.append(sealed.id())
-        if len(seen) == 1:
-            raise ContentRefused(sealed.id(), "nsfw")
-        return "a lighthouse on a black rock"
-    w.ports.describe_image = describe
-    hunt = w.launch()
-    assert len(seen) == 2 and seen[0] != seen[1] and hunt.target.id() == seen[1]
-    assert any("content guard refused" in m for m in w.rig.notifier.messages)
-    assert all("Whispering" not in m for m in w.rig.notifier.messages)
-
-    w2 = World()
-    w2.ports.describe_image = lambda sealed: (_ for _ in ()).throw(
-        ContentRefused(sealed.id()))
-    with pytest.raises(LaunchRefused) as e:
-        w2.orch._prepare(200)
-    assert "content guard refused 3" in str(e.value)
-
-
-def test_unreadable_artwork_is_a_launch_refusal_with_no_row_and_the_cause():
-    """Hunt #11 (16/09): the image batch raised ImageUnavailable and the
-    thread's last net reported "HUNT DIED … players may be mid-game" —
-    false: the hunt row is created AFTER the image pass, nothing was
-    posted. It is a LaunchRefused now, with the batch's measured cause
-    and no id, and the repo stays empty."""
-    from finding_memeland.target.clues import ImageUnavailable
-    from finding_memeland.target.hunt import LaunchRefused
-    w = World()
-
-    def unreadable(sealed):
-        raise ImageUnavailable("artwork bytes unavailable via the generic gateway "
-                               "after 3 rounds (1 of 8 reads still failing; "
-                               "causes: timeout×3) — not launching without the art")
-    w.ports.describe_image = unreadable
-    with pytest.raises(LaunchRefused) as e:
-        w.orch._prepare(200)
-    assert "artwork unreadable" in str(e.value) and "timeout×3" in str(e.value)
-    assert e.value.__cause__ is None                       # from None
-    assert not w.rig.repo.hunts and not w.rig.publisher.posts
+# REMOVED 17/09 — two tests of the launch-time image pass:
+#   test_content_guard_refusal_redraws_with_the_id_excluded_and_is_bounded
+#   test_unreadable_artwork_is_a_launch_refusal_with_no_row_and_the_cause
+# The artwork is fetched and described at /prepare now, the day before, so
+# neither the content guard nor an unreadable image can reach launch at all.
+# Their replacements live where the behaviour went: the artwork that cannot
+# be described is covered in test_target_prepare.py, and the launch-time
+# refusal that survives (the search guard, the one guard about the WORLD) is
+# test_target_launch_prepared.py::test_the_search_guard_runs_again_at_launch.
 
 
 def test_gateway_outage_at_void_time_is_printed_as_ours_never_as_a_burn():
@@ -237,9 +198,16 @@ def test_live_check_runs_in_the_sealed_batch_before_each_clue():
         w.orch._claim_loop(hunt)
     clue_posts = [p for p in w.rig.publisher.posts if "Clue:" in p]
     assert len(clue_posts) >= 3
-    batches = [set(w.fetches[i:i + 8]) for i in range(0, len(w.fetches), 8)]
-    assert len(batches) >= 3 and all(len(b) == 8 for b in batches)
-    assert len(set(map(frozenset, batches))) == 1        # o MESMO lote sempre
+    # ONE read per live check. It was 8 while the check went out in a sealed
+    # batch of target + 7 decoys; the decoys are gone (17/09) and what hides
+    # the pattern is the ROTATION over public RPCs, which four decoys never
+    # had the scale to do. What this test still pins is the part that
+    # matters: the SAME token, every time, and never anything else.
+    assert len(w.fetches) >= 3
+    assert len(set(w.fetches)) == 1
+    assert w.fetches[0] == (hunt.target.target.chain,
+                            hunt.target.target.contract,
+                            hunt.target.target.token_id)
 
 
 def test_transport_outage_holds_and_freezes_the_void_deadline():
@@ -613,7 +581,8 @@ def test_oscillating_outage_trips_the_accumulated_hold_ceiling():
 
     def flap(chain, contract, tid):                        # 300 ciclos down, 10 up
         cycle["n"] += 1
-        if (cycle["n"] // 8) % 310 < 300:                   # 8 leituras por lote
+        # UMA leitura por live check (sem decoys desde 17/09), não oito
+        if cycle["n"] % 310 < 300:
             raise ChainUnavailable("flapping")
         return w.fetch_live(chain, contract, tid)
 
@@ -627,47 +596,14 @@ def test_oscillating_outage_trips_the_accumulated_hold_ceiling():
     assert hunt.state is HuntState.LIVE
 
 
-def test_clue_one_exhaustion_is_a_refusal_that_excludes_the_target():
-    """5th --real-clues: six attempts on clue 1, all solver hits — in
-    production that surfaced as '🚨 HUNT DIED'. Nothing was posted: it is a
-    refusal. The target is excluded like a void; the hunt closes; the
-    notices never name it."""
-    from finding_memeland.target.integration import GoLiveRefused
-
-    class _Exhausted:
-        def next_clue(self, ctx, i, prior, **kw):
-            raise RuntimeError("clue #1 failed guardrails after 6 attempts")
-    w = World()
-    w.ports.clue_engine = _Exhausted()
-    with pytest.raises(GoLiveRefused) as e:
-        w.launch()
-    assert "unwritable" in str(e.value)
-    hunt = next(iter(w.rig.repo.hunts.values()))
-    assert hunt["target_void_id"] and hunt["target_void_cause"] == "unwritable"
-    assert w.rig.publisher.posts == []                          # nothing public
-    assert any("launch refused" in m and "excluded from the next draw" in m
-               for m in w.rig.notifier.messages)
-    assert all(hunt["target_void_id"].split(":")[1] not in m for m in w.rig.notifier.messages)
-    assert w.orch._last_target_void_id == hunt["target_void_id"]
-
-
-def test_guard_down_at_clue_one_refuses_without_excluding_the_target():
-    from finding_memeland.target.clues import TruthJudgeUnavailable
-    from finding_memeland.target.integration import GoLiveRefused
-
-    class _Down:
-        def next_clue(self, ctx, i, prior, **kw):
-            raise TruthJudgeUnavailable("judge down")
-    w = World()
-    w.ports.clue_engine = _Down()
-    with pytest.raises(GoLiveRefused) as e:
-        w.launch()
-    assert "guard unavailable" in str(e.value)
-    hunt = next(iter(w.rig.repo.hunts.values()))
-    assert not hunt.get("target_void_id")
-    assert any("stays prepared" in m for m in w.rig.notifier.messages)
-    assert w.rig.publisher.posts == []
-
+# REMOVED 17/09 — the two clue-1 tests:
+#   test_clue_one_exhaustion_is_a_refusal_that_excludes_the_target
+#   test_guard_down_at_clue_one_refuses_without_excluding_the_target
+# Clue 1 is written at /prepare now, the day before, so the clue engine is
+# never called at launch. The DISTINCTION they encoded is the valuable part
+# and it moved with them, intact: a guard of OURS that cannot verify keeps
+# the candidate (it is our outage), guardrail EXHAUSTION drops it (under our
+# rules this target is unwritable). Both live in test_target_prepare.py now.
 
 
 def test_r9_credit_lookup_has_a_deadline(monkeypatch):
