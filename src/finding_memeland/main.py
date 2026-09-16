@@ -83,6 +83,20 @@ def _http_get_artwork(url: str, headers: dict | None = None) -> bytes:
         return r.read(MAX_ARTWORK_BYTES + 1)
 
 
+def _http_get_range(url: str, headers: dict | None = None) -> bytes:
+    """A RANGED read for the larder's image probe: a few KB and a short
+    timeout. Proving that an artwork's bytes exist (Hunt #11) must not cost
+    a 15 MB download — measured 16/09: 14 MB, 19 MB, one of 171 MB, and the
+    full fetch timed out. 8 s because ~100 s of a 282 s run went to gateways
+    that were never going to answer (17/09)."""
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
+                                               **(headers or {})})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return r.read(8192)
+
+
 def _http_post(url: str, body: bytes, headers: dict) -> str:
     import urllib.request
 
@@ -348,6 +362,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         try:
             target_wiring = build_target(
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
+                http_get_range=_http_get_range,
                 http_post=_http_post, http_get_bytes=_http_get_image_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
                 progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),
@@ -972,6 +987,13 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     )
                 except Exception as e:  # noqa: BLE001 — cosmetic
                     lines.append(f"target: gate ilegível ({type(e).__name__})")
+                try:
+                    # COUNTS ONLY: the larder is the next thirty answers
+                    n = target_wiring.larder_size()
+                    lines.append(f"despensa: {n} alvo(s) verificados"
+                                 + ("  ⚠️ corre /fill" if n < 20 else ""))
+                except Exception as e:  # noqa: BLE001
+                    lines.append(f"despensa: ilegível ({type(e).__name__})")
 
         if s.fmml_usd_price:
             one_b = 1_000_000_000 * s.fmml_usd_price
@@ -1237,10 +1259,26 @@ def build_agent(settings: Settings | None = None) -> Agent:
     def _snapshot(arg: str = "") -> str:
         return _target_job("snapshot", lambda: target_wiring.snapshot().render())
 
+    def _fill(arg: str = "") -> str:
+        """Top the larder up to N verified targets (default 50).
+
+        Deliberately off the clock (17/09): the slow half of a hunt — drawing,
+        reading metadata, proving the image's BYTES exist, checking the owner
+        and the name's uniqueness — happens on a day when nobody is waiting.
+        Whatever is found is saved even if the run is cut short."""
+        try:
+            want = int(arg.strip()) if arg.strip() else 50
+        except ValueError:
+            return "usage: /fill [quantos]"
+        if want < 1 or want > 500:
+            return "usage: /fill [1..500]"
+        return _target_job("fill", lambda: target_wiring.fill(want))
+
     actions = {
         "launch": _launch,
         "scan": _scan,
         "snapshot": _snapshot,
+        "fill": _fill,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,
         "dress": _dress,

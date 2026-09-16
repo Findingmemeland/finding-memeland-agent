@@ -37,6 +37,7 @@ from .adapters import (
     chain_rpcs,
     code_bytes,
     creator_credit,
+    abi_uint,
     gateway_url,
     mint_fetcher,
     sniff_media_type,
@@ -54,6 +55,7 @@ from .hunt import (
     TargetHuntPreparer,
 )
 from .integration import ArtworkUnusable, TargetPorts
+from .prepare import SOURCES, Larder, LarderStore, TargetFinder
 from .pipeline import PipelineReport, SnapshotPipeline
 from .search_guard import (
     ClueSearchGuard,
@@ -64,6 +66,8 @@ from .search_guard import (
 from .selector import CurationEpoch
 from .snapshot import Snapshot, SnapshotStore, StratumGateReport, stratum_gate
 from .sources import (
+    SEL_TOKENBYINDEX,
+    SEL_TOTAL,
     EPOCH1_CAP_EXEMPT,
     EPOCH1_CHAINS,
     EPOCH1_STRATA,
@@ -74,6 +78,12 @@ from .sources import (
 BLOB_DISCOVERY = "target:discovery"
 BLOB_REGISTRY = "target:registry"
 BLOB_SNAPSHOT = "target:snapshot"
+BLOB_LARDER = "target:larder"
+PROBE_BYTES = 4096
+# 8 s, measured 17/09: of 282 s over 20 draws, ~100 went to gateways that were
+# never going to answer. A ranged 4 KB read that has not arrived in 8 s is not
+# arriving, and a dead pin gets the same verdict either way.
+PROBE_TIMEOUT_S = 8.0
 MAX_ARTWORK_BYTES = 5 * 1024 * 1024      # X image limit; bigger → link only
 ARTWORK_TIMEOUT_S = 10                   # a winner is waiting; the picture is optional
 
@@ -102,6 +112,27 @@ class TargetWiring:
     # which marketplace serves the search guard / uniqueness / chain probe
     # ('opensea' or 'rarible') — for /status, never for a public post
     market_surface: str = ""
+    # the larder (17/09): targets verified in advance, one used per hunt.
+    # THE NEXT THIRTY ANSWERS — encrypted, never rendered, counts only.
+    finder: TargetFinder | None = None
+    larder_store: LarderStore | None = None
+
+    def larder_size(self) -> int:
+        if self.larder_store is None:
+            return 0
+        return self.larder_store.load().size()
+
+    def fill(self, want: int) -> str:
+        """Draw and verify until the larder holds `want`. Off the clock by
+        design: a slow gateway costs time here and nothing else."""
+        if self.finder is None or self.larder_store is None:
+            return "despensa não configurada"
+        larder: Larder = self.larder_store.load()
+        try:
+            tally = self.finder.fill(larder, want=want, max_draws=12 * want)
+        finally:
+            self.larder_store.save(larder)      # keep whatever was found
+        return f"fill: {tally.render()} · despensa {larder.size()}"
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -156,6 +187,7 @@ def _media_kind(data: bytes) -> str:
 
 
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
+                 http_get_range=None,
                  get_artwork_bytes=None, solver=None,
                  rng: random.Random | None = None,
                  progress=None) -> TargetWiring:
@@ -397,7 +429,40 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         max_hold_s=float(s.target_max_hold_s),
         max_total_hold_s=float(s.target_max_total_hold_s),
     )
-    return TargetWiring(ports=ports, pipeline=pipeline, epoch=epoch,
+    # -- the larder: find targets in advance, use one per hunt -------------- #
+    # a RANGED transport when main.py supplies one (8 s, 4 KB); otherwise the
+    # ordinary one, which still works — just slower on dead pins.
+    ranged = http_get_range or http_get_bytes
+
+    def probe_image(uri: str):
+        """RANGED read: the first few KB plus the size. Proves the bytes are
+        there (Hunt #11) without pulling a 15 MB artwork."""
+        url = gateway_url(uri, s.target_ipfs_gateway)
+        if url is None:
+            return None
+        head = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
+        if not head or sniff_media_type(head) is None:
+            return None
+        return head, 0
+
+    # NOTE (17/09): composing must not touch the network. An earlier draft
+    # called enumerable_sources() here and made boot depend on an RPC round
+    # trip on every deploy — caught by test_wiring_credit_reads_token_creator,
+    # which rightly assumes build_target is pure composition.
+    # TargetFinder.load_sizes() already drops a source that will not answer,
+    # at the moment it matters, and refuses loudly when none does.
+    finder = TargetFinder(
+        sources=SOURCES,
+        total_supply=lambda c, k: int(rpcs[c].eth_call(k, SEL_TOTAL), 16),
+        token_by_index=lambda c, k, i: int(
+            rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
+        read_token=keyed_meta.read, probe_image=probe_image,
+        owner_is_eoa=eoa_check, name_is_unique=uniqueness,
+        rng=rng, now_iso=_now_iso)
+
+    return TargetWiring(finder=finder,
+                        larder_store=LarderStore(**store(BLOB_LARDER)),
+                        ports=ports, pipeline=pipeline, epoch=epoch,
                         snapshot_store=snapshot_store,
                         scan_blocks=int(s.target_scan_blocks),
                         writability_rates=s.target_writability_rate_map,
