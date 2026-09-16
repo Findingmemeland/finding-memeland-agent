@@ -12,8 +12,9 @@ import random
 import pytest
 
 from finding_memeland.target.prepare import (
-    Candidate, Larder, LarderIntegrityError, LarderStore, PrepareRefused,
-    Source, TargetFinder, TargetPreparer, enumerable_sources,
+    Candidate, Larder, LarderIntegrityError, LarderStore, Prepared,
+    PreparedStore, PrepareRefused, Source, TargetFinder, TargetPreparer,
+    enumerable_sources, excluded_ids, used_hmac,
 )
 from finding_memeland.target.refresh import TokenRead
 
@@ -253,3 +254,108 @@ def test_no_source_answers_refuses_loudly_without_drawing():
     with pytest.raises(PrepareRefused) as e:
         _finder(world).fill(Larder(), want=1)
     assert "totalSupply" in str(e.value)
+
+
+# --- used targets: the authority is the hunt rows, not the blob ------------ #
+
+KEY = "a-very-secret-key"
+
+
+def test_a_restored_backup_cannot_resurrect_a_revealed_target():
+    """Fable, 17/09: restore the larder from before a hunt and a target that
+    was already named in a reveal comes back. The hunt rows only grow, so
+    they are the authority."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=6, max_draws=160)
+    revealed = larder.candidates[0].id()
+    rows = [used_hmac(revealed, KEY)]          # what the hunt row carries
+
+    prep = TargetPreparer(
+        finder=finder, fetch_image=world.fetch_image, describe=world.describe,
+        write_clue_one=world.write_clue_one, rng=random.Random(3),
+        key=KEY, used_hmacs=lambda: rows)
+    prepared, larder = prep.prepare(larder)
+    assert prepared.target.id() != revealed
+    assert not any(c.id() == revealed for c in larder.candidates)
+
+
+def test_the_fingerprint_is_keyed_so_the_hunt_table_is_not_an_oracle():
+    """A bare SHA-256 of chain:contract:tokenId would let anyone hash the
+    167k ids and read every past target off the hunt table — and confirm a
+    guess about a LIVE one. Same reasoning as the salt in the commitment."""
+    tid = "ethereum:0xabc:1"
+    assert used_hmac(tid, KEY) != used_hmac(tid, "another-key")
+    assert tid not in used_hmac(tid, KEY)
+    assert len(used_hmac(tid, KEY)) == 64
+
+
+def test_excluded_ids_matches_only_what_the_rows_carry():
+    world = World()
+    larder = Larder()
+    _finder(world).fill(larder, want=4, max_draws=120)
+    one = larder.candidates[1].id()
+    out = excluded_ids(larder.candidates, used_hmacs=[used_hmac(one, KEY)],
+                       key=KEY)
+    assert out == {one}
+
+
+# --- the prepared hunt lives in the database, not in memory ---------------- #
+
+
+class Cipher:
+    def encrypt(self, s): return "E" + s
+
+    def decrypt(self, s):
+        if not s.startswith("E"):
+            raise ValueError("bad key")
+        return s[1:]
+
+
+def _prepared_store(blob: dict) -> PreparedStore:
+    return PreparedStore(cipher=Cipher(), read=lambda: blob.get("v"),
+                         write=lambda p: blob.__setitem__("v", p))
+
+
+def test_the_prepared_hunt_survives_a_restart():
+    """A restart between the day before and the hour must not lose the
+    preparation — and losing it silently is worse, because the operator
+    finds out at the announced minute."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=4, max_draws=120)
+    prepared, _ = _preparer(world, finder).prepare(larder)
+
+    blob = {}
+    store = _prepared_store(blob)
+    store.save(prepared)
+    back = store.load()                      # a fresh process would do this
+    assert back is not None
+    assert back.target.id() == prepared.target.id()
+    assert back.target.metadata_sha256 == prepared.target.metadata_sha256
+    assert back.image_description == prepared.image_description
+    assert back.clue_one == prepared.clue_one
+
+
+def test_the_prepared_store_fails_closed_and_names_nothing():
+    blob = {"v": "GARBAGE"}
+    with pytest.raises(LarderIntegrityError) as e:
+        _prepared_store(blob).load()
+    assert "0x" not in str(e.value) and "ipfs" not in str(e.value)
+    assert "/prepare" in str(e.value)
+
+
+def test_an_empty_slot_reads_as_nothing_prepared():
+    assert _prepared_store({}).load() is None
+    assert _prepared_store({"v": ""}).load() is None
+
+
+def test_the_prepared_never_renders_its_contents():
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=4, max_draws=120)
+    prepared, _ = _preparer(world, finder).prepare(larder)
+    assert "0x" not in repr(prepared) and "ipfs" not in repr(prepared)

@@ -65,6 +65,8 @@ Everything effectful is injected; the logic tests offline.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import random
 from dataclasses import dataclass, field
@@ -295,6 +297,40 @@ class PrepareRefused(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# Used targets: the authority lives on the hunt rows, not in the larder        #
+# --------------------------------------------------------------------------- #
+
+
+def used_hmac(target_id: str, key: str) -> str:
+    """HMAC-SHA256 of a target id, keyed with TARGET_POOL_KEY (Fable, 17/09).
+
+    The larder remembers what it has used, but a blob is MUTABLE: restore a
+    backup from before a hunt and a target that was already revealed comes
+    back to life, gets drawn again, and the reveal of a month ago already
+    named it. So "used" does not live only in the larder — every hunt row
+    carries this fingerprint, and `/prepare` excludes anything that matches
+    one. The hunt table only ever grows, so a restored blob loses its
+    power.
+
+    It is an HMAC and not a plain hash because a bare SHA-256 of
+    `chain:contract:tokenId` is an ENUMERATION ORACLE: anyone with the
+    source list could hash all 167k ids and read the hunt table to learn
+    every past target — and, worse, confirm a guess about a LIVE one. The
+    key makes the fingerprint useless to anyone who does not already have
+    it. Same reasoning that put the salt inside the commitment."""
+    return hmac.new(key.encode("utf-8"), target_id.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def excluded_ids(candidates: Sequence["Candidate"], *, used_hmacs: Sequence[str],
+                 key: str) -> set[str]:
+    """Which candidates are already spent, by matching their fingerprint
+    against the ones the hunt rows carry."""
+    seen = set(used_hmacs)
+    return {c.id() for c in candidates if used_hmac(c.id(), key) in seen}
+
+
+# --------------------------------------------------------------------------- #
 # Finding — the network half, off the clock                                    #
 # --------------------------------------------------------------------------- #
 
@@ -464,12 +500,96 @@ class TargetFinder:
 @dataclass(frozen=True)
 class Prepared:
     """What `/launch` publishes. Clue 1 is already written and judged; launch
-    adds a live check (RPC, seconds) and the post."""
+    adds a live check (RPC, seconds) and the post.
+
+    It is SEALED TO THE DATABASE, not kept in memory (Fable, 17/09): a
+    restart between the day before and the hour must not lose the
+    preparation — and losing it silently is worse, because the operator
+    would find out at the announced minute."""
 
     target: Target
     clue_one: object
     image_description: str
     attempts: int
+    salt: str = ""
+    commitment: str = ""
+    prepared_at: str = ""
+
+    def id(self) -> str:
+        return self.target.id()
+
+    def __repr__(self) -> str:          # never the contents
+        return f"Prepared(<sealed>, {self.attempts} attempt(s))"
+
+    __str__ = __repr__
+
+
+# How long a preparation is good for. Past this the artwork has had too
+# long to change under us and the Clue 1 has had too long to become a
+# search; `/launch` refuses and asks for a fresh `/prepare`.
+PREPARED_TTL_HOURS = 72
+
+
+class PreparedStore:
+    """The prepared hunt, encrypted with TARGET_POOL_KEY, one slot. Reading
+    it is how `/launch` finds the hunt — never a variable in memory."""
+
+    VERSION = 1
+
+    def __init__(self, *, cipher, read: Callable[[], str | None],
+                 write: Callable[[str], None]):
+        self._cipher = cipher
+        self._read = read
+        self._write = write
+
+    def save(self, p: Prepared) -> None:
+        t = p.target
+        self._write(self._cipher.encrypt(json.dumps({
+            "v": self.VERSION, "prepared_at": p.prepared_at,
+            "salt": p.salt, "commitment": p.commitment,
+            "attempts": p.attempts, "image_description": p.image_description,
+            "clue_one": p.clue_one if isinstance(p.clue_one, (dict, str))
+                        else getattr(p.clue_one, "__dict__", {}),
+            "target": {"chain": t.chain, "contract": t.contract,
+                       "tokenId": t.token_id, "name": t.name,
+                       "name_onchain": t.name_onchain,
+                       "description": t.description, "image": t.image,
+                       "metadata_sha256": t.metadata_sha256,
+                       "epoch": t.epoch, "token_uri": t.token_uri,
+                       "content_id": t.content_id, "artist": t.artist},
+        }, ensure_ascii=False)))
+
+    def clear(self) -> None:
+        self._write("")
+
+    def load(self) -> Prepared | None:
+        blob = self._read()
+        if not blob:
+            return None
+        try:
+            doc = json.loads(self._cipher.decrypt(blob))
+            if doc.get("v") != self.VERSION:
+                raise ValueError("unexpected prepared version")
+            t = doc["target"]
+            return Prepared(
+                target=Target(
+                    chain=t["chain"], contract=t["contract"],
+                    token_id=int(t["tokenId"]), name=t["name"],
+                    name_onchain=t["name_onchain"],
+                    description=t.get("description", ""), image=t["image"],
+                    metadata_sha256=t["metadata_sha256"], epoch=t["epoch"],
+                    token_uri=t.get("token_uri", ""),
+                    content_id=t.get("content_id", ""),
+                    artist=t.get("artist", "")),
+                clue_one=doc.get("clue_one"),
+                image_description=doc.get("image_description", ""),
+                attempts=int(doc.get("attempts", 1)),
+                salt=doc.get("salt", ""), commitment=doc.get("commitment", ""),
+                prepared_at=doc.get("prepared_at", ""))
+        except Exception as e:  # noqa: BLE001 — fail closed, no contents
+            raise LarderIntegrityError(
+                f"prepared hunt unreadable ({type(e).__name__}) — wrong key "
+                "or corrupted store; run /prepare again") from e
 
 
 class TargetPreparer:
@@ -484,7 +604,9 @@ class TargetPreparer:
 
     def __init__(self, *, finder: TargetFinder, fetch_image, describe,
                  write_clue_one, epoch_id: str = "e1",
-                 max_attempts: int = 6,
+                 max_attempts: int = 6, key: str = "",
+                 used_hmacs: Callable[[], Sequence[str]] | None = None,
+                 now_iso: Callable[[], str] | None = None,
                  rng: random.Random | None = None,
                  notify: Callable[[str], None] | None = None):
         self._finder = finder
@@ -493,6 +615,9 @@ class TargetPreparer:
         self._write_clue_one = write_clue_one
         self._epoch = epoch_id
         self._max_attempts = max(1, int(max_attempts))
+        self._key = key
+        self._used_hmacs = used_hmacs or (lambda: ())
+        self._now = now_iso or (lambda: "")
         self._rng = rng or random.SystemRandom()
         self._notify = notify or (lambda _t: None)
 
@@ -504,6 +629,24 @@ class TargetPreparer:
         if larder.size() == 0:
             raise PrepareRefused("despensa vazia — corre /fill primeiro")
         self._finder.load_sizes()
+
+        # A restored backup can resurrect a target this project already
+        # revealed. The hunt rows are the authority, not the blob.
+        if self._key:
+            try:
+                spent = excluded_ids(larder.candidates,
+                                     used_hmacs=list(self._used_hmacs()),
+                                     key=self._key)
+            except Exception:  # noqa: BLE001 — the DB is not a reason to stop
+                spent = set()
+            for cid in spent:
+                larder.consume(cid)
+            if spent:
+                self._notify(f"prepare: {len(spent)} alvo(s) da despensa já "
+                             "tinham sido usados numa hunt — descartados")
+            if larder.size() == 0:
+                raise PrepareRefused(
+                    "todos os alvos da despensa já foram usados — corre /fill")
         tally = Tally()
         for attempt in range(1, self._max_attempts + 1):
             cand = larder.take(self._rng)
@@ -539,7 +682,7 @@ class TargetPreparer:
                          f"despensa {larder.size()}")
             return Prepared(target=target, clue_one=clue_one,
                             image_description=description,
-                            attempts=attempt), larder
+                            attempts=attempt, prepared_at=self._now()), larder
 
         raise PrepareRefused(
             f"{self._max_attempts} candidatos da despensa falharam a "
