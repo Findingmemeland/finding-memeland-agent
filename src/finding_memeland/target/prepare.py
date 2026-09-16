@@ -72,6 +72,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
+from .commitment import compute_commitment_v2, generate_salt
 from .refresh import content_id, uri_is_content_addressed
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
 
@@ -205,6 +206,19 @@ class Larder:
         return f"Larder({len(self.candidates)} ready, {len(self.used)} used)"
 
     __str__ = __repr__
+
+
+class ReadUnavailable(RuntimeError):
+    """OUR transport failed — the gateway threw, the RPC threw. It says
+    nothing about the candidate.
+
+    R8 applied to the larder (measured 17/09): the first live `/fill` of 600
+    draws lost 442 of them at the metadata read, against 1 in 20 on a laptop
+    the same day. That gap is a throttled gateway, not four hundred dead
+    NFTs. During `/fill` the distinction costs nothing — a lost draw is a
+    redraw. During `/prepare` it is everything: a candidate dropped for OUR
+    outage is a verified target thrown away, and six of them in a row empties
+    a third of the larder for a 429."""
 
 
 class LarderIntegrityError(RuntimeError):
@@ -400,12 +414,19 @@ class TargetFinder:
             return None
         return (src, int(tid)) if tid is not None else None
 
-    def named_token(self, src: Source, tid: int, tally: Tally):
+    def named_token(self, src: Source, tid: int, tally: Tally, *,
+                    strict: bool = False):
         """Checks 1 and 2 — metadata resolves, image is content-addressed,
-        base name has two real words. Local and cheap; kills first."""
+        base name has two real words. Local and cheap; kills first.
+
+        `strict` (the /prepare path): a transport failure RAISES instead of
+        counting as a rejection, so the caller can tell 'this candidate is
+        dead' from 'we could not read it right now' and keep the candidate."""
         try:
             read = self._read_token(src.chain, src.contract, tid)
-        except Exception:  # noqa: BLE001 — this draw, not the run
+        except Exception as e:  # noqa: BLE001 — this draw, not the run
+            if strict:
+                raise ReadUnavailable(type(e).__name__) from None
             tally.metadata += 1
             return None
         if read is None or not isinstance(read.metadata, dict) or not read.metadata:
@@ -422,15 +443,21 @@ class TargetFinder:
         return read, base
 
     def verify(self, src: Source, tid: int, read, base: str, tally: Tally,
-               ) -> Candidate | None:
+               *, strict: bool = False) -> Candidate | None:
         """Checks 3, 4 and 5 — the image really is there, the owner is an
         EOA, the name is unique. Uniqueness LAST: it is the only paid call,
-        so nothing that a free check can kill ever spends one."""
+        so nothing that a free check can kill ever spends one.
+
+        `strict`: see named_token. Note what it does NOT cover — a probe
+        that ANSWERS with no bytes is a dead pin, and that is the candidate's
+        fault, not ours (Hunt #11). Only a throw is ours."""
         meta = read.metadata
         image_uri = str(meta.get("image") or "")
         try:
             head = self._probe_image(image_uri)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise ReadUnavailable(type(e).__name__) from None
             head = None
         if not head or not head[0]:
             tally.image += 1            # Hunt #11: a perfect URI, no bytes
@@ -440,14 +467,18 @@ class TargetFinder:
             return None
         try:
             eoa = self._owner_is_eoa(src.chain, src.contract, tid)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise ReadUnavailable(type(e).__name__) from None
             eoa = None
         if eoa is not True:
             tally.owner += 1
             return None
         try:
             uniq = self._name_is_unique(base, src.chain, src.contract, tid)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise ReadUnavailable(type(e).__name__) from None
             uniq = None
         if uniq is not True:
             tally.unique += 1
@@ -648,6 +679,11 @@ class TargetPreparer:
                 raise PrepareRefused(
                     "todos os alvos da despensa já foram usados — corre /fill")
         tally = Tally()
+        # OUR outages are counted apart and NEVER consume a candidate (R8).
+        # Enough of them in a row and the honest answer is "we are down",
+        # with the larder untouched — not a larder emptied by a 429.
+        unavailable = 0
+        max_unavailable = max(3, self._max_attempts)
         for attempt in range(1, self._max_attempts + 1):
             cand = larder.take(self._rng)
             if cand is None:
@@ -658,12 +694,25 @@ class TargetPreparer:
             tally.draws += 1
 
             # things age: re-read and re-check before committing to it
-            named = self._finder.named_token(src, cand.token_id, tally)
-            if named is None:
-                larder.consume(cand.id())
+            try:
+                named = self._finder.named_token(src, cand.token_id, tally,
+                                                 strict=True)
+                if named is None:
+                    larder.consume(cand.id())
+                    continue
+                read, base = named
+                fresh = self._finder.verify(src, cand.token_id, read, base,
+                                            tally, strict=True)
+            except ReadUnavailable as e:
+                unavailable += 1
+                self._notify(f"prepare: leitura indisponível ({e}) — candidato "
+                             "MANTIDO na despensa, tento outro")
+                if unavailable >= max_unavailable:
+                    raise PrepareRefused(
+                        f"{unavailable} leituras seguidas falharam por nossa "
+                        "causa (gateway/RPC) — despensa INTACTA. Tenta daqui "
+                        "a pouco.") from None
                 continue
-            read, base = named
-            fresh = self._finder.verify(src, cand.token_id, read, base, tally)
             if fresh is None:
                 larder.consume(cand.id())
                 continue
@@ -675,14 +724,30 @@ class TargetPreparer:
                 continue
 
             target = fresh.to_target(self._epoch)
+            # An empty description means vision refused the bytes — they
+            # sniffed as an image on the first 4 KB and turned out to be
+            # something else (an SVG, a video, a throttle page). Clue 1
+            # about an artwork nobody described is a clue about nothing:
+            # drop the candidate, take the next.
             description = self._describe(target_bytes)
+            if not str(description or "").strip():
+                tally.metadata += 1
+                larder.consume(cand.id())
+                continue
             clue_one = self._write_clue_one(target, description)
+            # The commitment is PUBLISHED IN CLUE 1, so it is born here, with
+            # the clue — not at launch. Same v2 formula as ever: nothing
+            # about the protocol changes because the moment moved.
+            salt = generate_salt()
+            commitment = compute_commitment_v2(target.id(),
+                                               target.metadata_sha256, salt)
             larder.consume(cand.id())
             self._notify(f"prepare: alvo selado à {attempt}.ª tentativa · "
                          f"despensa {larder.size()}")
             return Prepared(target=target, clue_one=clue_one,
                             image_description=description,
-                            attempts=attempt, prepared_at=self._now()), larder
+                            attempts=attempt, salt=salt, commitment=commitment,
+                            prepared_at=self._now()), larder
 
         raise PrepareRefused(
             f"{self._max_attempts} candidatos da despensa falharam a "

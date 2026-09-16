@@ -158,6 +158,18 @@ class TargetWiring:
         age = (datetime.now(timezone.utc) - made).total_seconds() / 3600
         return PREPARED_TTL_HOURS - age
 
+    def prepared_fingerprint(self) -> str:
+        """What the launch confirmation is BOUND to. The commitment, not the
+        target: it identifies this preparation uniquely, it is salted (so it
+        tells a reader nothing), and it is the very value Clue 1 publishes.
+        A /prepare between the prompt and the 'sim' changes it, and the
+        operator is asked to run /launch again over the new one."""
+        try:
+            p = self.prepared()
+        except Exception:  # noqa: BLE001 — unreadable binds to nothing
+            return ""
+        return p.commitment if p is not None else ""
+
     def prepare(self) -> str:
         """Draw one from the larder, re-verify it, write Clue 1, seal it to
         the database. Replaces the whole snapshot+gate path."""
@@ -458,14 +470,18 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         name_is_unique=uniqueness,
         now_iso=_now_iso, rng=rng, thresholds=thresholds)
 
+    # ONE engine, shared by /prepare (Clue 1, on the day before) and the ramp
+    # (clues 2+, during the hunt): the guards a clue must pass cannot depend
+    # on which command asked for it.
+    clue_engine = TargetClueEngine(
+        anthropic, s.anthropic_model, search_guard=search_guard, solver=solver,
+        truth_judge=AnthropicTruthJudge(anthropic, s.target_judge_model))
+
     ports = TargetPorts(
         epoch=epoch,
         preparer=preparer,
         cipher=SealedTargetCipher(cipher=cipher),
-        clue_engine=TargetClueEngine(anthropic, s.anthropic_model,
-                                     search_guard=search_guard, solver=solver,
-                                     truth_judge=AnthropicTruthJudge(
-                                         anthropic, s.target_judge_model)),
+        clue_engine=clue_engine,
         describe_image=describe_image,
         live_check=RotatingLiveCheck(generic=generic, rng=rng),
         resolve_link=resolver,
@@ -481,6 +497,22 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         hold_renotify_s=float(s.target_hold_renotify_s),
         max_hold_s=float(s.target_max_hold_s),
         max_total_hold_s=float(s.target_max_total_hold_s),
+        # -- the prepared hunt: /launch reads, it does not draw ---------- #
+        # Late-bound on purpose: `prepared_store` is composed below, and
+        # composing must stay in one place. The closure resolves when
+        # /launch calls it, which is the only moment it matters.
+        take_prepared=lambda: prepared_store.load(),
+        clear_prepared=lambda: prepared_store.clear(),
+        # The guard about the WORLD, run again at launch over the sealed
+        # Clue 1 (Fable, 17/09). The judge and the solver are about the
+        # clue and the answer — both frozen since yesterday. Whether the
+        # piece has become findable in a search box is not.
+        recheck_clue_one=(lambda text, *, target_item_id, target_name_onchain:
+                          search_guard.check(text, target_item_id=target_item_id,
+                                             target_name_onchain=target_name_onchain)),
+        prepared_max_age_h=float(PREPARED_TTL_HOURS),
+        used_hmac=((lambda tid: used_hmac(tid, s.target_pool_key))
+                   if s.target_pool_key else None),
     )
     # -- the larder: find targets in advance, use one per hunt -------------- #
     # a RANGED transport when main.py supplies one (8 s, 4 KB); otherwise the
@@ -515,6 +547,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         rng=rng, now_iso=_now_iso)
 
     larder_store = LarderStore(**store(BLOB_LARDER))
+    prepared_store = PreparedStore(**store(BLOB_PREPARED))
     def fetch_artwork_once(uri: str) -> bytes | None:
         """The FULL artwork, once, for the accepted candidate — the only
         place a whole image is downloaded. Capped: vision cannot use more,
@@ -527,21 +560,27 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             return None
         return data
 
-    def _clue_one_not_wired(_target, _description):
-        # The clue engine lands with the /launch commit. Raising here means
-        # a premature /prepare refuses loudly instead of sealing a hunt with
-        # no Clue 1 — the kind of half-built path that killed 16/09.
-        raise RuntimeError("clue engine not wired into /prepare yet")
+    def write_clue_one(target, description: str):
+        """Clue 1, written and put through every guard, ON THE DAY BEFORE.
+
+        This is the slow half of a hunt — up to ten drafts, each judged by
+        the consistency judge, the search guard and the blind solver — and
+        moving it off launch day is the whole point of `/prepare`. The
+        16/09 launch spent 10-25 minutes here with an audience waiting and
+        a prompt that promised "seconds"."""
+        ctx = TargetClueContext.from_target(target, image_description=description,
+                                            metadata=None)
+        return clue_engine.next_clue(ctx, 1, [])
 
     larder_preparer = LarderPreparer(
         finder=finder, fetch_image=fetch_artwork_once, describe=vision,
-        write_clue_one=_clue_one_not_wired,
+        write_clue_one=write_clue_one,
         epoch_id=s.target_epoch_id, key=s.target_pool_key,
         used_hmacs=lambda: repo.used_target_hmacs(),
         now_iso=_now_iso, rng=rng)
 
     return TargetWiring(finder=finder, larder_store=larder_store,
-                        prepared_store=PreparedStore(**store(BLOB_PREPARED)),
+                        prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,
                         ports=ports, pipeline=pipeline, epoch=epoch,

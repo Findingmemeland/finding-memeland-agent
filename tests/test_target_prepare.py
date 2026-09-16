@@ -191,6 +191,68 @@ def test_prepare_seals_a_target_and_consumes_it():
     assert larder.has(prepared.target.id())
 
 
+def test_the_commitment_is_born_with_clue_one_not_at_launch():
+    """Clue 1 PUBLISHES the commitment, and Clue 1 is written here — so the
+    salt and the commitment are made here too, with the same v2 formula.
+    Launch adds nothing to them; it only publishes what this sealed."""
+    from finding_memeland.target.commitment import verify_commitment_v2
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    prepared, _ = _preparer(world, finder).prepare(larder)
+    assert prepared.salt and prepared.commitment
+    assert verify_commitment_v2(prepared.target.id(),
+                                prepared.target.metadata_sha256,
+                                prepared.salt, prepared.commitment)
+
+
+def test_a_candidate_vision_cannot_describe_is_dropped_not_launched():
+    """The 4 KB probe sniffs an image; the whole file can still turn out to
+    be an SVG, a video or a throttle page, and vision answers with nothing.
+    A Clue 1 about an artwork nobody described is a clue about nothing —
+    so the candidate is dropped and the next one is used."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+    calls = {"n": 0}
+
+    def describe(data):
+        calls["n"] += 1
+        return "" if calls["n"] == 1 else "an artwork"
+    world.describe = describe
+    prepared, larder = _preparer(world, finder).prepare(larder)
+    assert calls["n"] == 2                      # the mute one, then a good one
+    assert prepared.image_description == "an artwork"
+    assert larder.size() == before - 2          # both are spent, only one used
+
+
+def test_our_own_outage_never_eats_the_larder():
+    """MEASURED (first live /fill, 17/09): 442 of 600 draws lost at the
+    metadata read, against 1 in 20 on a laptop the same day. That is a
+    throttled gateway, not four hundred dead NFTs.
+
+    In /fill the difference costs nothing — a lost draw is a redraw. In
+    /prepare it is everything: consuming a verified target because OUR
+    gateway threw would empty the larder for a 429."""
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+
+    def dead_gateway(chain, contract, tid):
+        raise TimeoutError("gateway 429")
+    world.read_token = dead_gateway
+    finder._read_token = dead_gateway
+    with pytest.raises(PrepareRefused) as e:
+        _preparer(world, finder).prepare(larder)
+    assert "INTACTA" in str(e.value)
+    assert larder.size() == before          # not one candidate spent
+
+
 def test_prepare_re_verifies_and_drops_a_candidate_that_died_in_the_larder():
     """Pins expire between fill and prepare. The stale one is dropped, not
     launched — and the next one is used instead."""

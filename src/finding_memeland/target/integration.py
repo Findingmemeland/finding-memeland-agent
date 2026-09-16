@@ -99,6 +99,24 @@ class TargetPorts:
     creator_credit: Callable[[SealedTarget], str] | None = None
     # How many redraws the content guard may force before /launch refuses.
     max_content_redraws: int = 3
+    # -- the prepared hunt (17/09) ------------------------------------- #
+    # /launch no longer draws, judges, describes or writes. It READS what
+    # /prepare sealed the day before and publishes it. Hunt #11 (16/09)
+    # died doing all of that with an audience watching a prompt that had
+    # promised "seconds".
+    take_prepared: Callable[[], object] | None = None    # -> prepare.Prepared | None
+    clear_prepared: Callable[[], None] | None = None
+    # THE ONE GUARD THAT MUST RUN AGAIN AT LAUNCH (Fable, 17/09): a clue
+    # written yesterday can have become a search TODAY — the piece gets
+    # listed, indexed, tweeted about. The judge and the solver are about
+    # the clue and the answer, both frozen; searchability is about the
+    # world, and the world moved. Returns a SearchGuardVerdict-alike.
+    recheck_clue_one: Callable[..., object] | None = None
+    # Past this the preparation is too old to trust (prepare.PREPARED_TTL_HOURS).
+    prepared_max_age_h: float = 72.0
+    # Keyed fingerprint of the used target, written on the hunt row so a
+    # restored larder backup can never resurrect a revealed target.
+    used_hmac: Callable[[str], str] | None = None
     # HOLD ceiling and cadence (Opus, 06/09, P1-B): a hold without a ceiling
     # and without a second notice is a void in slow motion with nobody
     # watching. Re-notify every `hold_renotify_s`; past `max_hold_s` the
@@ -146,49 +164,69 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
                         ladder_exempt: bool = False):
     """The target twin of prepare_relic_hunt. Returns a PreparedHunt.
 
-    Order: 1. gate + draw + judge + seal (TargetHuntPreparer — refuses
-    loudly unless the gate is GREEN); 2. the artwork description through
-    the batched vision path (refuses if the art can't be fetched); 3. the
-    hunt row with the sealed payloads; 4. the in-memory hunt."""
+    IT DRAWS NOTHING. Everything slow — the draw, the verification, the
+    artwork download, the vision pass, the ten drafts of Clue 1 — happened
+    at `/prepare`, on a day when nobody was waiting. What is left here is
+    what launch was always supposed to be: check the preparation is fresh,
+    re-run the ONE guard that can have gone stale, write the row, publish.
+
+    Order: 1. read the sealed preparation (refuses loudly if there is
+    none, or it is expired, or the key no longer opens it); 2. the search
+    guard, again, over the sealed Clue 1 — the clue and the answer are
+    frozen, but searchability is about the world and the world moved;
+    3. the hunt row with the sealed payloads; 4. the in-memory hunt."""
     from ..orchestrator.state_machine import HuntState, PreparedHunt
+    from .hunt import LaunchRefused
 
     ports: TargetPorts = orch._target
-    # The immediate relaunch after a void is the case that matters (Opus,
-    # 06/09): the id voided in THIS process is excluded even when the repo
-    # has no `recent_target_voids` yet.
-    exclude = recent_void_ids(orch) | frozenset(
-        [x for x in [getattr(orch, "_last_target_void_id", None)] if x])
-    # The content guard lives on the image pass (Opus, 06/09): a refused
-    # artwork excludes its id and the draw runs again — bounded, so a pool
-    # full of refusals refuses the launch instead of grinding.
-    from .clues import ContentRefused, ImageUnavailable
-    from .hunt import LaunchRefused
-    refused = 0
-    while True:
-        sealed = ports.preparer.prepare(ports.epoch, exclude=exclude)
+    if ports.take_prepared is None:
+        raise LaunchRefused("modo alvo sem despensa ligada — /prepare indisponível")
+    try:
+        prepared = ports.take_prepared()
+    except Exception as e:  # noqa: BLE001 — never the contents, only the type
+        raise LaunchRefused(
+            f"preparação ilegível ({type(e).__name__}) — corre /prepare outra vez"
+        ) from None
+    if prepared is None:
+        raise LaunchRefused("sem hunt preparada — corre /prepare primeiro. "
+                            "Nada foi publicado.")
+    age_h = _prepared_age_hours(prepared, orch)
+    if age_h is not None and age_h > ports.prepared_max_age_h:
+        raise LaunchRefused(
+            f"a preparação tem {age_h:.0f}h (máximo {ports.prepared_max_age_h:.0f}h) "
+            "— a arte e a pesquisa tiveram tempo de mudar. Corre /prepare outra vez.")
+
+    target = prepared.target
+    draft = prepared.clue_one
+    clue_text = getattr(draft, "text", None) or ""
+    if not clue_text.strip():
+        raise LaunchRefused("a preparação não traz Clue 1 — corre /prepare outra vez")
+
+    # The one guard that is about the WORLD, not about the clue: re-run it.
+    # Unverifiable is a refusal, not a pass — the whole point of the guard
+    # is that we do not publish a clue we could not test (R2/R8).
+    if ports.recheck_clue_one is not None:
         try:
-            image_description = ports.describe_image(sealed)
-            break
-        except ImageUnavailable as e:
-            # Hunt #11 (16/09): this surfaced as "HUNT DIED … players may be
-            # mid-game" — nothing had been posted or written yet (the hunt
-            # row is created BELOW). It is a refusal, and the operator reads
-            # the measured cause. `from None`: the message carries no id.
-            raise LaunchRefused(f"artwork unreadable — {e}") from None
-        except ContentRefused as e:
-            refused += 1
-            exclude = exclude | frozenset({e.target_id})
-            orch._notify(f"content guard refused a drawn artwork ({refused}) "
-                         "— redrawing (id excluded, never named)")
-            if refused >= ports.max_content_redraws:
-                # `from None` (P2-1): the chained ContentRefused carries a
-                # target id — a refused one, not the hunt's, but a traceback
-                # is not the place for any id
-                raise LaunchRefused(
-                    f"content guard refused {refused} draws in a row — "
-                    "launch refused; review the judge/pool before retrying"
-                ) from None
-    ctx = TargetClueContext.from_target(sealed.target,
+            verdict = ports.recheck_clue_one(
+                clue_text, target_item_id=target.id(),
+                target_name_onchain=target.name_onchain)
+        except Exception as e:  # noqa: BLE001
+            raise LaunchRefused(
+                f"guarda de pesquisa indisponível no launch ({type(e).__name__}) "
+                "— nada publicado; tenta outra vez quando o serviço voltar"
+            ) from None
+        if not getattr(verdict, "ok", False):
+            found = getattr(verdict, "found", None)
+            why = ("a peça tornou-se pesquisável desde ontem" if found
+                   else "a pesquisabilidade não pôde ser verificada")
+            raise LaunchRefused(
+                f"⛔ Clue 1 recusada no launch — {why} "
+                f"({getattr(verdict, 'detail', '')}). Corre /prepare outra vez.")
+
+    sealed = SealedTarget(target=target, salt=prepared.salt,
+                          commitment=prepared.commitment, decoys=())
+    image_description = prepared.image_description
+    ctx = TargetClueContext.from_target(target,
                                         image_description=image_description)
 
     number = orch._next_number()
@@ -201,6 +239,12 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         x_user_id="",                    # NEVER the target id (blind + no leak)
         access_token="", access_secret="",
     )
+    extra = {}
+    if ports.used_hmac is not None:
+        try:
+            extra["target_used_hmac"] = ports.used_hmac(target.id())
+        except Exception:  # noqa: BLE001 — a fingerprint is not worth a refusal
+            pass
     hunt_id = orch._repo.create_hunt(
         persona_id=None, persona_display_name=None, persona_bio=None,
         claim_code="",                   # no code in Option A
@@ -217,7 +261,19 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         target_ctx_sealed=ports.cipher._cipher.encrypt(  # noqa: SLF001 — same key
             json.dumps({"image_description": image_description}, ensure_ascii=False)),
         target_epoch=ports.epoch.epoch_id,
+        **extra,
     )
+    # The slot is emptied ONLY after the row exists: a crash before this
+    # leaves the preparation intact and the operator relaunches. A crash
+    # after it leaves a hunt row that resume picks up. Never both, never
+    # neither. Failing to clear is loud, not silent — a second /launch on
+    # the same preparation would publish the same target twice.
+    if ports.clear_prepared is not None:
+        try:
+            ports.clear_prepared()
+        except Exception as e:  # noqa: BLE001
+            orch._notify(f"🚨 a preparação NÃO foi limpa ({type(e).__name__}) — "
+                         "NÃO corras /launch outra vez sem /prepare.")
     hunt = PreparedHunt(
         id=hunt_id, persona=persona, identity=None, ctx=ctx,
         claim_code="", salt=sealed.salt, integrity_hash=sealed.commitment,
@@ -226,18 +282,35 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         state=HuntState.PREPARING, started_at=started_at, number=number,
         predressed=True,                 # no prep window: nothing to index
         target=sealed,
+        clue_one_draft=draft,            # already written, already judged
     )
-    # P2-3: the uniqueness check's counters (never names) — `crowded` says
-    # how often a full page hid the candidate and a draw was spent on it.
-    stats = getattr(getattr(ports.preparer, "_name_is_unique", None), "stats", None)
-    stats_line = (" | uniqueness " + ", ".join(f"{k}={v}" for k, v in stats.items())
-                  if isinstance(stats, dict) else "")
+    when = f" (preparado há {age_h:.0f}h)" if age_h is not None else ""
     orch._notify(
-        f"hunt #{number}: target (blind) sorteado do snapshot da época "
-        f"{ports.epoch.epoch_id!r} — gate GREEN, juiz ✓, arte descrita ✓, "
-        f"{len(sealed.decoys)} decoys selados{stats_line}. A lançar."
+        f"hunt #{number}: alvo da despensa{when} · guarda de pesquisa ✓ "
+        f"no launch · Clue 1 pronta ({prepared.attempts} tentativa(s) "
+        "no /prepare). A publicar."
     )
     return hunt
+
+
+def _prepared_age_hours(prepared, orch) -> float | None:
+    """How old the preparation is, in hours. None when the timestamp is
+    missing or unparseable — an unreadable clock never refuses a launch by
+    itself; the TTL is a safety net, not a gate."""
+    from datetime import datetime, timezone
+    stamp = str(getattr(prepared, "prepared_at", "") or "")
+    if not stamp:
+        return None
+    try:
+        made = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if made.tzinfo is None:
+            made = made.replace(tzinfo=timezone.utc)
+        now = orch._clock.now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - made).total_seconds() / 3600.0)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # --------------------------------------------------------------------------- #

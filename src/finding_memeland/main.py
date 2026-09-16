@@ -529,10 +529,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         if refusal:
             return refusal
 
-        # Target mode (Option A) branches first: the gate over the STORED
-        # snapshot decides, and only GREEN reaches the confirmation. The
-        # prompt carries the gate table (strata, counts, rates — never a
-        # name) and the confirmation is bound to the snapshot fingerprint.
+        # Target mode (Option A) branches first. It no longer draws anything:
+        # /prepare did the work the day before, and what /launch checks is
+        # that a preparation EXISTS and is still fresh. The confirmation is
+        # bound to that preparation's commitment.
         if s.target_launch:
             if target_wiring is None:
                 return (
@@ -540,13 +540,17 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     "(config em falta — ver o arranque / /status). Nada lançado."
                 )
             try:
-                gate = target_wiring.gate_now()
+                prepared = target_wiring.prepared()
             except Exception as e:  # noqa: BLE001 — a refusal is the safe outcome
-                return f"⛔ launch alvo RECUSADO ({type(e).__name__}) — gate ilegível."
-            if gate is None:
-                return "⛔ sem snapshot — corre /scan e depois /snapshot. Nada lançado."
-            if gate.verdict != "GREEN":
-                return f"⛔ launch alvo RECUSADO — gate {gate.verdict}:\n{gate.render()}"
+                return (f"⛔ launch RECUSADO ({type(e).__name__}) — preparação "
+                        "ilegível. Corre /prepare outra vez.")
+            if prepared is None:
+                return ("⛔ não há hunt preparada — corre /prepare (demora "
+                        "minutos) e depois /launch. Nada lançado.")
+            left = target_wiring.prepared_hours_left(prepared)
+            if left <= 0:
+                return ("⛔ a preparação EXPIROU — a arte e a pesquisa tiveram "
+                        "tempo de mudar. Corre /prepare outra vez.")
             try:
                 number = repo.next_hunt_number()
             except Exception:  # noqa: BLE001
@@ -558,12 +562,15 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 else "🚨 floor ZERO — qualquer wallet ganha 100% do pote."
             )
             pending_launch["ladder_exempt"] = ladder_exempt
-            launch_confirm.stage(prize_fmml, target_wiring.snapshot_fingerprint())
+            launch_confirm.stage(prize_fmml, target_wiring.prepared_fingerprint())
             return (
-                f"Hunt #{number} (ALVO): {prize_fmml:,} $FIND. O alvo é sorteado "
-                "na confirmação — nem eu o vejo.\n"
-                f"{gate.render()}\n{floor_line}\n"
-                "⚠️ O launch é INSTANTÂNEO — Clue 1 sai em segundos, sem take-backs.\n"
+                f"Hunt #{number} (ALVO): {prize_fmml:,} $FIND. O alvo já está "
+                "selado desde o /prepare — nem eu o vejo.\n"
+                f"{target_wiring.prepared_line()}\n"
+                f"despensa: {target_wiring.larder_size()} alvo(s) por usar\n"
+                f"{floor_line}\n"
+                "⚠️ Falta só a guarda de pesquisa e o publish — Clue 1 sai em "
+                "segundos, sem take-backs.\n"
                 "Confirmar? responde 'sim' ou 'não' (expira em 2 min)."
             )
 
@@ -777,15 +784,15 @@ def build_agent(settings: Settings | None = None) -> Agent:
         Free text with nothing staged is ignored (None = no reply)."""
         res = launch_confirm.resolve(text)
         if res.outcome == "confirm":
-            # Target mode binds the prompt to the SNAPSHOT FINGERPRINT: a
-            # /snapshot between the prompt and the 'sim' changed the pool
+            # Target mode binds the prompt to the PREPARATION's commitment:
+            # a /prepare between the prompt and the 'sim' replaced the hunt
             # the operator was shown — run /launch again over the new one.
             if s.target_launch:
                 if target_wiring is None:
                     return "⛔ modo alvo indisponível — corre /launch de novo."
-                if target_wiring.snapshot_fingerprint() != res.expected_handle:
-                    return ("⛔ o snapshot mudou desde o prompt — corre /launch "
-                            "de novo.")
+                if target_wiring.prepared_fingerprint() != res.expected_handle:
+                    return ("⛔ a preparação mudou desde o prompt — corre "
+                            "/launch de novo.")
                 return _do_launch(
                     res.prize_fmml,
                     ladder_exempt=bool(pending_launch["ladder_exempt"]),
@@ -1001,6 +1008,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
                                  + ("  ⚠️ corre /fill" if n < 20 else ""))
                 except Exception as e:  # noqa: BLE001
                     lines.append(f"despensa: ilegível ({type(e).__name__})")
+                # What /launch will actually publish. COUNTS AND CLOCKS ONLY.
+                try:
+                    lines.append(target_wiring.prepared_line())
+                except Exception as e:  # noqa: BLE001
+                    lines.append(f"preparado: ilegível ({type(e).__name__})")
 
         if s.fmml_usd_price:
             one_b = 1_000_000_000 * s.fmml_usd_price
@@ -1235,7 +1247,8 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return f"⛔ não corro /{label} durante uma hunt. {refusal}"
         with hunt_lock:
             if target_flag["active"]:
-                return "⛔ já há um /scan ou /snapshot a correr — espera pelo relatório."
+                return ("⛔ já há um trabalho de alvo a correr "
+                        "(/scan, /fill ou /prepare) — espera pelo relatório.")
             target_flag["active"] = True
 
         def _run():
@@ -1281,11 +1294,27 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return "usage: /fill [1..500]"
         return _target_job("fill", lambda: target_wiring.fill(want))
 
+    def _prepare(arg: str = "") -> str:
+        """Take one target out of the larder, re-verify it live, write Clue 1
+        through every guard, and seal the lot to the database.
+
+        THE DAY BEFORE, not on the hour. The 16/09 launch spent 10-25 minutes
+        writing Clue 1 with an audience watching a prompt that had promised
+        "seconds", and then failed four times. After /prepare, /launch has
+        nothing left to do but a live check and a publish.
+
+        Shares the target flag with /fill: two commands drawing from the same
+        larder at once would have one of them save over the other."""
+        if arg.strip():
+            return "usage: /prepare  (sem argumentos)"
+        return _target_job("prepare", lambda: target_wiring.prepare())
+
     actions = {
         "launch": _launch,
         "scan": _scan,
         "snapshot": _snapshot,
         "fill": _fill,
+        "prepare": _prepare,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,
         "dress": _dress,

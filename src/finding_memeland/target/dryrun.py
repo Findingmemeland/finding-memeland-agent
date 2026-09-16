@@ -25,8 +25,8 @@ dry-run — "exercised, not assumed"):
                          the commitment recomputes from the public posts
   5. shotgun           — multi-token posts: one format reply per profile,
                          every post logged 'malformed', operator told once
-  6. content_redraw    — the content guard refuses the first draw; the id
-                         is excluded and the next draw launches
+  6. stale_prepare     — the piece became searchable between /prepare and
+                         /launch: refused, nothing posted, preparation kept
   7. resume            — crash-resume from the sealed row; the hold seconds
                          survive and the operator hears the detector reset
 
@@ -57,6 +57,7 @@ from .hunt import (
     TargetHuntPreparer,
 )
 from .integration import TargetPorts
+from .prepare import Prepared
 from .refresh import content_id
 from .selector import CurationEpoch, metadata_hash
 from .snapshot import Snapshot, SnapshotEntry, SnapshotStore
@@ -156,6 +157,22 @@ def synthetic_snapshot(*, per_stratum: int = 60) -> Snapshot:
     return Snapshot(epoch_id="e1", built_at="2026-08-01T11:00:00Z", entries=entries)
 
 
+class _GuardOk:
+    """What the search guard says at launch when nothing has changed."""
+
+    ok = True
+    found = False
+    detail = "not findable"
+
+
+class _GuardFound:
+    """The piece became searchable between /prepare and /launch."""
+
+    ok = False
+    found = True
+    detail = "target surfaced in a marketplace search"
+
+
 class TargetWorld:
     """The snapshot, the live chain (tokenURI + owner by key), and the rig
     — the real Orchestrator with target mode on, everything else faked."""
@@ -184,6 +201,8 @@ class TargetWorld:
         self.fetch_live = fetch_live
 
         self.control = FakeControl()
+        self.prepared_slot = None
+        self.used_ids = frozenset()
         self.ports = TargetPorts(
             epoch=EPOCH,
             preparer=TargetHuntPreparer(
@@ -200,6 +219,13 @@ class TargetWorld:
             live_hash=lambda sealed: LiveHash("resolved", "deadbeef" * 8),
             resolve_link=None,
             spray=SprayDetector(live_params or SprayParams()),
+            # /launch reads a preparation; it no longer draws (17/09). The
+            # world makes one on demand from the synthetic snapshot, so the
+            # scenarios still drive the REAL prepare_target_hunt.
+            take_prepared=self._take_prepared,
+            clear_prepared=self._clear_prepared,
+            recheck_clue_one=lambda text, **kw: self.guard_verdict,
+            used_hmac=lambda tid: "hmac:" + tid,
         )
         self.rig = build_simulation(poll_interval_s=60, verbose=verbose)
         self.orch = self.rig.orchestrator
@@ -210,6 +236,34 @@ class TargetWorld:
         self.src = FakeClaimSource()
         self.orch._claim_source = self.src
         self.orch._taunt_engine = TauntEngine()
+
+    # -- the preparation slot (the larder's stand-in in a dry run) --------- #
+    guard_verdict = _GuardOk()
+
+    def _make_prepared(self):
+        """What `/prepare` produces: a verified target, its description and
+        Clue 1, already written and judged. Built here from the synthetic
+        snapshot so the scenarios exercise the real launch path."""
+        sealed = self.ports.preparer.prepare(EPOCH, exclude=self.used_ids)
+        description = self.ports.describe_image(sealed)
+        from .clues import TargetClueContext
+        ctx = TargetClueContext.from_target(sealed.target,
+                                            image_description=description)
+        draft = self.ports.clue_engine.next_clue(ctx, 1, [])
+        return Prepared(target=sealed.target, clue_one=draft,
+                        image_description=description, attempts=1,
+                        salt=sealed.salt, commitment=sealed.commitment,
+                        prepared_at=self.rig.clock.now().isoformat())
+
+    def _take_prepared(self):
+        if self.prepared_slot is None:
+            self.prepared_slot = self._make_prepared()
+        return self.prepared_slot
+
+    def _clear_prepared(self) -> None:
+        if self.prepared_slot is not None:
+            self.used_ids = self.used_ids | frozenset({self.prepared_slot.id()})
+        self.prepared_slot = None
 
     def launch(self):
         hunt = self.orch._prepare(200)
@@ -457,7 +511,10 @@ def scenario_rpc_oscillation(world: TargetWorld) -> ScenarioReport:
 
     def flap(chain, contract, tid):                        # 300 cycles down, 10 up
         cycle["n"] += 1
-        if (cycle["n"] // 8) % 310 < 300:                   # 8 reads per batch
+        # ONE read per live check. It was 8 while the check went out in a
+        # sealed batch of target + 7 decoys; the decoys are gone (17/09)
+        # and the rotation over public RPCs is what hides the pattern now.
+        if cycle["n"] % 310 < 300:
             raise ChainUnavailable("flapping")
         return world.fetch_live(chain, contract, tid)
     world.ports.live_check = LiveCheck(read_live=flap, rng=random.Random(2))
@@ -511,25 +568,32 @@ def scenario_shotgun(world: TargetWorld) -> ScenarioReport:
     return rep
 
 
-def scenario_content_redraw(world: TargetWorld) -> ScenarioReport:
-    """The content guard refuses the first artwork; the id is excluded and
-    the second draw launches; the refused id is never named."""
-    from .clues import ContentRefused
-    rep = ScenarioReport("content_redraw — content guard refuses the first draw")
-    seen: list[str] = []
+def scenario_stale_prepare(world: TargetWorld) -> ScenarioReport:
+    """The clue was written yesterday and the world moved: at launch the
+    search guard finds the piece. NOTHING is posted, NOTHING is written,
+    and the preparation is not consumed — the operator runs /prepare again.
 
-    def describe(sealed):
-        seen.append(sealed.id())
-        if len(seen) == 1:
-            raise ContentRefused(sealed.id(), "nsfw")
-        return "a lighthouse on a black rock"
-    world.ports.describe_image = describe
-    hunt = world.launch()
-    rep.check("two draws, different ids", len(seen) == 2 and seen[0] != seen[1])
-    rep.check("the launched target is the second draw", hunt.target.id() == seen[1])
-    rep.check("operator notified of the redraw", any("content guard refused" in m for m in world.notices()))
-    rep.check("hunt went LIVE", hunt.state is HuntState.LIVE)
-    _secrecy(rep, world, hunt.target.target.name_onchain)
+    Replaces the old `content_redraw` scenario (17/09). The content guard
+    used to run at launch because the artwork was fetched at launch; both
+    moved to /prepare. What is left on the launch path is the one guard
+    that is about the WORLD rather than about the clue, and this is it."""
+    from .hunt import LaunchRefused
+    rep = ScenarioReport("stale_prepare — the piece became searchable overnight")
+    world.guard_verdict = _GuardFound()
+    before_posts = len(world.posts())
+    refused = None
+    try:
+        world.launch()
+    except LaunchRefused as e:
+        refused = str(e)
+    rep.check("launch was REFUSED", refused is not None)
+    rep.check("the refusal says why", bool(refused and "pesquis" in refused))
+    rep.check("nothing was posted", len(world.posts()) == before_posts)
+    rep.check("no hunt row was written", not world.rig.repo.hunts)
+    rep.check("the preparation survives the refusal",
+              world.prepared_slot is not None)
+    if world.prepared_slot is not None:
+        _secrecy(rep, world, world.prepared_slot.target.name_onchain)
     rep.notices = world.notices()
     return rep
 
@@ -568,7 +632,7 @@ SCENARIOS = {
     "void": scenario_gateway_down_at_void,
     "flap": scenario_rpc_oscillation,
     "shotgun": scenario_shotgun,
-    "content": scenario_content_redraw,
+    "stale": scenario_stale_prepare,
     "resume": scenario_resume,
 }
 MANDATORY = ("429", "void", "flap")

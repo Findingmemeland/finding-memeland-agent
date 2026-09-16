@@ -136,6 +136,11 @@ class PreparedHunt:
     # party NFT. `target` is the SealedTarget (in memory; encrypted on the
     # row) — it carries the answer and must never reach an operator message.
     target: object | None = None
+    # Clue 1, written and judged the DAY BEFORE by /prepare. When it is
+    # here, go-live publishes it instead of generating one — that is the
+    # whole reason /launch is instant again (Hunt #11, 16/09). In memory
+    # only: it carries the answer, like `target`.
+    clue_one_draft: object | None = None
     target_hold: object | None = None        # HoldLedger: freezes the void clock
     target_pay_noted: bool = False           # mutated/burned AFTER a valid claim
     target_live_hash: str | None = None
@@ -839,8 +844,15 @@ class Orchestrator:
         self._transition(hunt, HuntState.DONE)
 
     def _go_live(self, hunt: PreparedHunt) -> None:
+        # A hunt that came through /prepare already HAS clue 1 — written,
+        # judged by the consistency judge, cleared by the blind solver, and
+        # re-checked against the search guard at launch (integration.
+        # prepare_target_hunt). Generating another one here would throw
+        # away that work and put the ten-minute wait back on launch day.
+        draft = getattr(hunt, "clue_one_draft", None)
         try:
-            draft = self._engine_for(hunt).next_clue(hunt.ctx, 1, [])
+            if draft is None:
+                draft = self._engine_for(hunt).next_clue(hunt.ctx, 1, [])
         except Exception as e:  # noqa: BLE001
             if getattr(hunt, "target", None) is not None:
                 # nothing posted yet: a refusal, not a death (see clue_one_failed)
