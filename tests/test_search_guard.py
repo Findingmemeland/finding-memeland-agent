@@ -23,7 +23,8 @@ def guard(**kw):
     return ClueSearchGuard(**kw)
 
 
-def check(g, clue, *, target=TARGET, name=NAME):
+def check(g, clue="a clue about nothing in particular", *,
+          target=TARGET, name=NAME):
     return g.check(clue, target_item_id=target, target_name_onchain=name)
 
 
@@ -204,3 +205,26 @@ def test_rarible_search_refuses_empty_key():
         assert "api key" in str(e)
     else:  # pragma: no cover
         raise AssertionError("expected ValueError")
+
+
+def test_a_failed_canary_is_flagged_blind_and_a_dead_market_is_not():
+    """Both come back found=None, and until 17/09 nothing could tell them
+    apart — so a piece the index cannot see was retried as if the
+    marketplace were merely down. `blind` separates them: the canary is
+    about the TARGET, the transport failure is about US."""
+    v = check(guard(search=FakeSearch({})))          # canary finds nothing
+    assert v.ok is False and v.found is None and v.blind is True
+    assert "canary failed" in v.detail
+
+    v2 = check(guard(search=_Boom()))
+    assert v2.ok is False and v2.found is None and v2.blind is False
+    assert "unverifiable" in v2.detail
+
+    v3 = check(guard(search=FakeSearch({"salt harbor": {TARGET}})),
+               "A mineral the sea leaves behind")
+    assert v3.ok is True and v3.blind is False
+
+
+class _Boom:
+    def item_ids(self, text, *, chain):
+        raise TimeoutError("marketplace down")

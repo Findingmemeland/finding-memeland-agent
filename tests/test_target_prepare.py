@@ -343,6 +343,47 @@ def test_a_target_nobody_can_write_a_clue_about_is_dropped_not_launched():
     assert any("impossível para este alvo" in m for m in said)
 
 
+def test_a_piece_the_market_cannot_see_is_dropped_not_retried_for_ever():
+    """17/09, live: two `/prepare` runs in a row said "guarda nossa
+    indisponível — candidato MANTIDO". It was not ours. The CANARY had
+    failed: the marketplace index does not surface that piece even searched
+    by its own on-chain name, and no amount of waiting changes that.
+
+    Kept as "ours", such a candidate is re-tested for ever and the larder
+    never yields — a loop that never closes. It is a property of the
+    target, so the target goes."""
+    from finding_memeland.target.clues import SearchIndexBlind
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=8, max_draws=200)
+    before = larder.size()
+    calls = {"n": 0}
+
+    def write(target, description):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SearchIndexBlind("canary failed: the target does not "
+                                   "surface for its own on-chain name")
+        return {"text": "clue", "for": target.id()}
+    world.write_clue_one = write
+    said: list[str] = []
+    prepared, larder = _preparer(world, finder, notify=said.append).prepare(larder)
+    assert prepared.clue_one["text"] == "clue"
+    assert larder.size() == before - 2          # the blind one is SPENT
+    assert any("não indexa esta peça" in m for m in said)
+
+
+def test_the_blind_canary_is_still_a_hold_mid_hunt():
+    """The same failure, two different right answers. At /prepare nothing is
+    at stake, so the candidate goes. Mid-hunt people are playing and NO
+    guard may end a hunt — so it must still read as a guard outage there."""
+    from finding_memeland.content.relic_clues import ClueGuardUnavailable
+    from finding_memeland.target.clues import SearchGuardUnavailable, SearchIndexBlind
+    assert issubclass(SearchIndexBlind, SearchGuardUnavailable)
+    assert issubclass(SearchIndexBlind, ClueGuardUnavailable)
+
+
 def test_a_guard_of_ours_being_down_keeps_the_candidate():
     """The mirror of the test above, and the distinction is the whole R8:
     the search guard blind or the consistency judge down says NOTHING about

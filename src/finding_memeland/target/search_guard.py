@@ -65,6 +65,14 @@ class SearchGuardVerdict:
     ok: bool
     found: bool | None
     detail: str
+    # TWO VERY DIFFERENT THINGS HIDE BEHIND found=None, and until 17/09 the
+    # callers could not tell them apart. `blind=True` means THE CANARY
+    # FAILED: the index does not surface this piece even when searched by
+    # its own on-chain name. That is a property of the TARGET, permanent
+    # until someone indexes it — not our outage. `blind=False` with
+    # found=None is the marketplace not answering, which is ours and passes.
+    # The distinction decides whether a candidate is kept or dropped.
+    blind: bool = False
 
 
 class _Unverifiable(Exception):
@@ -103,7 +111,7 @@ class ClueSearchGuard:
             return SearchGuardVerdict(ok=False, found=None, detail=str(e))
         if want not in seen:
             return SearchGuardVerdict(
-                ok=False, found=None,
+                ok=False, found=None, blind=True,
                 detail=f"canary failed: the target does not surface for its "
                        f"own on-chain name ({len(seen)} results) — the index "
                        "is blind to the target (chain filter, indexing, key "

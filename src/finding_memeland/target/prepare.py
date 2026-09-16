@@ -300,6 +300,7 @@ class Tally:
     # refused to write, and those two call for opposite responses.
     blind: int = 0           # vision refused the bytes (4xx / empty answer)
     unwritable: int = 0      # guards exhausted: no clue can be written here
+    no_index: int = 0        # the marketplace index cannot see this piece
     unavailable: int = 0     # OURS (gateway/RPC/guard down) — candidate KEPT
     found: int = 0
 
@@ -309,7 +310,7 @@ class Tally:
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
-            ("sem-pista", self.unwritable),
+            ("sem-pista", self.unwritable), ("sem-índice", self.no_index),
             ("indisponível-NOSSO", self.unavailable)) if v)
         return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
                 + (f" — {causes}" if causes else ""))
@@ -635,18 +636,35 @@ class PreparedStore:
 def _is_guard_unavailable(exc: BaseException) -> bool:
     """Is this OUR service failing, or this target being impossible?
 
-    ClueGuardUnavailable (the search guard blind, the consistency judge
-    down) is ours: R8 says we do not publish — or discard — on a cause we
-    could not measure. Anything else from the clue engine means the guards
-    did their job and this target cannot be written about under our rules.
+    ClueGuardUnavailable (the marketplace not answering, the consistency
+    judge down) is ours: R8 says we neither publish nor DISCARD on a cause
+    we could not measure — the candidate stays.
+
+    SearchIndexBlind is the exception that proves the rule, and it cost two
+    live /prepare runs on 17/09 before it had a name of its own: the canary
+    failing means the index cannot see THIS piece searched by its own
+    on-chain name. Nothing about that is transient. Treating it as our
+    outage keeps a permanently unclearable candidate in the larder and
+    re-tests it for ever — a loop that never closes.
 
     Imported lazily: prepare.py must not drag the clue engine into every
     import of the larder."""
     try:
         from ..content.relic_clues import ClueGuardUnavailable
+        from .clues import SearchIndexBlind
     except Exception:  # noqa: BLE001 — cannot tell → treat as ours (keep it)
         return True
+    if isinstance(exc, SearchIndexBlind):
+        return False
     return isinstance(exc, ClueGuardUnavailable)
+
+
+def _is_blind_index(exc: BaseException) -> bool:
+    try:
+        from .clues import SearchIndexBlind
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(exc, SearchIndexBlind)
 
 
 class TargetPreparer:
@@ -799,16 +817,22 @@ class TargetPreparer:
                     tally.unavailable += 1
                     self._notify(f"prepare: guarda nossa indisponível "
                                  f"({type(e).__name__}) — candidato MANTIDO "
-                                 "na despensa, tento outro")
+                                 f"na despensa, tento outro · {str(e)[:220]}")
                     if unavailable >= max_unavailable:
                         raise PrepareRefused(
                             f"{unavailable} falhas seguidas por nossa causa "
                             "(guardas/visão/gateway) — despensa INTACTA. "
                             "Tenta daqui a pouco.") from None
                     continue
-                self._notify(f"prepare: Clue 1 impossível para este alvo "
-                             f"({type(e).__name__}) — descartado, tento outro")
-                tally.unwritable += 1
+                if _is_blind_index(e):
+                    tally.no_index += 1
+                    self._notify("prepare: o mercado não indexa esta peça nem "
+                                 "pelo nome dela — guarda cega, descartado")
+                else:
+                    tally.unwritable += 1
+                    self._notify(f"prepare: Clue 1 impossível para este alvo "
+                                 f"({type(e).__name__}) — descartado, tento "
+                                 "outro")
                 larder.consume(cand.id())
                 continue
             # The commitment is PUBLISHED IN CLUE 1, so it is born here, with

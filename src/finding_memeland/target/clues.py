@@ -851,6 +851,18 @@ class SearchGuardUnavailable(ClueGuardUnavailable):
     transport)."""
 
 
+class SearchIndexBlind(SearchGuardUnavailable):
+    """The canary failed: the marketplace index does not surface THIS piece
+    even searched by its own on-chain name.
+
+    A subclass on purpose. Mid-hunt the ramp must treat it like any other
+    guard outage — hold, freeze the deadline, call the operator — because a
+    live hunt is never ended by a guard. At /prepare, where nothing is at
+    stake yet, it means something sharper: this target can never be cleared
+    by this guard, so it is dropped and the next candidate gets its turn.
+    Keeping it would mean re-testing the same blind piece for ever."""
+
+
 class TruthJudgeUnavailable(ClueGuardUnavailable):
     """The consistency judge could not answer (API down / malformed)."""
 
@@ -1119,9 +1131,12 @@ class TargetClueEngine(RelicClueEngine):
                 draft.text, target_item_id=persona.target_id,
                 target_name_onchain=persona.name_onchain)
             if not v.ok and v.found is None:
-                raise SearchGuardUnavailable(
-                    f"search guard unverifiable for clue #{clue_index}: "
-                    f"{v.detail} — not publishing (fail-closed)")
+                # `blind` = the canary failed (this piece is invisible to
+                # the index); anything else = the marketplace did not answer
+                err = (SearchIndexBlind if getattr(v, "blind", False)
+                       else SearchGuardUnavailable)
+                raise err(f"search guard unverifiable for clue #{clue_index}: "
+                          f"{v.detail} — not publishing (fail-closed)")
             if not v.ok:
                 return self._reject("search guard", ["a SEARCH GUARD typed this clue into a marketplace search "
                         "and the target came up — the piece IS a search. Remove "

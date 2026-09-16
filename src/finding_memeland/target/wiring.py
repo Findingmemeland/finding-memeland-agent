@@ -82,6 +82,7 @@ from .sources import (
     EPOCH1_CHAINS,
     EPOCH1_STRATA,
     ChainEoaCheck,
+    ChainUnavailable,
     RegistryStore,
 )
 
@@ -537,17 +538,43 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # ordinary one, which still works — just slower on dead pins.
     ranged = http_get_range or http_get_bytes
 
+    # ONE gateway is a single point of failure, and at /prepare a single
+    # point of failure DESTROYS VERIFIED TARGETS: a candidate whose bytes
+    # were read yesterday comes back "dead" today because one host is
+    # throttling, and the re-verification spends it. Measured 17/09: three
+    # of six candidates "lost the image" overnight, through the same
+    # gateway that had served them.
+    #
+    # It is the rotation rule, which the live check has always had, applied
+    # where it was missing. A pin is dead only when EVERY gateway agrees it
+    # is; if they all merely fail to answer, that is OUR outage and the
+    # caller keeps the candidate.
+    probe_gateways = [g for g in ([s.target_ipfs_gateway]
+                                  + list(s.target_ipfs_gateway_list)) if g]
+
     def probe_image(uri: str):
         """RANGED read: the first few KB plus the size. Proves the bytes are
-        there (Hunt #11) without pulling a 15 MB artwork."""
-        url = gateway_url(uri, s.target_ipfs_gateway)
-        if url is None:
-            return None
-        got = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
-        head, size = got if isinstance(got, tuple) else (got, 0)
-        if not head or sniff_media_type(head) is None:
-            return None
-        return head, size
+        there (Hunt #11) without pulling a 15 MB artwork. Tried across every
+        gateway we have before a pin is called dead."""
+        errors = 0
+        tried = 0
+        for gw in probe_gateways:
+            url = gateway_url(uri, gw)
+            if url is None:
+                continue
+            tried += 1
+            try:
+                got = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
+            except Exception:  # noqa: BLE001 — this host, not the pin
+                errors += 1
+                continue
+            head, size = got if isinstance(got, tuple) else (got, 0)
+            if head and sniff_media_type(head) is not None:
+                return head, size
+        if tried and errors == tried:
+            # every host we asked threw: ours, not the candidate's
+            raise ChainUnavailable(f"no gateway answered ({errors} tried)")
+        return None
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
     # called enumerable_sources() here and made boot depend on an RPC round
@@ -578,13 +605,20 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         API as a bare BadRequestError. Now it gets resized instead — a clue
         about a lighthouse does not need the pixels the collector paid
         for."""
-        url = gateway_url(uri, s.target_ipfs_gateway)
-        if url is None:
-            return None
-        data = get_art(url, {})
-        if not data or len(data) > MAX_IMAGE_BYTES or sniff_media_type(data) is None:
-            return None
-        return shrink_for_vision(data)
+        for gw in probe_gateways:            # same rotation as the probe
+            url = gateway_url(uri, gw)
+            if url is None:
+                continue
+            try:
+                data = get_art(url, {})
+            except Exception:  # noqa: BLE001 — try the next host
+                continue
+            if not data or len(data) > MAX_IMAGE_BYTES:
+                continue
+            if sniff_media_type(data) is None:
+                continue
+            return shrink_for_vision(data)
+        return None
 
     def write_clue_one(target, description: str):
         """Clue 1, written and put through every guard, ON THE DAY BEFORE.

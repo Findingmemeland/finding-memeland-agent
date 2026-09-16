@@ -381,3 +381,44 @@ def test_the_tally_never_folds_two_different_symptoms_together():
     assert "sem-pista 3" in out
     assert "visão-recusou 1" in out
     assert "indisponível-NOSSO 1" in out
+
+
+def test_the_image_probe_asks_every_gateway_before_calling_a_pin_dead():
+    """MEASURED 17/09: three of six larder candidates "lost the image"
+    overnight, through the same gateway that had served them the day
+    before. One gateway is a single point of failure, and at /prepare a
+    single point of failure DESTROYS VERIFIED TARGETS — the re-verification
+    spends a candidate that was never dead.
+
+    It is the rotation rule the live check has always had, applied where it
+    was missing. A pin is dead only when every gateway agrees."""
+    seen: list[str] = []
+
+    def ranged(url, headers):
+        seen.append(url)
+        if "gw0" in url or "gateway.pinata" in url:
+            raise TimeoutError("throttled")
+        return (b"\x89PNG\r\n\x1a\n" + b"x" * 64, 4096)
+
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=lambda u, h: "{}", http_post=rpc_ok,
+                     http_get_bytes=lambda u, h: b"", http_get_range=ranged)
+    head, size = w.finder._probe_image("ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN")  # noqa: SLF001
+    assert head and size == 4096
+    assert len(seen) >= 2, "it gave up on the first gateway"
+
+
+def test_every_gateway_failing_is_OUR_outage_not_a_dead_pin():
+    """The distinction the whole larder depends on: a pin nobody serves is
+    the candidate's problem, a set of hosts that all refuse to answer is
+    ours — and ours must never spend a verified target."""
+    from finding_memeland.target.sources import ChainUnavailable
+
+    def dead(url, headers):
+        raise TimeoutError("every host throttled")
+
+    w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
+                     http_get=lambda u, h: "{}", http_post=rpc_ok,
+                     http_get_bytes=lambda u, h: b"", http_get_range=dead)
+    with pytest.raises(ChainUnavailable):
+        w.finder._probe_image("ipfs://QmSiuJazyPgzAVqBiW3LMNdjAG4uaZFqzMwzU2kGS2KmCN")  # noqa: SLF001
