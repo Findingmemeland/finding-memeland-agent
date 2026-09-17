@@ -103,6 +103,44 @@ def _split_id(target_id: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _safe_uri(uri: str) -> str:
+    """O mesmo princípio para a nota de mutação: nada de um segundo link a
+    disputar o cartão com a página do item. Um ipfs:// passa; um https vira
+    a frase que manda ler on-chain."""
+    if uri and uri.lower().startswith(("http://", "https://")):
+        return "an https URL — read it on-chain with tokenURI(tokenId)"
+    return uri
+
+
+def _token_uri_lines(uri: str) -> str:
+    """O tokenURI impresso de forma a que o X não o transforme em link.
+
+    MESMA armadilha, mesmo remédio que o target_id logo acima (medido
+    27/08). O reveal tem direito a UM único URL clicável — a página do item
+    — porque o X constrói o cartão a partir de um URL do post, e um JSON de
+    metadata não tem cartão nenhum para construir. O reveal do hunt #11 saiu
+    sem a arte (Pedro, 17/09: "não renderizou o NFT"), e este é o único
+    outro URL que lá está.
+
+    Um `ipfs://` é seguro — o X não liga um esquema que não conhece — e é
+    impresso tal e qual.
+
+    Um `http(s)://` não tem salvação tipográfica: partir o esquema não
+    chega, porque o X também liga domínios nus (`gateway.exemplo.com/…`).
+    Então não vai. O que vai no lugar dele é melhor: o tokenURI NÃO faz
+    parte do commitment — este é SHA-256(target_id + metadata_sha256 +
+    salt) e verifica-se sem ele. O tokenURI é um extra (v3), e qualquer
+    pessoa o lê da fonte em vez de o ler de nós, chamando tokenURI(tokenId)
+    no contrato que está impresso três linhas acima. Trocamos uma linha
+    copiada de nós por uma leitura on-chain, e ficamos com o cartão."""
+    if uri.lower().startswith(("http://", "https://")):
+        return ("  tokenURI at launch: an https URL, left out so this post "
+                "carries exactly one link (the item page) — read it at the "
+                "source instead: call tokenURI(tokenId) on the contract "
+                "above. It is not part of the commitment.\n")
+    return f"  tokenURI at launch: {uri}\n"
+
+
 def commitment_block(*, target_id: str, metadata_sha256: str, salt: str,
                      token_uri: str = "") -> str:
     """How anyone recomputes the v2 commitment. The id is printed SPLIT
@@ -116,7 +154,7 @@ def commitment_block(*, target_id: str, metadata_sha256: str, salt: str,
         if contract else f"  target_id: {target_id}\n"
     )
     if token_uri:
-        id_lines += f"  tokenURI at launch: {token_uri}\n"
+        id_lines += _token_uri_lines(token_uri)
     return (
         "Commitment check (v2) — recompute SHA-256 of "
         "target_id + metadata_sha256 + salt, one string, utf-8.\n"
@@ -204,7 +242,8 @@ def target_winner_announcement(d: TargetWinnerData) -> str:
         + (
             "\n\nnote: the token's on-chain state changed AFTER the winning "
             f"claim ({_live_hash_phrase(d.live_hash_status, d.live_metadata_sha256)}"
-            + (f"; live tokenURI {d.live_token_uri}" if d.live_token_uri else "")
+            + (f"; live tokenURI {_safe_uri(d.live_token_uri)}"
+               if d.live_token_uri else "")
             + "). "
             "the winner found the right token — the commitment binds the "
             "token's identity and its metadata at launch, never who owns it "
