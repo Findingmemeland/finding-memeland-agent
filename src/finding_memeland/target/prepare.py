@@ -622,7 +622,7 @@ class PreparedStore:
                     token_uri=t.get("token_uri", ""),
                     content_id=t.get("content_id", ""),
                     artist=t.get("artist", "")),
-                clue_one=doc.get("clue_one"),
+                clue_one=_draft_from(doc.get("clue_one")),
                 image_description=doc.get("image_description", ""),
                 attempts=int(doc.get("attempts", 1)),
                 salt=doc.get("salt", ""), commitment=doc.get("commitment", ""),
@@ -665,6 +665,37 @@ def _is_blind_index(exc: BaseException) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return isinstance(exc, SearchIndexBlind)
+
+
+def _draft_from(stored):
+    """Rebuild the clue draft the store flattened into JSON.
+
+    THE BUG THIS EXISTS FOR (17/09, live, with an audience waiting):
+    `save` writes the draft as a dict, `load` handed that dict straight
+    back, and `/launch` asks for `draft.text` — which a dict does not
+    have. The launch refused with "a preparação não traz Clue 1" over a
+    Clue 1 that was sitting right there, whole, in the database.
+
+    Nothing caught it because both sides were tested with a fake draft
+    that never went through the store: the round trip was the one path
+    with no test across it. A serialiser and its parser are one thing and
+    must be tested as one thing."""
+    if stored is None:
+        return None
+    if isinstance(stored, str):
+        stored = {"text": stored}
+    if isinstance(stored, dict):
+        try:
+            from ..content.clue_engine import ClueDraft
+        except Exception:  # noqa: BLE001 — a plain carrier still has .text
+            return type("Draft", (), dict(stored))()
+        return ClueDraft(
+            text=str(stored.get("text") or ""),
+            taunt=stored.get("taunt"),
+            angle=stored.get("angle"),
+            image_aspect=stored.get("image_aspect"),
+            claims=list(stored.get("claims") or []))
+    return stored          # already a draft object
 
 
 class TargetPreparer:

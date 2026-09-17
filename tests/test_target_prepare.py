@@ -556,6 +556,47 @@ def _prepared_store(blob: dict) -> PreparedStore:
                          write=lambda p: blob.__setitem__("v", p))
 
 
+def test_the_sealed_clue_comes_back_as_a_draft_not_a_dict():
+    """17/09, live, with an audience waiting: the launch refused with "a
+    preparação não traz Clue 1" over a Clue 1 that was in the database,
+    whole. `save` flattened the draft to a dict, `load` handed the dict
+    straight back, and /launch asks for `draft.text` — which a dict has
+    not got.
+
+    Nothing caught it because both sides were tested with a fake draft
+    that never went through the store. A serialiser and its parser are ONE
+    thing and must be tested across the round trip."""
+    from finding_memeland.content.clue_engine import ClueDraft
+    world = World()
+    finder = _finder(world)
+    larder = Larder()
+    finder.fill(larder, want=4, max_draws=120)
+    world.write_clue_one = lambda target, description: ClueDraft(
+        text="a mineral the sea leaves behind", angle="SEMANTIC FIELD",
+        claims=[{"type": "starts_with", "value": "s"}])
+    prepared, _ = _preparer(world, finder).prepare(larder)
+
+    blob = {}
+    store = _prepared_store(blob)
+    store.save(prepared)
+    back = store.load()
+
+    assert back.clue_one.text == "a mineral the sea leaves behind"   # THE one
+    assert back.clue_one.angle == "SEMANTIC FIELD"
+    assert back.clue_one.claims == [{"type": "starts_with", "value": "s"}]
+    assert back.commitment == prepared.commitment
+    assert back.salt == prepared.salt
+
+
+def test_a_clue_stored_as_plain_text_still_loads_with_a_text_attribute():
+    """Any writer that stores just the sentence — an older slot, a future
+    one — must still come back as something /launch can publish."""
+    from finding_memeland.target.prepare import _draft_from
+    assert _draft_from("just the sentence").text == "just the sentence"
+    assert _draft_from({"text": "a dict"}).text == "a dict"
+    assert _draft_from(None) is None
+
+
 def test_the_prepared_hunt_survives_a_restart():
     """A restart between the day before and the hour must not lose the
     preparation — and losing it silently is worse, because the operator
@@ -574,7 +615,8 @@ def test_the_prepared_hunt_survives_a_restart():
     assert back.target.id() == prepared.target.id()
     assert back.target.metadata_sha256 == prepared.target.metadata_sha256
     assert back.image_description == prepared.image_description
-    assert back.clue_one == prepared.clue_one
+    # the draft is rebuilt, not the same object — the TEXT is what travels
+    assert back.clue_one.text == prepared.clue_one["text"]
 
 
 def test_the_prepared_store_fails_closed_and_names_nothing():
