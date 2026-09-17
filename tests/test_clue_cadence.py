@@ -8,7 +8,7 @@ por next_clue_due_factory — e é ela que se testa aqui.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pytest
 
@@ -23,7 +23,7 @@ from finding_memeland.content.clue_engine import (
 
 
 def _gap_s(due_fn, now=None) -> float:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     return (due_fn(now) - now).total_seconds()
 
 
@@ -60,7 +60,7 @@ def test_non_positive_gaps_raise(lo, hi):
 
 def test_due_is_in_the_future_and_tz_aware():
     due = next_clue_due_factory(600, 1800)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     nxt = due(now)
     assert nxt > now
     assert nxt.tzinfo is not None

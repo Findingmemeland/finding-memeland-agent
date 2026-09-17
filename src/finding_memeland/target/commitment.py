@@ -83,7 +83,7 @@ def compute_commitment_v2(target_id: str, metadata_sha256: str,
     protocol. `target_id` is Target.id() ('base:0x…:5', contract
     lower-cased); `metadata_sha256` is selector.metadata_hash of the full
     metadata at selection time."""
-    payload = f"{target_id}{metadata_sha256}{salt}".encode("utf-8")
+    payload = f"{target_id}{metadata_sha256}{salt}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 

@@ -10,8 +10,8 @@ the dry-run script) while everything with side effects stays faked.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, UTC
 
 from ..content.clue_engine import ClueDraft
 from ..dm.validator import ValidationResult
@@ -25,7 +25,7 @@ from .state_machine import Orchestrator
 # ---------------------------------------------------------------------------
 class FakeClock:
     def __init__(self, start: datetime | None = None):
-        self._t = start or datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+        self._t = start or datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
     def now(self) -> datetime:
         return self._t
@@ -55,7 +55,7 @@ class FakeRepo:
     def add_holding_sample(self, wallet: str, balance: int) -> None:
         self.holding_samples_store.append(
             {"wallet": wallet.lower(), "balance_fmml": balance,
-             "sampled_at": datetime.now(timezone.utc)}
+             "sampled_at": datetime.now(UTC)}
         )
 
     def seed_holding_sample(self, wallet: str, balance: int, sampled_at) -> None:

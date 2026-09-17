@@ -29,8 +29,8 @@ from finding_memeland.persona.relic_pool import (
     FakeRelicRepo,
     NullPoolCipher,
     RelicPool,
-    _identity_to_json,
 )
+from datetime import UTC
 
 # --------------------------------------------------------------------------- #
 # fakes                                                                        #
@@ -363,13 +363,13 @@ def test_spent_words_skips_unreadable_rows_instead_of_blocking():
 
 
 def test_peek_launchable_picks_oldest_and_refuses_when_empty():
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     repo = FakeRelicRepo()
     pool = RelicPool(repo, NullPoolCipher())
     with pytest.raises(RuntimeError, match="no launchable relic"):
         pool.peek_launchable()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for i, age_days in enumerate((2, 20, 9)):  # r1=2d, r2=20d(oldest), r3=9d
         ident = new_identity(name=f"Name{i} Two", description="d",
                              image_prompt="p", solution_terms=["x"])

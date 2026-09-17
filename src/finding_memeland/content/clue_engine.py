@@ -28,7 +28,7 @@ import json
 import random
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from .guardrails import check_clue
 
@@ -250,7 +250,7 @@ def post_phase_start(persona: "PersonaContext") -> int:
 
 
 def next_clue_due(now: datetime | None = None) -> datetime:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     return now + timedelta(seconds=random.randint(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
 
 
@@ -297,7 +297,7 @@ def next_clue_due_factory(min_gap_s: int, max_gap_s: int):
         )
 
     def _due(now: datetime | None = None) -> datetime:
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         return now + timedelta(seconds=random.randint(min_gap_s, max_gap_s))
 
     return _due
@@ -409,7 +409,7 @@ def _build_user_message(persona: PersonaContext, clue_index: int, prior_clues: l
         + (
             # Same need-to-know for the operator's handle decomposition: it
             # only enters the prompt in the handle phase itself.
-            f"- handle hint (operator's decomposition of the @, INTERNAL): "
+            "- handle hint (operator's decomposition of the @, INTERNAL): "
             + (persona.handle_hint or "(none — derive oblique hints from the handle itself)")
             + "\n"
             if vector == "handle" else ""

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from finding_memeland.db.client import Repo
 
@@ -79,7 +79,7 @@ def test_create_hunt_returns_id():
 
 def test_log_submission_serializes_datetime():
     db = _FakeDB()
-    when = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    when = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
     Repo(db).log_submission(hunt_id=1, dm_id="d", x_created_at=when, outcome="won")
     entry = db.log[-1]
     assert entry["table"] == "submissions" and entry["op"] == "insert"
@@ -96,7 +96,7 @@ def test_set_hunt_state_updates_with_filter():
 
 def test_holding_samples_filters_by_wallet_and_since():
     db = _FakeDB()
-    since = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    since = datetime(2026, 8, 1, tzinfo=UTC)
     Repo(db).holding_samples("0xabc", since)
     entry = db.log[-1]
     assert entry["table"] == "holding_samples"

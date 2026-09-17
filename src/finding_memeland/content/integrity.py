@@ -35,7 +35,7 @@ def generate_salt() -> str:
 
 def compute_integrity_hash(persona_user_id: str, claim_code: str, salt: str) -> str:
     """The committed value. Order and utf-8 encoding are part of the protocol."""
-    payload = f"{persona_user_id}{claim_code}{salt}".encode("utf-8")
+    payload = f"{persona_user_id}{claim_code}{salt}".encode()
     return hashlib.sha256(payload).hexdigest()
 
 

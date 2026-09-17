@@ -23,7 +23,7 @@ The web3 client is injected — no top-level web3 import.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 # Minimal ERC-20 ABI — balanceOf only.
 ERC20_BALANCEOF_ABI = [
@@ -48,7 +48,7 @@ _MIN_SECONDS_PER_BLOCK = 1
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _topic_addr(wallet: str) -> str:

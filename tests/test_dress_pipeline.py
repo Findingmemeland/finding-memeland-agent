@@ -7,7 +7,7 @@ then assert the persisted descriptor matches the recording verbatim.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -16,7 +16,7 @@ from finding_memeland.persona.dresser import PersonaDresser
 from finding_memeland.persona.generator import GeneratedPersona
 
 
-NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
 
 
 def _identity(name="Quantum Toad", terms=("Schrodinger",)):

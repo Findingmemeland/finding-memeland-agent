@@ -15,7 +15,7 @@ de seleção testada é a de produção, não uma cópia.
 """
 
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -26,7 +26,7 @@ from finding_memeland.persona.generator import GeneratedPersona
 from finding_memeland.persona.source import DBPersonaSource
 
 
-NOW = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)  # FakeClock start
+NOW = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)  # FakeClock start
 
 
 def _identity(name="Cassandra Tired"):

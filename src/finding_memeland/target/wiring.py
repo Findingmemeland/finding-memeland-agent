@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Callable
 
 from .adapters import (
@@ -102,7 +102,7 @@ ARTWORK_TIMEOUT_S = 10                   # a winner is waiting; the picture is o
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -159,12 +159,12 @@ class TargetWiring:
 
     @staticmethod
     def prepared_hours_left(p: Prepared) -> float:
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             made = datetime.fromisoformat(p.prepared_at.replace("Z", "+00:00"))
         except (ValueError, AttributeError, TypeError):
             return -1.0        # unreadable stamp counts as expired (R8)
-        age = (datetime.now(timezone.utc) - made).total_seconds() / 3600
+        age = (datetime.now(UTC) - made).total_seconds() / 3600
         return PREPARED_TTL_HOURS - age
 
     def prepared_fingerprint(self) -> str:

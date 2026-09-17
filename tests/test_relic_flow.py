@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -13,7 +13,7 @@ from finding_memeland.content.relic_clues import (
     relic_ramp_plan, relic_slot_for,
 )
 from finding_memeland.persona.relic import (
-    Relic, RelicState, new_identity, relic_canonical_id,
+    Relic, new_identity, relic_canonical_id,
 )
 from finding_memeland.persona.relic_pool import FakeRelicRepo, NullPoolCipher, RelicPool
 from finding_memeland.persona.relic_findability import FakeFindability, FindabilityRefused
@@ -513,7 +513,7 @@ def _staged(indexed=True):
     pool.mark_minted("r1", chain="base", contract="0xaa", token_id="1",
                      mint_wallet_ref="W1", image_uri="ipfs://x",
                      commitment=ident.commitment_for(cid),
-                     minted_at=datetime.now(timezone.utc) - timedelta(days=21))
+                     minted_at=datetime.now(UTC) - timedelta(days=21))
     canon = FakeFindability("basescan", {"Maroon Ledger"} if indexed else set())
     return pool, ident, canon
 

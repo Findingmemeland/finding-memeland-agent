@@ -1,10 +1,10 @@
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from finding_memeland.persona.source import DBPersonaSource, persona_findability_ready
 
-_OLD = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-_NEW = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+_OLD = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+_NEW = (datetime.now(UTC) - timedelta(days=2)).isoformat()
 from finding_memeland.runtime import (
     ManualPriceFeed,
     SystemClock,

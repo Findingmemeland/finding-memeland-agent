@@ -6,7 +6,7 @@ now beats every cycle; PollHeartbeat.check() returns the Telegram alert when a
 live hunt stops beating.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 from finding_memeland.orchestrator.simulation import build_simulation
 from finding_memeland.runtime import PollHeartbeat
@@ -14,7 +14,7 @@ from finding_memeland.runtime import PollHeartbeat
 
 class _Clock:
     def __init__(self):
-        self.t = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+        self.t = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
     def now(self):
         return self.t

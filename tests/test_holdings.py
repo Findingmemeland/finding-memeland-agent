@@ -6,12 +6,12 @@ replay math with injected balances/events (no web3 needed).
 Event tuples: (block, log_index, from_addr, to_addr, value_base_units).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from types import SimpleNamespace
 
 from finding_memeland.chain.holdings import Holdings, _topic_addr
 
-NOW = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 WALLET = "0x" + "a" * 40
 OTHER = "0x" + "b" * 40
 D = 10 ** 18  # one whole token in base units

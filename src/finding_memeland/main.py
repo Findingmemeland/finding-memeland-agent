@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import Settings, get_settings
+from datetime import UTC
 
 
 @dataclass
@@ -647,10 +648,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         dressed_at = str(nxt.get("dressed_at") or "")
         if dressed_at:
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 dt = datetime.fromisoformat(dressed_at.replace("Z", "+00:00"))
-                age_line = f", vestida há {(datetime.now(timezone.utc) - dt).days}d"
+                age_line = f", vestida há {(datetime.now(UTC) - dt).days}d"
             except ValueError:
                 pass
         try:
@@ -951,7 +952,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         try:
             pool = repo.dressed_personas()
             if pool:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
                 eligible, waiting = split_dressed_by_findability(
                     pool, min_days=s.min_warmup_days
@@ -961,7 +962,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 age = ""
                 if d:
                     dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
-                    age = f", a mais antiga há {(datetime.now(timezone.utc) - dt).days}d"
+                    age = f", a mais antiga há {(datetime.now(UTC) - dt).days}d"
                 nxt_line = (
                     f"next: {oldest.get('handle')}"
                     if eligible else "next: NENHUMA findability-ready"
@@ -1106,11 +1107,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
     # Daily scheduler: at filler_hour_utc, generate drafts and push them to the
     # admin's Telegram. Best-effort — a failed day never breaks anything.
     def _daily_filler_loop():
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         import time as _time
 
         while True:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             target = now.replace(hour=s.filler_hour_utc, minute=0, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)
@@ -1205,7 +1206,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
             relic_id = unminted[0].id
 
         try:
-            result = mint_relic(
+            # O MintResult é DELIBERADAMENTE deitado fora. Traz contract,
+            # token_id e tx_hash — os três identificam o relic num clique, e
+            # é exactamente o que a auditoria v3 (P0-C) mandou tirar desta
+            # mensagem. Quem vier "aproveitar" o retorno está a desfazer o
+            # blind mode. Se falhar, mint_relic levanta; não devolve erro.
+            mint_relic(
                 relic_id=relic_id, pool=relic_pool, wallets=relic_wallets,
                 image_gen=relic_artwork, minter=relic_minter,
             )

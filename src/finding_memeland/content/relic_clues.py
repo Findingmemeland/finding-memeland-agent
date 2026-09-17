@@ -29,8 +29,6 @@ from dataclasses import dataclass, field
 
 from .clue_engine import (
     HARD_CLUE_FLOOR,
-    RAMP_NAME_EASY,
-    RAMP_NAME_HARD,
     ClueDraft,
     ClueEngine,
     _name_facets,

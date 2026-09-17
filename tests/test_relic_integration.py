@@ -9,7 +9,7 @@ failure can never break a hunt whose prize is already paid.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pytest
 
@@ -26,7 +26,7 @@ from finding_memeland.persona.relic_pool import FakeRelicRepo, NullPoolCipher, R
 
 
 class _Clock:
-    def now(self): return datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    def now(self): return datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     def sleep(self, s): pass
 
 
@@ -70,7 +70,7 @@ def _pool_with_relic(name="Maroon Ledger", indexed=True):
     pool.mark_minted("r1", chain="base", contract="0xAAA", token_id="1",
                      mint_wallet_ref="W1", image_uri="ipfs://x",
                      commitment=ident.commitment_for(cid),
-                     minted_at=datetime(2026, 8, 1, tzinfo=timezone.utc))
+                     minted_at=datetime(2026, 8, 1, tzinfo=UTC))
     canon = FakeFindability("basescan", {name} if indexed else set())
     return pool, ident, _Orch(pool, canon)
 

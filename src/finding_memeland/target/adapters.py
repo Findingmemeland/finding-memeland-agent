@@ -649,7 +649,6 @@ class RotatingLiveCheck:
     our keyed RPC."""
 
     def __init__(self, *, generic: GenericMetadata, rng=None):
-        from .hunt import LiveCheck
         self._generic = generic
         self._rng = rng
 
@@ -657,7 +656,9 @@ class RotatingLiveCheck:
         from .hunt import LIVE_UNAVAILABLE, LiveCheck
         last = None
         for _ in range(max(1, len(self._generic.providers))):
-            with self._generic.batch() as read:
+            # O batch entra-se pelo efeito, não pelo handle: é ele que fixa o
+            # provider desta ronda, e `read_live` recusa-se a ler fora dele.
+            with self._generic.batch():
                 verdict = LiveCheck(read_live=self._generic.read_live,
                                     rng=self._rng).check(sealed)
             if verdict.status != LIVE_UNAVAILABLE:

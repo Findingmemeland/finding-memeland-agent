@@ -68,6 +68,7 @@ from .templates import (
     target_winner_announcement,
     void_reveal,
 )
+from datetime import UTC
 
 
 @dataclass
@@ -297,17 +298,17 @@ def _prepared_age_hours(prepared, orch) -> float | None:
     """How old the preparation is, in hours. None when the timestamp is
     missing or unparseable — an unreadable clock never refuses a launch by
     itself; the TTL is a safety net, not a gate."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     stamp = str(getattr(prepared, "prepared_at", "") or "")
     if not stamp:
         return None
     try:
         made = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
         if made.tzinfo is None:
-            made = made.replace(tzinfo=timezone.utc)
+            made = made.replace(tzinfo=UTC)
         now = orch._clock.now()
         if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
+            now = now.replace(tzinfo=UTC)
         return max(0.0, (now - made).total_seconds() / 3600.0)
     except Exception:  # noqa: BLE001
         return None

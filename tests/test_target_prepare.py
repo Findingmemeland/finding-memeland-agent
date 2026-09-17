@@ -12,8 +12,7 @@ import random
 import pytest
 
 from finding_memeland.target.prepare import (
-    Candidate, Larder, LarderIntegrityError, LarderStore, Prepared,
-    PreparedStore, PrepareRefused, Source, TargetFinder, TargetPreparer,
+    Larder, LarderIntegrityError, LarderStore, PreparedStore, PrepareRefused, Source, TargetFinder, TargetPreparer,
     enumerable_sources, excluded_ids, used_hmac,
 )
 from finding_memeland.target.refresh import TokenRead

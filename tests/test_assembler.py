@@ -5,7 +5,7 @@ submission is complete when the pair is known; arrival order = created_at of
 the COMPLETING message.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from finding_memeland.dm.assembler import SubmissionAssembler
 from finding_memeland.dm.validator import parse_dm
@@ -15,7 +15,7 @@ W2 = "0x" + "b" * 40
 
 
 def _t(minute):
-    return datetime(2026, 7, 23, 19, minute, tzinfo=timezone.utc)
+    return datetime(2026, 7, 23, 19, minute, tzinfo=UTC)
 
 
 def _msg(sender, body, dm_id="1"):

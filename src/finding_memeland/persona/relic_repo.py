@@ -12,7 +12,7 @@ by schema design.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Any
 
 from .relic import Relic, RelicState
@@ -34,10 +34,9 @@ def _as_dt(value) -> datetime | None:
     if value is None or isinstance(value, datetime):
         return value
     try:
-        from datetime import timezone
 
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except ValueError:
         return None
 

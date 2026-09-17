@@ -8,7 +8,7 @@ without supabase installed; tests drive the Repo with a fake client.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Any
 
 
@@ -133,10 +133,10 @@ class Repo:
         return str(rows[0]["payload"]) if rows and rows[0].get("payload") else None
 
     def put_blob(self, key: str, payload: str) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
         self._db.table("target_blobs").upsert(
             {"key": key, "payload": payload,
-             "updated_at": datetime.now(timezone.utc).isoformat()}
+             "updated_at": datetime.now(UTC).isoformat()}
         ).execute()
 
     # --- clues ---
@@ -294,7 +294,7 @@ class Repo:
         return rows[0] if rows else None
 
     def set_approval_status(self, approval_id: int, status: str) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
         self._db.table("approval_queue").update(
-            {"status": status, "decided_at": datetime.now(timezone.utc).isoformat()}
+            {"status": status, "decided_at": datetime.now(UTC).isoformat()}
         ).eq("id", approval_id).execute()

@@ -5,7 +5,7 @@ so our own canned replies must be dropped, or they come back on the next poll
 as fake 'submissions'.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from types import SimpleNamespace
 
 from finding_memeland.social.x_client import XClient
@@ -18,7 +18,7 @@ def _ev(ev_id, sender_id, text, minute, event_type="MessageCreate"):
         id=ev_id,
         sender_id=sender_id,
         text=text,
-        created_at=datetime(2026, 7, 5, 12, minute, tzinfo=timezone.utc),
+        created_at=datetime(2026, 7, 5, 12, minute, tzinfo=UTC),
         event_type=event_type,
     )
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from ..content.integrity import generate_claim_code
 from .source import (
@@ -65,7 +65,7 @@ DEFAULT_ANCHOR_SPACING_S = 180
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class DressPipeline:

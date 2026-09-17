@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Protocol, runtime_checkable
 
 from .relic import Relic, RelicIdentity, RelicState
@@ -190,7 +190,7 @@ class RelicPool:
         relic.mint_wallet_ref = mint_wallet_ref
         relic.image_uri = image_uri
         relic.commitment = commitment
-        relic.minted_at = minted_at or datetime.now(timezone.utc)
+        relic.minted_at = minted_at or datetime.now(UTC)
         relic.state = RelicState.MINTED
         self._repo.set_relic(relic)
 

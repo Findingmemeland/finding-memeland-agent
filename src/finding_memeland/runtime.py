@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 
 def round_sig(n: float, sig: int = 3) -> int:
@@ -25,7 +25,7 @@ class SystemClock:
     """Real Clock port: wall-clock time + real sleep."""
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     def sleep(self, seconds: float) -> None:
         import time
@@ -251,7 +251,7 @@ class PollHeartbeat:
     def __init__(self, *, stall_after_s: int = 600, realert_s: int = 900, now_fn=None):
         self._stall = stall_after_s
         self._realert = realert_s
-        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._now = now_fn or (lambda: datetime.now(UTC))
         self._live = False
         self._last_beat: datetime | None = None
         self._last_alert: datetime | None = None

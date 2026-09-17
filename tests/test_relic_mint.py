@@ -4,7 +4,7 @@ paths / fakes; live behaviour is proven by the mainnet dry-run (Pedro)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -188,7 +188,7 @@ def test_decoys_wait_at_target():
 
 
 def test_decoys_respect_min_cadence_since_last_mint():
-    now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 22, tzinfo=UTC)
     d = plan_decoys(cfg=_cfg(min_gap_s=3600), pool_size=0, free_wallets=10,
                     now=now, last_mint_at=now - timedelta(seconds=60))
     assert d.mint_now == 0 and "too soon" in d.reason
@@ -201,7 +201,7 @@ def test_decoys_mint_below_target_capped_by_wallets_and_batch():
 
 
 def test_decoys_jitter_is_injectable():
-    now = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 22, tzinfo=UTC)
     d = plan_decoys(cfg=_cfg(min_gap_s=10, max_gap_s=999), pool_size=5, free_wallets=1,
                     now=now, gap_fn=lambda c: 42)
     assert d.next_check_at == now + timedelta(seconds=42)

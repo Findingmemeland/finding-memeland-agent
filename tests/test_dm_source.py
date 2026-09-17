@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from finding_memeland.dm.listener import XDMSource
 
@@ -14,7 +14,7 @@ class _FakeX:
 
 
 def test_maps_events_to_submissions():
-    when = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    when = datetime(2026, 8, 1, tzinfo=UTC)
     fake = _FakeX([
         {"dm_id": "1", "sender_x_id": "9", "sender_handle": "anon",
          "text": "code ABCDEFGH wallet 0x" + "a" * 40, "created_at": when},

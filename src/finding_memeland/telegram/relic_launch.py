@@ -16,7 +16,7 @@ for the identity's own strings and raises rather than let a leak reach Telegram.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 
 class IdentityLeak(RuntimeError):
@@ -79,7 +79,7 @@ class RelicLaunchSummary:
     def age_days(self, now: datetime | None = None) -> int | None:
         if not self.minted_at:
             return None
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         return (now - self.minted_at).days
 
 

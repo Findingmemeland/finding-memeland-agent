@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ def plan_decoys(
     - Mint only while below target size, and only after the jittered gap since
       the last mint has elapsed (so cadence stays irregular).
     - Bursts are capped by max_batch and by free_wallets."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     gap = timedelta(seconds=gap_fn(cfg))
 
     if free_wallets <= 0:

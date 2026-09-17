@@ -23,8 +23,6 @@ import json
 from dataclasses import dataclass
 
 from ..social.x_text import (
-    MAX_BIO_LEN,
-    MAX_NAME_LEN,
     sanitize_bio,
     sanitize_name,
     sanitize_x_text,

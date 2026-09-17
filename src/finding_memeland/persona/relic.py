@@ -23,7 +23,7 @@ Rarible, OpenSea 2026-08-22 — so the code in the description is not a shortcut
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from enum import Enum
 
 # Reuse the FROZEN protocol verbatim (do NOT re-implement the hash here — one
@@ -127,7 +127,7 @@ class Relic:
     image_uri: str | None = None           # pinned/immutable (IPFS or on-chain)
     minted_at: datetime | None = None
 
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def canonical_id(self) -> str | None:
         """The commitment ingredient, or None before mint."""
