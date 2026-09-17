@@ -253,6 +253,26 @@ class XClient:
             return None
         return {"id": str(resp.data.id), "text": resp.data.text or ""}
 
+    def get_post(self, tweet_id: str) -> dict | None:
+        """Does THIS post still exist? Asked of the API, never of the UI.
+
+        17/09, a meio do hunt #11: o X deixou de mostrar a âncora da Clue 1 e
+        o operador concluiu que a tinha apagado — âncora nova publicada, a
+        linha do hunt editada à mão no Supabase, processo reiniciado. Vinte
+        minutos, em directo, e o post esteve lá o tempo todo.
+
+        A regra que saiu daí: um post só está apagado quando a API o diz.
+
+        None = NÃO EXISTE. Uma falha de transporte LEVANTA — "não consegui
+        perguntar" não é "não está lá" (R8), e quem chama tem de conseguir
+        distinguir as duas coisas, porque a decisão que se toma é oposta."""
+        resp = _retry_server_error(
+            lambda: self._v2().get_tweet(tweet_id, user_auth=True)
+        )
+        if resp is None or resp.data is None:
+            return None
+        return {"id": str(resp.data.id), "text": _expanded_text(resp.data)}
+
     def search_recent(self, query: str, *, max_results: int = 10) -> list[dict]:
         """Search recent tweets (v2) — used for the pre-hunt findability check:
         does the persona's locator post actually surface for a given phrase?"""

@@ -233,6 +233,33 @@ def hunt_status_line(repo, *, local_active: bool) -> str:
     return line
 
 
+def anchor_status_line(post_id, get_post) -> str:
+    """A âncora do hunt ainda existe? PERGUNTADO À API.
+
+    Todas as pistas são respostas à âncora: se ela desaparecer, o fio
+    parte-se e o `sweep` das claims deixa de ter onde procurar.
+
+    17/09, hunt #11: o X deixou de a mostrar. O operador concluiu — com toda
+    a razão, dado o que tinha à frente — que a tinha apagado. Publicou-se
+    uma âncora nova, editou-se a linha no Supabase à mão, reiniciou-se o
+    processo. Vinte minutos em directo, e o post nunca tinha saído de lá.
+
+    TRÊS respostas, nunca duas. "Não consegui perguntar" é uma resposta por
+    direito próprio, porque leva à decisão oposta de "não existe": numa
+    ficas quieto e voltas a olhar, na outra mexes no hunt a sério. Foi
+    juntá-las que custou os vinte minutos."""
+    if not post_id:
+        return "âncora: nenhuma registada — as pistas não têm a que responder"
+    try:
+        got = get_post(str(post_id))
+    except Exception as e:  # noqa: BLE001
+        return (f"âncora {post_id}: ⚠️ não consegui verificar "
+                f"({type(e).__name__}) — NÃO concluas que foi apagada")
+    if got is None:
+        return f"âncora {post_id}: ✗ NÃO EXISTE (API) — o fio está partido"
+    return f"âncora {post_id}: ✓ existe (API, não a interface)"
+
+
 class PollHeartbeat:
     """Liveness sensor for the hunt loop (post-mortem P0 pack).
 

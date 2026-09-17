@@ -161,6 +161,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         TelegramNotifier,
         active_hunt_guard,
         env_token_resolver,
+        anchor_status_line,
         hunt_status_line,
         write_temp_png,
     )
@@ -914,6 +915,19 @@ def build_agent(settings: Settings | None = None) -> Agent:
         state = hunt_status_line(repo, local_active=hunt_flag["active"])
 
         lines = [state, ""]
+
+        # A âncora, perguntada à API — só com um hunt activo, porque só aí
+        # existe um fio para partir. Custa uma chamada e evita a decisão que
+        # se tomou em directo a 17/09 a olhar para a interface do X.
+        try:
+            _rows = repo.active_hunts()
+        except Exception:  # noqa: BLE001 — o headline acima já se queixou
+            _rows = []
+        if _rows:
+            lines.append(
+                anchor_status_line(_rows[0].get("reshare_post_id"), x.get_post)
+            )
+            lines.append("")
 
         floor = int(getattr(s, "holding_floor_fmml", 0) or 0)
         if floor:
