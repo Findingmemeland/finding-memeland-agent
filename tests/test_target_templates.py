@@ -247,7 +247,15 @@ def test_system_replies_have_no_urls_and_teach_the_format():
               POST_REPLY_WRONG_DOOR_TARGET):
         assert not URL_RE.search(r)
         assert "chain:contract:tokenId" in r
-    assert "needs the chain" in POST_REPLY_FORMAT
+    # Reworded 17/09: the old text said "needs the chain", which only
+    # covered one of the two ways a claim comes in incomplete. Hunt #11
+    # showed the other — a bare contract with no tokenId — being jeered at
+    # instead of taught, on a post that held the right piece.
+    assert "chain, contract AND tokenId" in POST_REPLY_FORMAT
+    # and neither reply may call an unread post WRONG (Pedro, 17/09)
+    for r in (POST_REPLY_FORMAT, POST_REPLY_UNRESOLVED_LINK):
+        assert "cost you nothing" in r
+        assert "wrong" not in r.lower()
     assert "Base" not in TARGET_CLUE_ONE_EXPLAINER.split("\n")[0]  # 1ª linha sem cadeia
 
 

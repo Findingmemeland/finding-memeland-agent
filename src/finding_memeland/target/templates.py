@@ -309,14 +309,21 @@ def void_reveal(d: VoidRevealData) -> str:
 # A paste with contract:tokenId but no chain — the public format rule. The
 # chain is part of the answer (clues never state it), so this can't match.
 POST_REPLY_FORMAT = (
-    "almost — a claim needs the chain too. reply with chain:contract:tokenId "
-    f"(like {CLAIM_FORMAT_EXAMPLE}) or the marketplace link, and it counts."
+    "almost — a claim needs the exact token: chain, contract AND tokenId. "
+    f"reply with chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE}) or "
+    "the marketplace link, and it counts. this one cost you nothing."
 )
 
 # A marketplace link we could not resolve to a token (slug-only page, or the
 # resolver is down): ask for the identity instead of guessing.
+# NEVER "wrong" — we could not READ it, which is our limit, not the
+# player's mistake (Pedro, 17/09). Hunt #11 jeered at link claims all
+# afternoon because X had shortened every URL to t.co; the winner got
+# through by typing the triple by hand. The wording says whose fault it
+# is and what to send, and repeats that nothing was spent.
 POST_REPLY_UNRESOLVED_LINK = (
-    "can't read that link as a token. reply with chain:contract:tokenId "
+    "i can't read that link — my side, not yours, and it cost you nothing. "
+    "reply with chain:contract:tokenId "
     f"(like {CLAIM_FORMAT_EXAMPLE}) and it counts."
 )
 

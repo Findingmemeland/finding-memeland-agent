@@ -4,9 +4,13 @@ Ratified rules (Opus, 05/09) this module implements:
 
   · a claim identifies the target as chain:contract:tokenId — the SAME
     canonical string as Target.id(), which is what the commitment sealed
-  · a marketplace LINK is accepted as a courtesy, but what gets validated
-    is ALWAYS the chain:contract:tokenId extracted from it — never the URL
-    text, never a slug, never a name
+  · a LINK — from any site — is the PRIMARY way to claim (Pedro, 17/09:
+    it is the easiest thing a player can do). What gets validated is still
+    ALWAYS the chain:contract:tokenId resolved from it — never the URL
+    text, never a slug, never a name; the commitment sealed the triple.
+    A link we cannot resolve is OUR limit, so it costs no guess and the
+    answer teaches the explicit format. NEVER "wrong" for something that
+    might be right: that is our failure wearing the player's name.
   · clues NEVER state the chain, so the chain is part of the answer: an
     explicit paste WITHOUT a chain ("0x…:12") is claim-shaped (the oracle
     may answer with the public format rule) but can never match. The format
@@ -178,7 +182,14 @@ def extract_target_refs(text: str) -> ClaimExtraction:
         if ref is not None:
             if ref not in refs:
                 refs.append(ref)
-        elif _is_market_host(url) or _ADDR_RE.search(url):
+        else:
+            # ANY link, from ANY site (Pedro, 17/09). A link is the easiest
+            # way to claim and must be the main one, so a host we do not
+            # recognise is OUR gap, not the player's mistake: it becomes an
+            # unreadable link — which costs no guess and earns the format,
+            # never a jeer. The old rule only admitted a short list of
+            # marketplace hosts, so a t.co, an aggregator or a new
+            # marketplace read as plain noise.
             if url not in unresolved:
                 unresolved.append(url)
     # explicit triples OUTSIDE urls (strip urls first so a rarible
@@ -192,10 +203,18 @@ def extract_target_refs(text: str) -> ClaimExtraction:
 
 def claim_shaped(text: str) -> bool:
     """Does the post LOOK like a claim attempt? Explicit triple, chainless
-    contract:tokenId paste, or a marketplace-ish link. Drives the oracle's
-    format-rule reply and the guess cap — never a match by itself."""
+    contract:tokenId paste, or a link that could plausibly BE a token.
+
+    Deliberately narrower than `unresolved_links` (17/09). Extraction now
+    keeps EVERY url, because any of them might resolve to a token and we
+    would rather try and fail than ignore. But "might resolve" is not
+    "looks like a claim": a blog link in the claim thread is chatter, and
+    calling it claim-shaped would drag it into the guess cap."""
     ext = extract_target_refs(text)
-    if ext.refs or ext.unresolved_links:
+    if ext.refs:
+        return True
+    if any(_is_market_host(u) or _ADDR_RE.search(u)
+           for u in ext.unresolved_links):
         return True
     stripped = _URL_RE.sub(" ", text or "")
     return bool(_CHAINLESS_RE.search(stripped))

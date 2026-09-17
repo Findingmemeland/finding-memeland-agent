@@ -97,6 +97,7 @@ class TargetClaimMatcher:
         self._format_reply = format_reply
         self._unresolved_reply = unresolved_reply
         self._one_token_reply = one_token_reply
+        self._readable_memo: dict[str, bool] = {}
 
     def _extract(self, text: str):
         from ..target.claim import extract_target_refs
@@ -109,11 +110,37 @@ class TargetClaimMatcher:
     def looks_like_claim(self, text: str) -> bool:
         """The TRIGGER (guess cap, wrong door). A post naming more than one
         token is NOT a claim attempt — it is malformed (Opus, 06/09, P0):
-        it goes to format_hint, costs no guess, can never match."""
+        it goes to format_hint, costs no guess, can never match.
+
+        A LINK ONLY COUNTS ONCE WE CAN TURN IT INTO A TOKEN (17/09). Saying
+        yes to every link would spend a guess on something we cannot even
+        read and answer it with a jeer — which is the Hunt #11 failure
+        wearing a new hat. Unreadable links fall through to format_hint,
+        cost nothing, and get taught. The resolve is memoised so the judge
+        is not asked twice for the same post."""
         ext = self._extract(text)
         if self._malformed(ext):
             return False
-        return bool(ext.refs or ext.unresolved_links)
+        if ext.refs:
+            return True
+        if not ext.unresolved_links:
+            return False
+        return self._readable(text)
+
+    def _readable(self, text: str) -> bool:
+        """Can the resolver turn this post's links into a token? Memoised
+        per post: `looks_like_claim` and `format_hint` both ask."""
+        key = text or ""
+        if key in self._readable_memo:
+            return self._readable_memo[key]
+        try:
+            ok = self._judge.judge(key, resolve_link=self._resolve).checked > 0
+        except Exception:  # noqa: BLE001 — unreadable, which is the safe side
+            ok = False
+        if len(self._readable_memo) > 512:          # one hunt, bounded
+            self._readable_memo.clear()
+        self._readable_memo[key] = ok
+        return ok
 
     def matches(self, text: str) -> bool:
         return self._judge.judge(text, resolve_link=self._resolve).matched
@@ -127,8 +154,10 @@ class TargetClaimMatcher:
         return None
 
     def skip_judge(self, text: str) -> bool:
-        # a bare contract paste (no tokenId) is mechanical engagement — jeer
-        return contract_paste_like(text) and not self.looks_like_claim(text)
+        # A bare contract paste now gets the FORMAT (see format_hint) and
+        # never reaches the jeer, so nothing is left to skip the judge for.
+        # Kept so the port stays the same shape for the code matcher.
+        return False
 
     def spray_key(self, text: str) -> str | None:
         ext = self._extract(text)
@@ -144,6 +173,13 @@ class TargetClaimMatcher:
         return tokens_named(self._extract(text))
 
     def format_hint(self, text: str) -> str | None:
+        """The public system reply that TEACHES the format. Never a guess,
+        never a verdict.
+
+        THE RULE THIS SERVES (Pedro, 17/09, after Hunt #11): never tell a
+        player they are wrong when they might be right. Everything here is
+        a post we could not turn into a token — and not being able to read
+        it is OUR limit. The player hears what to send instead."""
         from ..target.claim import claim_shaped
         ext = self._extract(text)
         if self._malformed(ext):
@@ -156,5 +192,11 @@ class TargetClaimMatcher:
                 return self._unresolved_reply
             return None
         if claim_shaped(text):                     # contract:tokenId, no chain
+            return self._format_reply
+        if contract_paste_like(text):
+            # A bare contract with no tokenId: someone naming a COLLECTION
+            # and believing they claimed a token. Hunt #11 jeered at three
+            # of these ("mechanical engagement"), and one of them had the
+            # right piece. They are claiming — teach them.
             return self._format_reply
         return None

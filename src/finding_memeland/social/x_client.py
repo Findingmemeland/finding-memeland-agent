@@ -50,7 +50,40 @@ _DM_MAX_PAGES = 10
 # not multiply cost; only UNIQUE mentions are billed.
 _MENTIONS_FETCH = 100
 _MENTIONS_MAX_PAGES = 10
-_TWEET_FIELDS = ["author_id", "created_at", "conversation_id", "referenced_tweets"]
+# `entities` is NOT decoration (measured live, Hunt #11, 17/09): the API's
+# `text` carries every URL ALREADY SHORTENED to t.co, and the real address
+# lives only in entities.urls[].expanded_url. Without it a marketplace link
+# reaches the claim parser as "https://t.co/aBcD1234" — no contract, no
+# tokenId, no chain — so it is not a claim, not even an unreadable link,
+# just noise that earns a jeer. Every link claim in Hunt #11 died here, in
+# silence, while the pinned rules promised "or just paste the marketplace
+# link". The winner got through by typing chain:contract:tokenId by hand.
+_TWEET_FIELDS = ["author_id", "created_at", "conversation_id",
+                 "referenced_tweets", "entities"]
+
+
+def _expanded_text(tweet) -> str:
+    """The tweet's text with every t.co put back to the URL the player
+    actually pasted.
+
+    X shortens links in `text` and keeps the original in
+    `entities.urls[].expanded_url`. Everything downstream — the claim
+    parser, the link resolver, the format hint — reads text, so the
+    expansion has to happen here, at the edge, once. Anything missing
+    (no entities, no expanded_url) leaves the text untouched: worse than
+    before is not possible, and silence is what we are fixing."""
+    text = getattr(tweet, "text", "") or ""
+    ents = getattr(tweet, "entities", None) or {}
+    if not isinstance(ents, dict):
+        ents = getattr(ents, "__dict__", {}) or {}
+    for u in (ents.get("urls") or []):
+        if not isinstance(u, dict):
+            u = getattr(u, "__dict__", {}) or {}
+        short = str(u.get("url") or "")
+        full = str(u.get("expanded_url") or "")
+        if short and full and short != full:
+            text = text.replace(short, full)
+    return text
 
 
 def _image_ext(data: bytes) -> str:
@@ -358,7 +391,7 @@ class XClient:
                 "tweet_id": str(t.id),
                 "author_id": author,
                 "author_handle": (u.username if u else ""),
-                "text": getattr(t, "text", "") or "",
+                "text": _expanded_text(t),
                 "created_at": t.created_at,
                 "conversation_id": str(getattr(t, "conversation_id", "") or "") or None,
                 "replied_to_id": replied_to,
