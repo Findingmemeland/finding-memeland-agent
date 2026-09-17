@@ -948,37 +948,45 @@ def build_agent(settings: Settings | None = None) -> Agent:
             f"{s.non_holder_prize_pct}%"
         )
 
-        # Pre-dressed pool (Fase 2): what /launch will actually pick from.
-        try:
-            pool = repo.dressed_personas()
-            if pool:
-                from datetime import datetime
+        # Pre-dressed pool (Fase 2): what /launch will actually pick from —
+        # e só isso. No modo de alvo o `_prepare` devolve antes de sequer
+        # olhar para o `_persona_source` (state_machine, ~l.404), por isso
+        # esta linha não é uma pré-condição de nada: é um resto do tempo em
+        # que cada hunt tinha o seu perfil no X. Fica escondida enquanto o
+        # alvo estiver ligado, e volta sozinha se o modelo voltar — apagá-la
+        # seria ter de me lembrar dela nesse dia.
+        if not s.target_launch:
+            try:
+                pool = repo.dressed_personas()
+                if pool:
+                    from datetime import datetime
 
-                eligible, waiting = split_dressed_by_findability(
-                    pool, min_days=s.min_warmup_days
-                )
-                oldest = eligible[0] if eligible else pool[0]
-                d = str(oldest.get("dressed_at") or "")
-                age = ""
-                if d:
-                    dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
-                    age = f", a mais antiga há {(datetime.now(UTC) - dt).days}d"
-                nxt_line = (
-                    f"next: {oldest.get('handle')}"
-                    if eligible else "next: NENHUMA findability-ready"
-                )
-                wait_line = (
-                    " | a aquecer: "
-                    + "; ".join(_waiting_line(r, at) for r, at in waiting)
-                    if waiting else ""
-                )
-                lines.append(
-                    f"dressed pool: {len(pool)} persona(s){age} — {nxt_line}{wait_line}"
-                )
-            else:
-                lines.append("dressed pool: VAZIA — /dress antes de /launch")
-        except Exception:  # noqa: BLE001 — cosmetic, never breaks /status
-            pass
+                    eligible, waiting = split_dressed_by_findability(
+                        pool, min_days=s.min_warmup_days
+                    )
+                    oldest = eligible[0] if eligible else pool[0]
+                    d = str(oldest.get("dressed_at") or "")
+                    age = ""
+                    if d:
+                        dt = datetime.fromisoformat(d.replace("Z", "+00:00"))
+                        age = f", a mais antiga há {(datetime.now(UTC) - dt).days}d"
+                    nxt_line = (
+                        f"next: {oldest.get('handle')}"
+                        if eligible else "next: NENHUMA findability-ready"
+                    )
+                    wait_line = (
+                        " | a aquecer: "
+                        + "; ".join(_waiting_line(r, at) for r, at in waiting)
+                        if waiting else ""
+                    )
+                    lines.append(
+                        f"dressed pool: {len(pool)} persona(s){age} — "
+                        f"{nxt_line}{wait_line}"
+                    )
+                else:
+                    lines.append("dressed pool: VAZIA — /dress antes de /launch")
+            except Exception:  # noqa: BLE001 — cosmetic, never breaks /status
+                pass
 
         # Target mode: what /launch will see — gate over the stored snapshot.
         if s.target_launch or s.target_pool_key:
