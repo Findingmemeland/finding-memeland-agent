@@ -57,7 +57,7 @@ from .hunt import (
     TargetHuntPreparer,
 )
 from .integration import TargetPorts
-from .prepare import Prepared
+from .prepare import Prepared, PreparedStore
 from .refresh import content_id
 from .selector import CurationEpoch, metadata_hash
 from .snapshot import Snapshot, SnapshotEntry, SnapshotStore
@@ -201,8 +201,19 @@ class TargetWorld:
         self.fetch_live = fetch_live
 
         self.control = FakeControl()
-        self.prepared_slot = None
         self.used_ids = frozenset()
+        # A PREPARAÇÃO PASSA PELO STORE A SÉRIO — encriptada para uma string e
+        # lida outra vez de lá, como no Railway. Antes disto o dry-run guardava
+        # o objecto Python e devolvia-o intacto, e por isso nunca podia ver a
+        # única coisa que estava partida no launch de 17/09: o /prepare grava
+        # `clue_one` como dicionário e o launch queria um ClueDraft. A recusa
+        # ("a preparação não traz Clue 1") aconteceu em directo porque nenhum
+        # teste serializava nada. Agora serializam todos.
+        self._prepared_blob: str | None = None
+        self._prepared_store = PreparedStore(
+            cipher=XorCipher(),
+            read=lambda: self._prepared_blob,
+            write=self._write_prepared)
         self.ports = TargetPorts(
             epoch=EPOCH,
             preparer=TargetHuntPreparer(
@@ -255,15 +266,33 @@ class TargetWorld:
                         salt=sealed.salt, commitment=sealed.commitment,
                         prepared_at=self.rig.clock.now().isoformat())
 
+    def _write_prepared(self, blob: str) -> None:
+        self._prepared_blob = blob or None
+
+    @property
+    def prepared_slot(self):
+        """Lido do store de cada vez — o que os testes vêem é o que o
+        /launch vê na caixa, e não um objecto que ficámos a segurar."""
+        return self._prepared_store.load()
+
+    def reseal(self, p) -> None:
+        """Voltar a gravar uma preparação (envelhecê-la, plantar uma forma
+        específica). Tem de ser pelo store: mexer no objecto devolvido já
+        não chega a lado nenhum, que é precisamente o ponto."""
+        self._prepared_store.save(p)
+
     def _take_prepared(self):
-        if self.prepared_slot is None:
-            self.prepared_slot = self._make_prepared()
-        return self.prepared_slot
+        got = self._prepared_store.load()
+        if got is None:
+            self._prepared_store.save(self._make_prepared())
+            got = self._prepared_store.load()
+        return got
 
     def _clear_prepared(self) -> None:
-        if self.prepared_slot is not None:
-            self.used_ids = self.used_ids | frozenset({self.prepared_slot.id()})
-        self.prepared_slot = None
+        got = self._prepared_store.load()
+        if got is not None:
+            self.used_ids = self.used_ids | frozenset({got.id()})
+        self._prepared_store.clear()
 
     def launch(self):
         hunt = self.orch._prepare(200)

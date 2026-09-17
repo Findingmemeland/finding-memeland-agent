@@ -65,6 +65,7 @@ def test_launch_refuses_an_expired_preparation() -> None:
     w.ports.prepared_max_age_h = 72.0
     p = w.ports.take_prepared()
     object.__setattr__(p, "prepared_at", "2020-01-01T00:00:00+00:00")
+    w.reseal(p)          # pelo store: mexer no objecto devolvido já não chega
     with pytest.raises(LaunchRefused) as e:
         w.launch()
     assert "/prepare" in str(e.value)
@@ -120,6 +121,37 @@ def test_the_used_target_is_fingerprinted_on_the_row() -> None:
     fp = row.get("target_used_hmac")
     assert fp
     assert fp == w.ports.used_hmac(prepared.target.id())
+
+
+def test_the_sealed_clue_survives_the_store_as_a_draft() -> None:
+    """A recusa de 17/09, agora impossível de reintroduzir em silêncio.
+
+    O store grava `clue_one` como dicionário (json) e lê-o de volta; o launch
+    quer um rascunho com `.text`. Os dois discordavam em produção e nenhum
+    teste podia ver isso, porque o dry-run guardava o objecto Python que ele
+    próprio tinha construído e devolvia-o intacto. Agora atravessa a mesma
+    string encriptada que atravessa na caixa."""
+    w = TargetWorld()
+    made = w._make_prepared()
+    w.reseal(made)
+    back = w.ports.take_prepared()
+    assert back is not made, "o dry-run voltou a segurar o objecto"
+    assert hasattr(back.clue_one, "text"), "clue_one voltou como dicionário"
+    assert back.clue_one.text == made.clue_one.text
+    w.launch()
+    assert back.clue_one.text in w.posts()[0]
+
+
+def test_the_slot_is_an_encrypted_blob_not_an_object() -> None:
+    """A preparação fica cifrada em repouso. Se um dia alguém "simplificar"
+    o store para guardar o objecto, isto cai — e cai aqui, não no dia em que
+    o alvo aparecer legível num backup."""
+    w = TargetWorld()
+    prepared = w.ports.take_prepared()
+    blob = w._prepared_blob
+    assert isinstance(blob, str) and blob
+    assert prepared.target.name_onchain not in blob
+    assert str(prepared.target.contract) not in blob
 
 
 def test_no_operator_message_names_the_target() -> None:
