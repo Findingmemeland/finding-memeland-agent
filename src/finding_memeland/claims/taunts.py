@@ -38,6 +38,23 @@ TAUNT_POOL: tuple[str, ...] = (
     "you typed that with such hope. anyway — no.",
 )
 
+# The pool above answers a WRONG GUESS — every line says "no". It cannot be
+# used for a post that named no token at all, because we did not evaluate
+# anything: saying "no" there is a verdict we have no right to (Pedro,
+# 17/09, after a Hunt #11 jeer told the eventual answer it was wrong).
+# These jeer the SHAPE — a name shouted into the void is still funny, and
+# still true.
+NO_TOKEN_POOL: tuple[str, ...] = (
+    "a name, floating alone, claiming nothing. poetic. useless. 🐸",
+    "words are lovely. i collect tokens.",
+    "you named a thing. i need THE thing, with its address.",
+    "that's a vibe, not a claim.",
+    "beautiful guess. zero tokens attached.",
+    "i can't put a name in a wallet, fren.",
+    "the pond accepts tokens. it does not accept nouns. 🐸",
+    "half a claim is a haiku.",
+)
+
 _URL_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
 _MENTION_RE = re.compile(r"@\w+")
 
@@ -48,6 +65,17 @@ ironic, never mean-spirited, never informative. You know NOTHING about the \
 hunt's answer — never pretend to hint, never say what the answer is like, \
 never confirm or deny how close they are thematically. No URLs, no hashtags, \
 no @mentions, no emojis except 🐸 (optional). Reply with ONLY the jeer text."""
+
+_NO_TOKEN_SYSTEM = """You are the voice of "Finding Memeland", an AI oracle \
+running a treasure hunt on X. A player replied with a NAME or a comment but \
+did NOT identify a token, so NOTHING WAS CHECKED.
+
+You do not know whether what they wrote is right or wrong, and you must not \
+imply either: never say "wrong", "no", "not it", "close" or "cold", never \
+confirm or deny. Jeer the SHAPE of the reply — a name with no token attached \
+— and only that. Max 200 chars, playful, meme-native crypto Twitter, ironic, \
+never mean-spirited, never informative. No URLs, no hashtags, no @mentions, \
+no emojis except the frog (optional). Reply with ONLY the jeer text."""
 
 _FUNNY_SYSTEM = """You judge replies in an X treasure-hunt thread. Given a \
 player's reply (NOT a valid code guess), answer YES if the game's oracle \
@@ -72,6 +100,22 @@ product; silence is the failure mode (the jeer never confirms, denies or \
 hints, so replying is always safe). Reply with ONLY YES or NO."""
 
 
+_WRONG_WORDS = re.compile(
+    r"\b(wrong|incorrect|nope|not it|no dice|nah|cold|colder|close|"
+    r"miss(ed)?|denied|try again|not even)\b", re.IGNORECASE)
+
+
+def _asserts_wrong(text: str) -> bool:
+    """Does this jeer claim the player is WRONG?
+
+    Only consulted for the no_token premise. The system prompt already
+    forbids it, but a model that slips once publishes a verdict we never
+    computed — and that is the exact harm of Hunt #11, where the eventual
+    correct answer was publicly told it was wrong. Prompt for it, then
+    check it; the pool is the fallback."""
+    return bool(_WRONG_WORDS.search(text or ""))
+
+
 class TauntEngine:
     """LLM-varied taunts with a hard-validated static fallback."""
 
@@ -81,18 +125,34 @@ class TauntEngine:
         self._n = 0  # rotation counter for the static pool
 
     # -- public API ------------------------------------------------------
-    def taunt(self, player_text: str, banned_terms: tuple[str, ...]) -> str:
-        """A safe public jeer for a wrong guess. Always returns something:
-        LLM variation when available and valid, static pool otherwise."""
+    def taunt(self, player_text: str, banned_terms: tuple[str, ...], *,
+              kind: str = "wrong_guess") -> str:
+        """A safe public jeer. Always returns something: LLM variation when
+        available and valid, static pool otherwise.
+
+        `kind` is the PREMISE, and it has to be true (Pedro, 17/09):
+
+          wrong_guess — a token was named, resolved and judged. It really
+                        is wrong, and the jeer may say so.
+          no_token    — a name or a comment; NOTHING was checked. We do not
+                        know if it is right, so the jeer must not pretend
+                        to. In Hunt #11 the eventual correct name was told
+                        "wrong answer" by this engine, because the engine
+                        was handed a premise that was false. It answered
+                        correctly to a lie of ours.
+        """
+        no_token = kind == "no_token"
+        system = _NO_TOKEN_SYSTEM if no_token else _VARIATION_SYSTEM
+        pool = NO_TOKEN_POOL if no_token else TAUNT_POOL
         if self._client is not None:
             try:
-                raw = self._complete(_VARIATION_SYSTEM, player_text[:400])
+                raw = self._complete(system, player_text[:400])
                 cand = self._validate(raw, banned_terms)
-                if cand:
+                if cand and not (no_token and _asserts_wrong(cand)):
                     return cand
             except Exception:  # noqa: BLE001 — variation is a nicety, never a blocker
                 pass
-        return self._from_pool(banned_terms)
+        return self._from_pool(banned_terms, pool=pool)
 
     def should_taunt_chatter(self, player_text: str) -> bool:
         """Is this non-code reply funny enough (game-wise) to deserve a jeer?
@@ -116,16 +176,17 @@ class TauntEngine:
             b.text for b in resp.content if getattr(b, "type", "") == "text"
         )
 
-    def _from_pool(self, banned_terms: tuple[str, ...]) -> str:
+    def _from_pool(self, banned_terms: tuple[str, ...],
+                   pool: tuple[str, ...] = TAUNT_POOL) -> str:
         """Deterministic rotation over the pool, skipping any entry that a
         (paranoid) banned-terms hit invalidates."""
-        for i in range(len(TAUNT_POOL)):
-            cand = TAUNT_POOL[(self._n + i) % len(TAUNT_POOL)]
+        for i in range(len(pool)):
+            cand = pool[(self._n + i) % len(pool)]
             if self._validate(cand, banned_terms):
                 self._n += i + 1
                 return cand
         self._n += 1
-        return TAUNT_POOL[0]  # pool is static and clue-free by construction
+        return pool[0]  # pools are static and clue-free by construction
 
     @staticmethod
     def _validate(text: str, banned_terms: tuple[str, ...]) -> str | None:

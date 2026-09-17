@@ -10,7 +10,11 @@ reopens the hunt, the anti-spam caps, and clue-free replies.
 from datetime import timedelta
 
 from finding_memeland.claims.parser import ClaimPost, code_like, extract_candidates
-from finding_memeland.claims.taunts import TAUNT_POOL, TauntEngine
+from finding_memeland.claims.taunts import (
+    NO_TOKEN_POOL,
+    TAUNT_POOL,
+    TauntEngine,
+)
 from finding_memeland.content.templates import (
     POST_REPLY_MISSING_REPOST,
     POST_REPLY_TIMED_OUT,
@@ -304,9 +308,13 @@ def test_guess_cap_five_then_ignored_and_single_taunt():
     outcomes = [r["outcome"] for r in rows]
     assert outcomes.count("bad_code") == 5
     assert outcomes.count("spam_capped") == 2
-    # Exactly ONE taunt for the whole profile, and it's from the safe pool.
+    # Exactly ONE taunt for the whole profile, from the safe pool — now
+    # carrying the count (17/09): a real guess was judged and spent, so the
+    # player hears where they stand. First wrong of five ⇒ four left.
     taunts = [t for r, t in rig.publisher.post_replies]
-    assert len(taunts) == 1 and taunts[0] in TAUNT_POOL
+    assert len(taunts) == 1
+    assert taunts[0].endswith(" four left.")
+    assert taunts[0][: -len(" four left.")] in TAUNT_POOL
 
 
 def test_wrong_door_gets_one_redirect_and_is_not_a_claim():
@@ -664,7 +672,10 @@ def test_wrong_shape_guess_gets_a_jeer_without_llm():
     assert winner.submission.sender_x_id == "77"
     jeers_1 = _replies_to(rig, 9910)
     jeers_2 = _replies_to(rig, 9911)
-    assert len(jeers_1) == 1 and jeers_1[0] in TAUNT_POOL
+    # From the NO_TOKEN pool since 17/09: "is it TSU19?" named no token, so
+    # nothing was checked and the jeer may not say "wrong" — in Hunt #11 that
+    # premise was false and the right ANSWER was publicly told it was wrong.
+    assert len(jeers_1) == 1 and jeers_1[0] in NO_TOKEN_POOL
     assert jeers_2 == [], "once per profile — the second guess gets silence"
     outcomes = {s["dm_id"]: s["outcome"] for s in rig.repo.submissions}
     assert outcomes["9910"] == "taunted"
@@ -822,7 +833,11 @@ def test_contract_paste_in_claim_thread_gets_a_pool_taunt_without_judge():
     orch._claim_loop(hunt)
     jeers = _replies_to(rig, 1010)
     assert jeers, "o cole de contrato tem de levar resposta"
-    assert jeers[0] in TAUNT_POOL
+    # Pool NO_TOKEN (17/09): um contrato colado não nomeia token nenhum,
+    # portanto nada foi avaliado e o gozo não pode dar veredicto. Numa hunt
+    # de ALVO este caso passa a receber o formato (test_claim_links); aqui,
+    # numa hunt de código, continua a ser conversa — mas conversa honesta.
+    assert jeers[0] in NO_TOKEN_POOL
     taunted_rows = [s for s in rig.repo.submissions
                     if s.get("outcome") == "taunted" and s["dm_id"] == "1010"]
     assert taunted_rows, "o jeer fica no log (once-per-profile sobrevive restarts)"

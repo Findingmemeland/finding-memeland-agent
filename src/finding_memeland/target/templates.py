@@ -334,6 +334,19 @@ POST_REPLY_ONE_TOKEN = (
     "link) and it counts — this one didn't."
 )
 
+# Appended to the jeer when a reply named something but no token. It is the
+# line the eventual winner of Hunt #11 never got: he wrote the right name,
+# was told he was wrong, and worked the format out on his own.
+#
+# NO "cost you nothing" here, deliberately (Pedro, 17/09): nobody who shouts
+# a name thinks they spent an attempt, so the line would be noise. It belongs
+# where someone could reasonably believe they had — an address, a broken
+# link, contract:tokenId without the chain.
+POST_REPLY_NAME_ONLY = (
+    f"a name is not a claim — i need the exact token. reply with the "
+    f"marketplace link, or chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE})."
+)
+
 POST_REPLY_WRONG_DOOR_TARGET = (
     "the claim goes in the replies of the Clue 1 post — drop the "
     "chain:contract:tokenId (or link) there and it counts. \U0001F438"

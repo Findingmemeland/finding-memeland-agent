@@ -164,6 +164,9 @@ def _theme_line(row: dict) -> str:
     return " / ".join(bits)
 
 
+_SPELLED = {2: "two", 3: "three", 4: "four", 5: "five"}
+
+
 class Orchestrator:
     """Runs one hunt end to end. Collaborators are injected (see ports.py)."""
 
@@ -1859,6 +1862,9 @@ class Orchestrator:
                         taunt_budget["used"] += 1
                         try:
                             jeer = self._taunt_engine.taunt(post.text, banned)
+                            left = self._tries_left_line(guesses, post.author_id)
+                            if left:
+                                jeer = f"{jeer} {left}"
                             self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
                         except Exception as e:  # noqa: BLE001
                             self._notify(f"taunt reply failed (non-fatal): {e!r}")
@@ -2101,6 +2107,30 @@ class Orchestrator:
                 except Exception:  # noqa: BLE001
                     pass
 
+    # words, not digits: the oracle speaks, it does not print a receipt
+    def _tries_left_line(self, guesses: dict, author_id: str) -> str:
+        """"two left", "last one, fren" — the count made audible.
+
+        ONLY on a real guess: a token was named, resolved, judged and found
+        wrong, so an attempt really was spent. Never on a format reply, where
+        the whole point is that NOTHING was spent and announcing a balance
+        would suggest otherwise.
+
+        Silence when the number cannot be trusted. The counter is rebuilt
+        from the log on restart, and a player told "three left" who is cut
+        off at the fourth has every right to be angry — better to say
+        nothing than to promise a number we might not honour."""
+        cap = int(getattr(self, "_claim_guess_cap", 0) or 0)
+        used = guesses.get(author_id)
+        if cap <= 0 or not isinstance(used, int) or used < 1 or used > cap:
+            return ""
+        left = cap - used
+        if left <= 0:
+            return ""                  # the count is done; silence says it
+        if left == 1:
+            return "last one, fren."
+        return f"{_SPELLED.get(left, str(left))} left."
+
     def _maybe_taunt_chatter(
         self,
         hunt: PreparedHunt,
@@ -2130,7 +2160,15 @@ class Orchestrator:
         try:
             if not skip_judge and not self._taunt_engine.should_taunt_chatter(post.text):
                 return
-            jeer = self._taunt_engine.taunt(post.text, banned)
+            # THE PREMISE HAS TO BE TRUE (Pedro, 17/09). Nothing here named a
+            # token, so nothing was checked: the jeer must not say "wrong".
+            # Hunt #11 handed this engine "a WRONG guess" for a post carrying
+            # the right NAME, and it answered the lie correctly, in public.
+            jeer = self._taunt_engine.taunt(post.text, banned, kind="no_token")
+            if getattr(hunt, "target", None) is not None:
+                # ...and the line he never got: what to send instead.
+                from ..target.templates import POST_REPLY_NAME_ONLY
+                jeer = f"{jeer}\n\n{POST_REPLY_NAME_ONLY}"
             self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
         except Exception as e:  # noqa: BLE001
             self._notify(f"chatter taunt failed (non-fatal): {e!r}")
