@@ -228,10 +228,36 @@ class Larder:
         self.candidates.append(c)
         return True
 
-    def take(self, rng: random.Random) -> Candidate | None:
+    def last_contract(self) -> str:
+        """`chain:contract` do alvo consumido mais recentemente, ou "".
+
+        Sai do próprio histórico da despensa — `used` é append-only e está
+        cifrado com o resto, portanto não é preciso coluna nova na base de
+        dados nem mais um sítio onde um id de alvo possa vazar."""
+        if not self.used:
+            return ""
+        parts = self.used[-1].split(":")
+        return f"{parts[0]}:{parts[1].lower()}" if len(parts) == 3 else ""
+
+    def take(self, rng: random.Random, *, avoid_contract: str = "") -> Candidate | None:
+        """Um candidato ao calhas — evitando o contrato do hunt anterior.
+
+        Os hunts #12 e #13 saíram do MESMO contrato e havia jogadores a
+        varrê-lo a meio do segundo. Nenhuma pista deu isso; foi o sorteio.
+
+        MAS A HUNT TEM DE CORRER (regra do Pedro, 09/09): se evitar o
+        contrato anterior esvaziar o balde, o filtro cai e sorteia-se de
+        tudo. Uma guarda de variedade não pode deixar o jogo sem alvo —
+        preferir repetir a não haver hunt."""
         if not self.candidates:
             return None
-        return self.candidates[rng.randrange(len(self.candidates))]
+        pool = self.candidates
+        if avoid_contract:
+            other = [c for c in self.candidates
+                     if f"{c.chain}:{c.contract.lower()}" != avoid_contract]
+            if other:
+                pool = other
+        return pool[rng.randrange(len(pool))]
 
     def consume(self, cid: str) -> None:
         self.candidates = [c for c in self.candidates if c.id() != cid]
@@ -476,8 +502,8 @@ class TargetFinder:
         return dict(self._sizes)
 
     def draw(self) -> tuple[Source, int] | None:
-        """Uniform over the union of the sources: the source in proportion to
-        its size, then a token inside it.
+        """Uma fonte ao calhas, com igual probabilidade, e depois um token
+        dentro dela.
 
         Em modo `index` são duas chamadas e o token existe de certeza. Em
         modo `id` é UMA chamada — o id sai do gerador, sem ir à cadeia — e o
@@ -486,9 +512,20 @@ class TargetFinder:
         enumeram, e paga-se fora do relógio, no /fill."""
         if not self._sizes:
             self.load_sizes()
-        slugs = list(self._sizes)
-        slug = self._rng.choices(slugs, weights=[self._sizes[s] for s in slugs],
-                                 k=1)[0]
+        # UNIFORME ENTRE FONTES, não proporcional ao tamanho (22/09).
+        #
+        # A ponderação por tamanho responde a "que peça, entre todas as
+        # peças?" — justa para as obras. A pergunta que o jogo faz é outra:
+        # "de que contrato sai o próximo alvo?". Com 116k, 51k e 4,4k peças,
+        # a ponderação por tamanho dava 2,6% ao terceiro contrato: acrescentá-
+        # -lo teria sido decorativo, e a despensa continuaria a ser dois
+        # contratos — que foi o que fez os hunts #12 e #13 rimarem.
+        #
+        # O custo, dito: peças de colecções pequenas ficam mais prováveis por
+        # peça do que as de colecções grandes. Para um jogo de adivinhar onde
+        # está o alvo, é exactamente o enviesamento que queremos.
+        slugs = sorted(self._sizes)
+        slug = self._rng.choice(slugs)
         src = next(s for s in self._sources if s.slug == slug)
         total = self._sizes[slug]
         if getattr(src, "draw", DRAW_INDEX) == DRAW_ID:
@@ -836,7 +873,8 @@ class TargetPreparer:
         unavailable = 0
         max_unavailable = max(3, self._max_attempts)
         for attempt in range(1, self._max_attempts + 1):
-            cand = larder.take(self._rng)
+            cand = larder.take(self._rng,
+                               avoid_contract=larder.last_contract())
             if cand is None:
                 raise PrepareRefused(
                     f"despensa esgotada ao fim de {attempt - 1} tentativa(s) — "

@@ -113,8 +113,14 @@ def test_a_tiny_source_does_not_break_the_range():
     assert f.draw()[1] in (1, 2)
 
 
-def test_both_modes_coexist_and_the_big_source_is_drawn_more():
-    """A ponderação por tamanho continua a valer entre modos diferentes."""
+def test_both_modes_coexist_and_size_no_longer_decides():
+    """Os dois modos convivem no mesmo sorteio, e o TAMANHO da fonte já não
+    manda nada (22/09).
+
+    Esta asserção era a inversa: uma fonte de 100k tinha de sair muito mais
+    vezes do que uma de 100. Era essa regra que tornava inútil acrescentar
+    fontes pequenas — e o fim dela é metade da correcção da variedade. O
+    que se mantém é o resto: cada fonte é lida pelo seu próprio modo."""
     calls = {"index": 0}
 
     def total_supply(chain, contract):
@@ -129,9 +135,10 @@ def test_both_modes_coexist_and_the_big_source_is_drawn_more():
         token_by_index=token_by_index, read_token=lambda *a: None,
         probe_image=lambda u: None, owner_is_eoa=lambda *a: True,
         name_is_unique=lambda *a: True, rng=random.Random(7))
-    got = [f.draw()[0].slug for _ in range(300)]
-    assert got.count("enum") > got.count("byid") * 5
-    assert calls["index"] == got.count("enum")
+    got = [f.draw()[0].slug for _ in range(400)]
+    assert 150 < got.count("enum") < 250, got.count("enum")
+    assert 150 < got.count("byid") < 250, got.count("byid")
+    assert calls["index"] == got.count("enum"), "só o modo index vai ao índice"
 
 
 # --------------------------------------------------------------------------- #
