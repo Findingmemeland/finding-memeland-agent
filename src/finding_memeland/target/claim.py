@@ -214,6 +214,22 @@ def extract_target_refs(text: str) -> ClaimExtraction:
     return ClaimExtraction(refs=tuple(refs), unresolved_links=tuple(unresolved))
 
 
+def collection_link(url: str) -> bool:
+    """O URL tem CONTRATO mas não tem tokenId — a página da colecção.
+
+    Medido no hunt #12: dois jogadores colaram a colecção em vez da peça
+    (`rarible.com/base/collections/0x…`, `opensea.io/collection/…`). Nesse
+    caso sabemos exactamente o que falta, e responder "não consigo ler esse
+    link" é uma verdade inútil — manda a pessoa adivinhar o que já sabemos.
+
+    Não é acusação nenhuma: continua a não gastar tentativa e continua a
+    não dizer que está errado. Só é mais preciso."""
+    u = (url or "").strip()
+    if not _ADDR_RE.search(u):
+        return False
+    return not (_ADDR_TID_RE.search(u) or _QUERY_TID_RE.search(u))
+
+
 def claim_shaped(text: str) -> bool:
     """Does the post LOOK like a claim attempt? Explicit triple, chainless
     contract:tokenId paste, or a link that could plausibly BE a token.

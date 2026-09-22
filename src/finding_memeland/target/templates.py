@@ -366,6 +366,18 @@ POST_REPLY_UNRESOLVED_LINK = (
     f"(like {CLAIM_FORMAT_EXAMPLE}) and it counts."
 )
 
+# Um link com CONTRATO mas sem tokenId — a página da colecção em vez da peça.
+# Aconteceu duas vezes no hunt #12 (@Bode5t e @0xThalyn, ambos no Rarible e no
+# OpenSea) e os dois ficaram-se pela colecção sem descer até ao token. Nesse
+# caso sabemos exactamente o que falta, e "não consigo ler esse link" é uma
+# verdade inútil: manda a pessoa adivinhar o que nós já sabemos. Continua a
+# não acusar ninguém de nada e continua a não gastar tentativa.
+POST_REPLY_COLLECTION_LINK = (
+    "that's the collection, not the token — one piece short. open the exact "
+    "one and paste its link, or reply with chain:contract:tokenId (like "
+    f"{CLAIM_FORMAT_EXAMPLE}). this one cost you nothing."
+)
+
 # More than one token in a reply (P0, 06/09): malformed — no guess spent,
 # never a match. Public rule: name one token per reply.
 POST_REPLY_ONE_TOKEN = (

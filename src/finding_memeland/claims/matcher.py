@@ -91,12 +91,15 @@ class TargetClaimMatcher:
     which is a format hint, never a match)."""
 
     def __init__(self, *, judge, resolve_link: Callable[[str], object] | None = None,
-                 format_reply: str, unresolved_reply: str, one_token_reply: str):
+                 format_reply: str, unresolved_reply: str, one_token_reply: str,
+                 collection_reply: str = ""):
         self._judge = judge
         self._resolve = resolve_link
         self._format_reply = format_reply
         self._unresolved_reply = unresolved_reply
         self._one_token_reply = one_token_reply
+        # Opcional: sem ele, o caminho antigo ("não consigo ler") mantém-se.
+        self._collection_reply = collection_reply
         self._readable_memo: dict[str, bool] = {}
 
     def _extract(self, text: str):
@@ -189,6 +192,14 @@ class TargetClaimMatcher:
         if ext.unresolved_links:
             v = self._judge.judge(text, resolve_link=self._resolve)
             if v.checked == 0 and v.unresolved:
+                # Se o link traz contrato mas não traz token, sabemos o que
+                # falta — e "não consigo ler esse link" seria uma verdade
+                # inútil, a mandar a pessoa adivinhar o que já sabemos.
+                # Dois jogadores do hunt #12 pararam na página da colecção.
+                from ..target.claim import collection_link
+                if (self._collection_reply
+                        and all(collection_link(u) for u in ext.unresolved_links)):
+                    return self._collection_reply
                 return self._unresolved_reply
             return None
         if claim_shaped(text):                     # contract:tokenId, no chain

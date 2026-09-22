@@ -199,3 +199,42 @@ def test_two_tokens_in_one_reply_is_still_malformed():
     assert m.is_malformed(text) is True
     assert m.format_hint(text) == POST_REPLY_ONE_TOKEN
     assert m.looks_like_claim(text) is False
+
+
+# --------------------------------------------------------------------------- #
+# O link do Rarible SEM cadeia — o que eu julguei partido e não está           #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_chainless_marketplace_link_is_resolved_not_guessed():
+    """22/09: diagnostiquei isto como avaria depois de correr o parser
+    SOZINHO, sem resolver. Em produção o MarketplaceLinkResolver apanha
+    `0x…:123` no URL e PERGUNTA em que cadeia vive — não adivinha, que é a
+    regra R1 (nenhum componente assume uma cadeia por omissão).
+
+    O teste fixa isso: o parser sozinho não resolve (e não deve — não tem
+    como saber), e o resolver de produção resolve."""
+    from finding_memeland.target.adapters import MarketplaceLinkResolver
+
+    url = f"https://rarible.com/token/{C}:11385"
+    assert extract_target_refs(url).refs == ()          # sem resolver: nada
+    assert extract_target_refs(url).unresolved_links == (url,)
+
+    asked: list[tuple] = []
+
+    def probe(addr, tid):
+        asked.append((addr.lower(), tid))
+        return "ethereum"
+
+    ref = MarketplaceLinkResolver(chain_probe=probe)(url)
+    assert ref is not None and ref.id() == TARGET
+    assert asked == [(C, 11385)], "o resolver tem de PERGUNTAR, não assumir"
+
+
+def test_the_resolver_refuses_when_the_chain_cannot_be_established():
+    """Fail-closed: sem resposta do probe, não há claim — nunca uma cadeia
+    por omissão."""
+    from finding_memeland.target.adapters import MarketplaceLinkResolver
+
+    r = MarketplaceLinkResolver(chain_probe=lambda a, t: None)
+    assert r(f"https://rarible.com/token/{C}:11385") is None
