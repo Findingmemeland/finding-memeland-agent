@@ -1026,9 +1026,25 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     lines.append(f"target: gate ilegível ({type(e).__name__})")
                 try:
                     # COUNTS ONLY: the larder is the next thirty answers
-                    n = target_wiring.larder_size()
+                    sp = target_wiring.larder_spread()
+                    n = int(sp.get("total", 0))
                     lines.append(f"despensa: {n} alvo(s) verificados"
                                  + ("  ⚠️ corre /fill" if n < 20 else ""))
+                    # A COMPOSIÇÃO, não só o tamanho. Os hunts #12 e #13
+                    # saíram do mesmo contrato e ninguém tinha como ver isso
+                    # antes de acontecer (22/09). Continua sem nomes.
+                    if n:
+                        c = int(sp.get("contracts", 0))
+                        big = int(sp.get("biggest", 0))
+                        chains = sp.get("chains") or {}
+                        share = big / n
+                        lines.append(
+                            f"  composição: {c} contrato(s) · maior {big}"
+                            f" ({share:.0%}) · "
+                            + ", ".join(f"{k} {v}" for k, v in chains.items())
+                            + ("  ⚠️ pouca variedade — um contrato domina"
+                               if share >= 0.34 or c <= 2 else "")
+                        )
                 except Exception as e:  # noqa: BLE001
                     lines.append(f"despensa: ilegível ({type(e).__name__})")
                 # What /launch will actually publish. COUNTS AND CLOCKS ONLY.

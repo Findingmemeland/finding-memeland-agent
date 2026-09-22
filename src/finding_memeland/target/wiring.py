@@ -205,6 +205,12 @@ class TargetWiring:
             return 0
         return self.larder_store.load().size()
 
+    def larder_spread(self) -> dict:
+        """A forma da despensa, em contagens (ver Larder.spread)."""
+        if self.larder_store is None:
+            return {}
+        return self.larder_store.load().spread()
+
     def fill(self, want: int) -> str:
         """Draw and verify until the larder holds `want`. Off the clock by
         design: a slow gateway costs time here and nothing else."""

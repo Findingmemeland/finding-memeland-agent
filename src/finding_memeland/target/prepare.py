@@ -202,6 +202,37 @@ class Larder:
         if cid not in self.used:
             self.used.append(cid)
 
+    def spread(self) -> dict:
+        """A COMPOSIÇÃO da despensa, em contagens — nunca em nomes.
+
+        Hunts #12 e #13 (18 e 22/09) saíram do MESMO contrato partilhado do
+        SuperRare, na mesma cadeia; só o tokenId mudou. Nenhuma pista deu
+        isso: fomos nós. Jogadores já varriam esse contrato a meio da #13,
+        porque quem repara deixa de procurar "em qualquer NFT onchain" e
+        passa a procurar num contrato só.
+
+        A causa provável está aqui dentro: se a amostragem favorece fontes
+        grandes, um contrato com centenas de milhares de tokens domina a
+        despensa e o /prepare nunca chega a ter de escolher. Filtrar no fim
+        não chega se o balde já vem torto — mas antes de mexer na
+        amostragem é preciso MEDIR, e até hoje não havia como.
+
+        Devolve só números, pela disciplina de sempre: o operador vê a
+        forma da despensa sem nunca ver um alvo."""
+        by_contract: dict[str, int] = {}
+        by_chain: dict[str, int] = {}
+        for c in self.candidates:
+            key = f"{c.chain}:{c.contract.lower()}"
+            by_contract[key] = by_contract.get(key, 0) + 1
+            by_chain[c.chain] = by_chain.get(c.chain, 0) + 1
+        counts = sorted(by_contract.values(), reverse=True)
+        return {
+            "total": len(self.candidates),
+            "contracts": len(by_contract),
+            "biggest": counts[0] if counts else 0,
+            "chains": dict(sorted(by_chain.items(), key=lambda kv: -kv[1])),
+        }
+
     def __repr__(self) -> str:
         return f"Larder({len(self.candidates)} ready, {len(self.used)} used)"
 
