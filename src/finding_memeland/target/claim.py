@@ -89,9 +89,22 @@ _URL_RE = re.compile(r"https?://\S+")
 _ADDR_TID_RE = re.compile(r"(0x[0-9a-fA-F]{40})[:/](\d+)\b")
 _QUERY_TID_RE = re.compile(r"[?&](?:tokenId|token_id)=(\d+)\b")
 _ADDR_RE = re.compile(r"0x[0-9a-fA-F]{40}\b")
+# Espaços à volta dos dois pontos são TOLERADOS (medido ao vivo, hunt #12,
+# 18/09). O formato publicado é `chain:contract:tokenId`, mas a forma como um
+# humano o escreve é `Ethereum: 0xabc…def:42` — com o espaço que qualquer
+# pessoa põe depois de dois pontos. Quatro jogadores diferentes fizeram-no na
+# mesma hunt, e o agente respondeu-lhes que faltava o tokenId QUE ELES TINHAM
+# ENVIADO. Dizer a alguém que lhe falta o que ele deu é a mesma falha que a
+# regra "nunca dizer que está errado quando pode estar certo" proíbe, e a
+# versão cara dela é não reconhecer a resposta vencedora.
+#
+# O que NÃO se tolera: quebras de linha. Um `\n` entre a cadeia e o contrato
+# é outra pessoa a citar duas coisas distintas, não um claim mal escrito.
+_SP = r"[ \t]*"
 _EXPLICIT_RE = re.compile(
-    r"\b([A-Za-z]{2,12}):(0x[0-9a-fA-F]{40}):(\d+)\b")
-_CHAINLESS_RE = re.compile(r"(?<![:\w])(0x[0-9a-fA-F]{40}):(\d+)\b")
+    rf"\b([A-Za-z]{{2,12}}):{_SP}(0x[0-9a-fA-F]{{40}}){_SP}:{_SP}(\d+)\b")
+_CHAINLESS_RE = re.compile(
+    rf"(?<![:\w])(0x[0-9a-fA-F]{{40}}){_SP}:{_SP}(\d+)\b")
 _SEG_SPLIT_RE = re.compile(r"[/:?=&#.]+")
 
 
