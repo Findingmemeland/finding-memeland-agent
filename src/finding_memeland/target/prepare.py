@@ -81,28 +81,64 @@ from .selector import Target, artist_of, metadata_hash, name_qualifies, normaliz
 # --------------------------------------------------------------------------- #
 
 
+DRAW_INDEX = "index"     # tokenByIndex(i) — exacto, sem buracos
+DRAW_ID = "id"           # tokenURI(id) com id ao calhas — para quem não enumera
+
+
 @dataclass(frozen=True)
 class Source:
-    """One shared 1/1 contract we draw from. A source only qualifies if it
-    ENUMERATES — `totalSupply()` and `tokenByIndex()`. Without both there is
-    no cheap uniform draw, and probing ids blind is the complexity this
-    rewrite exists to delete."""
+    """One shared 1/1 contract we draw from.
+
+    DOIS MODOS DE SORTEIO, e o segundo é uma inversão deliberada (22/09).
+
+    `index` — `totalSupply()` + `tokenByIndex(i)`. Exacto: cada sorteio
+    devolve um token que existe, sem buracos. É o que esta classe exigia em
+    exclusivo, e a razão estava escrita aqui: "probing ids blind is the
+    complexity this rewrite exists to delete".
+
+    `id` — `totalSupply()` para o limite, e um id ao calhas dentro dele. O
+    que mudou não foi a opinião, foi a medição. Os hunts #12 e #13 saíram do
+    MESMO contrato porque o universo tinha duas fontes, e tinha duas porque
+    exigir ERC721Enumerable exclui quase toda a gente: é caro e poucos o
+    implementam. A sonda (scripts/probe_sources.py) mostrou o superrare1 a
+    devolver tokenURI em 3/3 ids ao calhas — os ids são densos, e a
+    complexidade que se queria apagar custa, na prática, uma leitura
+    falhada de vez em quando, fora do relógio.
+
+    O modo `id` ASSUME ids densos em [1, totalSupply]. Um contrato com ids
+    esparsos falha quase sempre — e é por isso que a sonda imprime a taxa
+    de acerto: nenhuma fonte entra aqui sem essa medição."""
 
     slug: str
     chain: str
     contract: str
+    draw: str = DRAW_INDEX
 
 
-# MEASURED live 17/09 (scripts/check_prepare.py), not assumed:
-#   foundation  ✓ totalSupply 116,168
-#   superrare2  ✓ totalSupply  50,922
-#   makersplace ✗ totalSupply reverts      (04/09 census had said "by maxId")
-#   superrare1  ✗ tokenByIndex reverts
-# 167,090 pieces. Adding a source is one line here — and it is the only
-# lever that dilutes the enumeration risk of a public, crawlable collection.
+# MEDIDO ao vivo, nunca assumido (scripts/probe_sources.py, 22/09 — a
+# medição de 17/09 dizia o mesmo dos dois primeiros):
+#   foundation  ✓ totalSupply 116,168 · tokenByIndex ok      → index
+#   superrare2  ✓ totalSupply  50,922 · tokenByIndex ok      → index
+#   superrare1  ✓ totalSupply   4,436 · tokenByIndex reverte,
+#                 mas tokenURI respondeu a 3/3 ids ao calhas → id
+#   makersplace ✗ totalSupply reverte — fica de fora
+#
+# PORQUE É QUE O SUPERRARE1 ENTROU AGORA. Os hunts #12 e #13 saíram do MESMO
+# contrato, e o contador da despensa mostrou porquê: duas fontes, uma cadeia.
+# Quem reparasse cortava o espaço de busca a meio sem que nenhuma pista o
+# tivesse dado. A terceira fonte não resolve a variedade de CADEIAS — isso
+# precisa de contratos fora de Ethereum — mas acaba com o "ou é uma ou é a
+# outra", e o modo `id` abre a porta a contratos que não enumeram, que são
+# a esmagadora maioria.
+#
+# Acrescentar uma fonte continua a ser uma linha aqui. O que NÃO é opcional
+# é passar pela sonda primeiro: o modo `id` assume ids densos, e só a taxa
+# de acerto medida diz se um contrato os tem.
 SOURCES: tuple[Source, ...] = (
     Source("foundation", "ethereum", "0x3b3ee1931dc30c1957379fac9aba94d1c48a5405"),
     Source("superrare2", "ethereum", "0xb932a70a57673d89f4acffbe830e8ed7f75fb9e0"),
+    Source("superrare1", "ethereum", "0x41a322b28d0ff354040e2cbc676f0320d8c8850d",
+           draw=DRAW_ID),
 )
 
 
@@ -441,16 +477,25 @@ class TargetFinder:
 
     def draw(self) -> tuple[Source, int] | None:
         """Uniform over the union of the sources: the source in proportion to
-        its size, then an index inside it. Two calls."""
+        its size, then a token inside it.
+
+        Em modo `index` são duas chamadas e o token existe de certeza. Em
+        modo `id` é UMA chamada — o id sai do gerador, sem ir à cadeia — e o
+        token pode não existir: quem descobre isso é a leitura seguinte, que
+        falha e conta como rejeição. É o preço de usar contratos que não
+        enumeram, e paga-se fora do relógio, no /fill."""
         if not self._sizes:
             self.load_sizes()
         slugs = list(self._sizes)
         slug = self._rng.choices(slugs, weights=[self._sizes[s] for s in slugs],
                                  k=1)[0]
         src = next(s for s in self._sources if s.slug == slug)
+        total = self._sizes[slug]
+        if getattr(src, "draw", DRAW_INDEX) == DRAW_ID:
+            return (src, self._rng.randrange(1, max(2, total + 1)))
         try:
             tid = self._token_by_index(src.chain, src.contract,
-                                       self._rng.randrange(self._sizes[slug]))
+                                       self._rng.randrange(total))
         except Exception:  # noqa: BLE001 — a hole in the index; draw again
             return None
         return (src, int(tid)) if tid is not None else None
