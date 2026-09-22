@@ -105,6 +105,26 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _chains_we_read() -> frozenset[str]:
+    """Todas as cadeias de que este processo pode ter de ler um alvo.
+
+    DUAS LISTAS DE FONTES, E ELAS PODEM AFASTAR-SE (22/09). O snapshot antigo
+    lê o EPOCH1_CLASSIC; a despensa lê o SOURCES do prepare.py. As duas
+    guardas abaixo — RPC com chave, e provedor público para o live check —
+    olhavam só para o EPOCH1_CHAINS, que sai do primeiro.
+
+    Hoje isso não dá diferença: está tudo em Ethereum. Mas a tarefa aberta é
+    justamente acrescentar uma fonte NOUTRA cadeia, e nesse instante as duas
+    guardas ficariam caladas sobre ela. O preço não é um erro no arranque: é
+    o /fill a encher a despensa de alvos nessa cadeia, um deles a ser selado,
+    a hunt a correr, e o live check a estoirar com um KeyError a meio —
+    exactamente o modo de falha que estas guardas existem para impedir.
+
+    A correcção é a união. Uma fonte nova passa a exigir o RPC dessa cadeia
+    ANTES de o processo arrancar, e a mensagem diz qual falta."""
+    return frozenset(EPOCH1_CHAINS) | frozenset(s.chain for s in SOURCES)
+
+
 @dataclass
 class TargetWiring:
     """What main.py holds: the ports for the Orchestrator, the pipeline for
@@ -320,7 +340,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     rpcs = chain_rpcs({"ethereum": s.eth_rpc_url, "base": s.base_rpc_url},
                       http_post=http_post)
     # P1-2 / R1: every chain the epoch touches has a keyed RPC — loud, by name
-    keyed_missing = sorted(EPOCH1_CHAINS - set(rpcs))
+    keyed_missing = sorted(_chains_we_read() - set(rpcs))
     if keyed_missing:
         raise RuntimeError(f"no keyed RPC for epoch chain(s) {keyed_missing} "
                            "(eth_rpc_url / base_rpc_url)")
@@ -414,7 +434,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         providers.append(Provider(name=f"provider{i}", rpc_urls=urls,
                                   gateway=gws[i % len(gws)]))
     covered = set().union(*(set(p.rpc_urls) for p in providers)) if providers else set()
-    generic_missing = sorted(EPOCH1_CHAINS - covered)
+    generic_missing = sorted(_chains_we_read() - covered)
     if generic_missing:
         raise RuntimeError(f"no public RPC for epoch chain(s) {generic_missing} "
                            "(target_public_rpcs_<chain>) — the live check could "
