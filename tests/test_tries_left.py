@@ -32,17 +32,23 @@ def test_the_count_walks_down_in_words():
     assert o._tries_left_line({"a": 3}, "a") == "two left."
 
 
-def test_the_last_one_gets_its_own_line():
-    """It is the only moment in the hunt where the stakes are personal."""
-    assert _orch()._tries_left_line({"a": 4}, "a") == "last one, fren."
+def test_the_last_one_is_plain():
+    """"last one, fren" lia-se como "esta foi a última" em vez de "falta
+    uma" (Pedro, 22/09). A contagem tem de ser contagem."""
+    assert _orch()._tries_left_line({"a": 4}, "a") == "one left."
 
 
-def test_the_end_is_silence():
-    """The count is done; the player is capped. Saying "zero left" is
-    kicking someone already out."""
-    o = _orch()
-    assert o._tries_left_line({"a": 5}, "a") == ""
-    assert o._tries_left_line({"a": 6}, "a") == ""
+def test_spending_the_last_one_gets_a_closing_line():
+    """Gastar a última e não receber nada era o único palpite julgado sem
+    resposta — a falha do recibo, à porta de saída (Pedro, 22/09)."""
+    from finding_memeland.orchestrator.state_machine import POST_REPLY_OUT_OF_TRIES
+    assert _orch()._tries_left_line({"a": 5}, "a") == POST_REPLY_OUT_OF_TRIES
+    assert "wrong" not in POST_REPLY_OUT_OF_TRIES.lower()
+
+
+def test_past_the_cap_is_silence():
+    """Já está fora e já ouviu o fecho. Repetir é dar pontapés."""
+    assert _orch()._tries_left_line({"a": 6}, "a") == ""
 
 
 def test_a_number_we_cannot_trust_is_never_spoken():
@@ -60,4 +66,4 @@ def test_a_bigger_cap_still_speaks_plainly():
     o = _orch(cap=8)
     assert o._tries_left_line({"a": 1}, "a") == "7 left."
     assert o._tries_left_line({"a": 4}, "a") == "four left."
-    assert o._tries_left_line({"a": 7}, "a") == "last one, fren."
+    assert o._tries_left_line({"a": 7}, "a") == "one left."

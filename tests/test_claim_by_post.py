@@ -21,7 +21,10 @@ from finding_memeland.content.templates import (
     POST_REPLY_WRONG_DOOR,
 )
 from finding_memeland.orchestrator.simulation import build_simulation
-from finding_memeland.orchestrator.state_machine import HuntState
+from finding_memeland.orchestrator.state_machine import (
+    POST_REPLY_OUT_OF_TRIES,
+    HuntState,
+)
 
 WALLET_A = "0x" + "a" * 40
 WALLET_B = "0x" + "b" * 40
@@ -308,13 +311,17 @@ def test_guess_cap_five_then_ignored_and_single_taunt():
     outcomes = [r["outcome"] for r in rows]
     assert outcomes.count("bad_code") == 5
     assert outcomes.count("spam_capped") == 2
-    # Exactly ONE taunt for the whole profile, from the safe pool — now
-    # carrying the count (17/09): a real guess was judged and spent, so the
-    # player hears where they stand. First wrong of five ⇒ four left.
+    # UM gozo para o perfil inteiro — mas TODOS os palpites julgados têm
+    # resposta (22/09). O gozo custa LLM e o X despromove respostas quase
+    # iguais, por isso continua a sair uma vez só; o recibo é uma linha
+    # nossa e sai sempre, senão o jogador fica sem saber onde está. Foi
+    # exactamente isso que fez o fio da #12 parecer morto no auge.
     taunts = [t for r, t in rig.publisher.post_replies]
-    assert len(taunts) == 1
+    assert len(taunts) == 5, taunts                 # 5 julgados, 5 respostas
     assert taunts[0].endswith(" four left.")
     assert taunts[0][: -len(" four left.")] in TAUNT_POOL
+    assert taunts[1:4] == ["three left.", "two left.", "one left."]
+    assert taunts[4] == POST_REPLY_OUT_OF_TRIES     # a quinta esgota a conta
 
 
 def test_wrong_door_gets_one_redirect_and_is_not_a_claim():
@@ -628,7 +635,13 @@ def test_global_taunt_budget_caps_total_replies():
         orch._claim_loop(hunt)
     except RuntimeError:
         pass
-    assert len(rig.publisher.post_replies) == 3, "oracle goes silent past the budget"
+    # O tecto global trava o CUSTO (gozos gerados por LLM), não a contagem —
+    # que é uma linha nossa e não custa nada. Até 22/09 travava as duas, e o
+    # efeito era o oráculo emudecer no meio de uma hunt viva. Oito palpites
+    # julgados ⇒ oito respostas; só três delas trazem gozo.
+    respostas = [t for _, t in rig.publisher.post_replies]
+    assert len(respostas) == 8, respostas
+    assert sum(t != "four left." for t in respostas) == 3, respostas
 
 
 # ---------------------------------------------------------------------------

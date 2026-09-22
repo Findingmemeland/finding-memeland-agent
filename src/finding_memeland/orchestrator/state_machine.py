@@ -164,7 +164,12 @@ def _theme_line(row: dict) -> str:
     return " / ".join(bits)
 
 
-_SPELLED = {2: "two", 3: "three", 4: "four", 5: "five"}
+_SPELLED = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+
+# Dito UMA vez, no palpite que esgota a conta. Gastar a última tentativa e
+# não receber nada era o único palpite julgado que ficava sem resposta — a
+# mesma falha que o recibo corrige, à porta de saída (Pedro, 22/09).
+POST_REPLY_OUT_OF_TRIES = "that was your last. you're out. \U0001F438"
 
 
 class Orchestrator:
@@ -1853,19 +1858,36 @@ class Orchestrator:
                         if key:
                             spray_log.append((post.author_id, key))
                             spray_check(self, hunt, clue_index, spray_log, spray_state)
-                    if (
+                    # O RECIBO NÃO É O GOZO (hunt #12, 18/09).
+                    #
+                    # O gozo continua UM POR PERFIL: custa LLM, enche o fio, e
+                    # o X despromove respostas quase iguais. Mas a contagem
+                    # estava pendurada nele, e o resultado foi que cada jogador
+                    # ouvia "four left" uma vez na vida e depois nunca mais —
+                    # escrevesse certo ou errado. A meio da hunt mais activa
+                    # que tivemos, o oráculo parecia morto para toda a gente.
+                    #
+                    # Um palpite julgado que GASTOU uma tentativa passa a ter
+                    # sempre resposta. Sem gozo é uma linha seca de quatro
+                    # palavras, sem LLM, e o número muda de cada vez — não é
+                    # spam nem quase-duplicado.
+                    left = self._tries_left_line(guesses, post.author_id)
+                    first_jeer = (
                         post.author_id not in taunted
                         and self._taunt_engine is not None
                         and taunt_budget["used"] < self._MAX_TAUNTS_PER_HUNT
-                    ):
+                    )
+                    if first_jeer:
                         taunted.add(post.author_id)
                         taunt_budget["used"] += 1
+                    if first_jeer or left:
                         try:
-                            jeer = self._taunt_engine.taunt(post.text, banned)
-                            left = self._tries_left_line(guesses, post.author_id)
-                            if left:
-                                jeer = f"{jeer} {left}"
-                            self._publisher.reply_post(jeer, in_reply_to=post.tweet_id)
+                            jeer = (self._taunt_engine.taunt(post.text, banned)
+                                    if first_jeer else "")
+                            line = f"{jeer} {left}".strip()
+                            if line:
+                                self._publisher.reply_post(
+                                    line, in_reply_to=post.tweet_id)
                         except Exception as e:  # noqa: BLE001
                             self._notify(f"taunt reply failed (non-fatal): {e!r}")
                     _done(post)
@@ -2109,7 +2131,7 @@ class Orchestrator:
 
     # words, not digits: the oracle speaks, it does not print a receipt
     def _tries_left_line(self, guesses: dict, author_id: str) -> str:
-        """"two left", "last one, fren" — the count made audible.
+        """"two left", "one left", and the closing line — the count made audible.
 
         ONLY on a real guess: a token was named, resolved, judged and found
         wrong, so an attempt really was spent. Never on a format reply, where
@@ -2125,10 +2147,13 @@ class Orchestrator:
         if cap <= 0 or not isinstance(used, int) or used < 1 or used > cap:
             return ""
         left = cap - used
-        if left <= 0:
-            return ""                  # the count is done; silence says it
-        if left == 1:
-            return "last one, fren."
+        if left == 0:
+            # Acabou de gastar a última. Antes isto era silêncio, e era o
+            # único palpite julgado sem resposta nenhuma — precisamente no
+            # momento em que a pessoa mais precisa de saber o que aconteceu.
+            return POST_REPLY_OUT_OF_TRIES
+        if left < 0:
+            return ""                  # já estava fora; não se dá pontapés
         return f"{_SPELLED.get(left, str(left))} left."
 
     def _maybe_taunt_chatter(
