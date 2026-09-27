@@ -37,3 +37,10 @@ doppler.json
 local_state/
 monitor_accounts.json
 findability_log.txt
+
+# Colheitas de candidatos a alvo — NUNCA commitar.
+# São listas de chain:contrato:tokenId saídas do find_targets.py e, mais
+# tarde, do varrimento de mints. Um candidato não é um alvo, mas se algum
+# vier a ser sorteado, quem tenha lido o repositório fica com uma
+# short-list. Custa zero mantê-las fora e não há nada a ganhar em pô-las cá.
+alvos_*.txt
