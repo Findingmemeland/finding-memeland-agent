@@ -69,6 +69,7 @@ import hashlib
 import hmac
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -409,6 +410,60 @@ class Tally:
                 + (f" — {causes}" if causes else ""))
 
 
+# `chain:0xcontrato:tokenId`. O tokenId não tem tecto: os basenames que a
+# colheita de Base devolveu têm ids de 78 dígitos, e um int de Python
+# aguenta-os — um parser que assumisse uint64 rejeitaria alvos legítimos por
+# uma razão que não é do jogo.
+# `0[xX]` e não `0x`: um endereço colado de um explorador vem em checksum
+# (maiúsculas e minúsculas misturadas) e às vezes com o prefixo em
+# maiúscula. Recusar `0X` seria rejeitar um alvo legítimo por uma diferença
+# que não existe para a cadeia.
+_REF_RE = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9_-]{1,20})\s*:\s*"
+                     r"(0[xX][0-9a-fA-F]{40})\s*:\s*(\d{1,80})\s*$")
+
+
+def parse_ref(raw: str) -> tuple[str, str, int] | None:
+    """`base:0xabc…:42` -> ('base', '0xabc…' minúsculas, 42), ou None.
+
+    Devolver None em vez de levantar é deliberado: a lista vem de um
+    ficheiro escrito por uma ferramenta, e uma linha torta no meio de
+    duzentas não pode abortar o depósito das outras duzentas."""
+    m = _REF_RE.match(raw or "")
+    if not m:
+        return None
+    chain, contract, tid = m.groups()
+    return chain.lower(), contract.lower(), int(tid)
+
+
+@dataclass
+class DepositReport:
+    """O que o depósito fez, por causa. Mesma disciplina do Tally: nunca um
+    'falhou' genérico, porque cada causa pede uma resposta diferente — uma
+    cadeia fechada é configuração, um nome repetido é o alvo."""
+
+    asked: int = 0
+    added: int = 0
+    duplicate: int = 0
+    bad_ref: int = 0
+    chain_closed: int = 0
+    closed_chains: set = field(default_factory=set)
+    rejected: Tally = field(default_factory=Tally)
+
+    def render(self) -> str:
+        bits = [f"{self.added} guardado(s) de {self.asked}"]
+        if self.duplicate:
+            bits.append(f"repetidos {self.duplicate}")
+        if self.bad_ref:
+            bits.append(f"linhas tortas {self.bad_ref}")
+        if self.chain_closed:
+            bits.append(f"cadeia sem provedor {self.chain_closed} "
+                        f"({', '.join(sorted(self.closed_chains))})")
+        causes = self.rejected.render()
+        if " — " in causes:
+            bits.append(causes.split(" — ", 1)[1])
+        return " · ".join(bits)
+
+
 class PrepareRefused(RuntimeError):
     """Nothing was written or published. COUNTS ONLY in the message."""
 
@@ -644,6 +699,70 @@ class TargetFinder:
                 tally.found += 1
         note(f"fill: {tally.render()} · despensa {larder.size()}/{want}")
         return tally
+
+    def deposit(self, larder: Larder, refs: Sequence[str], *,
+                chain_ok: Callable[[str], bool] | None = None,
+                notify: Callable[[str], None] | None = None,
+                ) -> DepositReport:
+        """Alvos NOMEADOS entram na despensa, sem passarem pelo sorteio.
+
+        PORQUÊ (23/09, decisão do Pedro). O `fill` sorteia dentro de
+        contratos grandes, e isso afunila o jogo: o disfarce é o alvo poder
+        ser qualquer NFT alguma vez mintado, e se o universo são três
+        contratos não há disfarce nenhum — foi o que os hunts #12 e #13
+        mostraram. Uma colecção com UM único NFT é um esconderijo melhor do
+        que o Foundation, e para o `Source` ela não vale nada: rende um alvo
+        e esgota-se. Para a despensa vale tudo, porque a despensa sempre
+        guardou alvos concretos, não contratos.
+
+        O QUE ISTO NÃO RELAXA. Nem um dos testes. Cada referência passa
+        exactamente pelo `named_token` + `verify` que o `fill` corre — mesmo
+        código, mesma ordem, unicidade em último porque é a única chamada
+        paga. Um alvo depositado é indistinguível de um alvo sorteado; o que
+        muda é só como foi encontrado. Curar a ENTRADA é diferente de curar
+        a SAÍDA, e a saída continua a ser sorteio cego sobre o que a
+        despensa tiver.
+
+        `chain_ok` É A GUARDA QUE NÃO PODE FALTAR. Um alvo numa cadeia sem
+        provedor público configurado passa aqui alegremente — lê-se pelo RPC
+        com chave — e depois rebenta a meio da hunt, no live check, com uma
+        pista publicada e jogadores a responder. É o mesmo modo de falha que
+        as guardas do wiring existem para impedir, e o depósito é uma porta
+        nova para ele. Sem `chain_ok` injectado só passa o que o `SOURCES`
+        já lê hoje, que é o valor seguro."""
+        note = notify or (lambda _t: None)
+        ok = chain_ok or (lambda c: c in {s.chain for s in self._sources})
+        rep = DepositReport()
+        for raw in refs:
+            rep.asked += 1
+            parsed = parse_ref(raw)
+            if parsed is None:
+                rep.bad_ref += 1
+                continue
+            chain, contract, tid = parsed
+            if not ok(chain):
+                # Nunca silencioso: uma cadeia recusada é configuração em
+                # falta, e o operador tem de saber QUAL para a resolver.
+                rep.chain_closed += 1
+                rep.closed_chains.add(chain)
+                continue
+            if larder.has(f"{chain}:{contract}:{tid}"):
+                rep.duplicate += 1
+                continue
+            src = Source("deposit", chain, contract)
+            rep.rejected.draws += 1
+            named = self.named_token(src, tid, rep.rejected)
+            if named is None:
+                continue
+            read, base = named
+            cand = self.verify(src, tid, read, base, rep.rejected)
+            if cand is None:
+                continue
+            if larder.add(cand):
+                rep.added += 1
+                rep.rejected.found += 1
+        note(f"deposit: {rep.render()} · despensa {larder.size()}")
+        return rep
 
 
 # --------------------------------------------------------------------------- #
