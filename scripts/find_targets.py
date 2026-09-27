@@ -141,14 +141,18 @@ JUNK_SLUG = re.compile(
 #
 # Não é gosto: nenhum destes dá uma pista que se possa escrever, e o
 # primeiro dá um problema que não queremos ter.
-_DOMAINISH = re.compile(r"\.(eth|base\.eth|sol|xyz|com|io|crypto|nft)\s*$", re.I)
+_DOMAINISH = re.compile(r"\.(eth|sol|xyz|com|io|crypto|nft|dao|x)$", re.I)
 _PERCENTISH = re.compile(r"^\s*\d+([.,]\d+)?\s*%")
 _COORDISH = re.compile(r"\(\s*-?\d+\s*,\s*-?\d+\s*\)")
+# Lixo que o marketplace cola ao nome — avisos de imitação, verificações.
+# Sem isto o teste do domínio falhava: `perúesclave.eth ⚠` não acaba em
+# `.eth`, acaba num triângulo, e dois nomes do ENS passaram (23/09).
+_TRAILING_JUNK = re.compile(r"[\s​-‏⁠]*[⚠️✅❗‼⁉️🔺]*\s*$")
 
 
 def usable_name(raw: str) -> bool:
     """Nome próprio E único ainda não chega: tem de ser um TÍTULO."""
-    s = raw.strip()
+    s = _TRAILING_JUNK.sub("", raw.strip()).strip()
     return not (_DOMAINISH.search(s) or _PERCENTISH.match(s)
                 or _COORDISH.search(s))
 
@@ -176,6 +180,11 @@ class ApiTrouble(RuntimeError):
 
 
 def _get(path: str, key: str, **params) -> dict:
+    # O CAMINHO TEM DE SER CITADO (23/09). A corrida de Ethereum perdeu 266
+    # de 300 colecções com UnicodeEncodeError, e a causa era esta linha: o
+    # slug ia cru para dentro do URL. Slugs com acentos ou emoji — que em
+    # Ethereum são muitos — rebentavam no urlopen antes de sair pedido
+    # nenhum. Não era o OpenSea nem a cadeia: era o meu f-string.
     url = f"{BASE_URL}/{path.lstrip('/')}"
     if params:
         url += "?" + urllib.parse.urlencode(
@@ -189,7 +198,11 @@ def _get(path: str, key: str, **params) -> dict:
     except urllib.error.HTTPError as e:
         raise ApiTrouble(f"HTTP {e.code}") from e
     except Exception as e:  # noqa: BLE001
-        raise ApiTrouble(type(e).__name__) from e
+        # A MENSAGEM VAI JUNTO. A v3 guardava só o nome do tipo, e o
+        # relatório dizia "266 UnicodeEncodeError" sem uma palavra sobre
+        # ONDE. Fiquei a adivinhar; é a causa engolida outra vez, um nível
+        # abaixo. O tipo diz o quê, a mensagem diz onde.
+        raise ApiTrouble(f"{type(e).__name__}: {e}"[:120]) from e
 
 
 def harvest(slug: str, contract: str, key: str, *, limit: int) -> dict:
@@ -197,7 +210,8 @@ def harvest(slug: str, contract: str, key: str, *, limit: int) -> dict:
     out: dict = {"why": "", "seen": 0, "exhaustive": False,
                  "hostile": [], "targets": []}
     try:
-        data = _get(f"collection/{slug}/nfts", key, limit=limit)
+        data = _get(f"collection/{urllib.parse.quote(slug, safe='')}/nfts",
+                    key, limit=limit)
     except ApiTrouble as e:
         out["why"] = str(e)
         return out
