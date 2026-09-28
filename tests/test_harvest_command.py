@@ -175,6 +175,42 @@ def test_a_bad_canary_becomes_no_canary_which_means_no_harvest():
         assert parse_canary(bad) == (0, 0), bad
 
 
+class _Prov:
+    def __init__(self, *chains):
+        self.rpc_urls = {c: f"https://{c}.example" for c in chains}
+
+
+def test_a_chain_only_some_providers_read_is_not_depositable():
+    """O live check roda os provedores à vez. Com 3 provedores e só um a
+    ler Base, um alvo de Base falhava duas leituras em cada três, a meio da
+    hunt. A primeira versão testava a união e deixava isto passar."""
+    from finding_memeland.target.wiring import chains_every_provider_reads
+    provs = [_Prov("ethereum", "base"), _Prov("ethereum"), _Prov("ethereum")]
+    assert chains_every_provider_reads(provs, ("ethereum", "base")) == {"ethereum"}
+
+
+def test_a_chain_every_provider_reads_is_depositable():
+    from finding_memeland.target.wiring import chains_every_provider_reads
+    provs = [_Prov("ethereum", "base"), _Prov("ethereum", "base")]
+    assert chains_every_provider_reads(provs, ("ethereum", "base")) == {
+        "ethereum", "base"}
+
+
+def test_no_providers_means_nothing_is_depositable():
+    from finding_memeland.target.wiring import chains_every_provider_reads
+    assert chains_every_provider_reads([], ("ethereum", "base")) == frozenset()
+
+
+def test_the_skip_message_says_how_many_urls_are_needed():
+    """A causa real é o NÚMERO de URLs, e é isso que a mensagem tem de dizer
+    — senão o operador põe um URL, vê a cadeia continuar saltada, e não
+    percebe porquê."""
+    tw, _ = _wiring({"base": _Harv()}, set())
+    out = tw.harvest(10)
+    assert "TARGET_PUBLIC_RPCS_BASE" in out
+    assert "TARGET_PUBLIC_RPCS_ETHEREUM" in out
+
+
 def test_blocks_are_drawn_from_the_chain_s_span_start():
     """Em Ethereum os blocos antes dos NFTs só custam chamadas. O intervalo
     começa onde eles começam."""

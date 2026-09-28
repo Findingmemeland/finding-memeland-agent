@@ -115,6 +115,24 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def chains_every_provider_reads(providers, chains) -> frozenset[str]:
+    """As cadeias que TODOS os provedores públicos sabem ler — não alguns.
+
+    O live check roda os provedores à vez (round-robin em
+    GenericMetadata.batch), e um provedor sem a cadeia do alvo rebenta com
+    KeyError na leitura. Portanto "algum provedor lê Base" não chega: com
+    TARGET_PUBLIC_RPCS_ETHEREUM a 3 URLs e o de Base a 1, dois provedores em
+    cada três não lêem Base, e um alvo de Base falhava o live check duas
+    vezes em três — a meio da hunt, com a pista publicada.
+
+    A primeira versão do /harvest (28/09) testava a UNIÃO dos provedores e
+    deixava passar exactamente esse caso. Aqui é a intersecção."""
+    if not providers:
+        return frozenset()
+    return frozenset(c for c in chains
+                     if all(c in p.rpc_urls for p in providers))
+
+
 def _chains_we_read() -> frozenset[str]:
     """Todas as cadeias de que este processo pode ter de ler um alvo.
 
@@ -287,8 +305,10 @@ class TargetWiring:
                     # Saltar ANTES de varrer: colher alvos que o depósito vai
                     # recusar é gastar chamadas para nada.
                     lines.append(
-                        f"{chain}: saltada — sem provedor público para o live "
-                        f"check (TARGET_PUBLIC_RPCS_{chain.upper()} no Doppler dev)")
+                        f"{chain}: saltada — nem todos os provedores públicos "
+                        f"lêem {chain} (TARGET_PUBLIC_RPCS_{chain.upper()} no "
+                        "Doppler dev, com tantos URLs como "
+                        "TARGET_PUBLIC_RPCS_ETHEREUM)")
                     continue
                 try:
                     refs, hrep = harvester.harvest(n_blocks)
@@ -747,8 +767,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # segundo, um alvo depositado seria lido hoje e rebentaria a meio da
     # hunt, com a pista publicada. É o mesmo invariante das guardas de
     # arranque acima, aplicado a cadeias que o SOURCES não conhece.
-    deposit_chains = frozenset(c for c in HARVEST_CHAINS
-                               if c in rpcs and c in covered)
+    deposit_chains = frozenset(
+        c for c in chains_every_provider_reads(providers, HARVEST_CHAINS)
+        if c in rpcs)
     # O colector precisa de um nó que fale eth_getLogs e eth_blockNumber,
     # que o ChainRpc não expõe — daí um JsonRpc próprio por cadeia, sobre
     # o MESMO URL com chave. Composição pura: nenhuma chamada sai daqui.
