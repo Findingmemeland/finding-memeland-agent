@@ -1,0 +1,283 @@
+"""Colher da cadeia: um entre todos os NFTs alguma vez criados.
+
+O PORQUÊ. Treze hunts saíram de três contratos, porque o /fill sorteia
+DENTRO de um contrato e isso obriga a contratos grandes que enumerem. As
+#12 e #13 saíram do mesmo, e havia jogadores a varrê-lo a meio da segunda.
+
+    "o que torna o nosso nft difícil de procurar não é ser um entre milhões
+     de um só contrato. é ser um entre todos os nfts alguma vez criados."
+                                                        — Pedro, 23/09
+
+Duas tentativas anteriores falharam pela mesma razão: pedimos catálogos a um
+marketplace, e qualquer catálogo ORDENA. Por capitalização vêm PFPs e
+edições — a parte garantida a falhar. Por data de criação vem o que foi
+mintado esta semana, incluindo 27 kits de intrusão. A lente escolhia por nós.
+
+A cadeia não ordena. Um bloco ao calhas não tem opinião.
+
+O que estes testes fixam, por ordem de importância:
+
+1. O DISCRIMINADOR ERC-721 vs ERC-20 é exacto, não é heurística. Errar aqui
+   encheria a despensa de tokens fungíveis.
+2. O CANÁRIO recusa varrer às cegas. Sem ele, uma tarefa diária passa
+   semanas a devolver zero e o relatório parece saudável.
+3. NENHUM NOME DE PESSOA entra. Um `.eth` é uma identidade, e uma hunt de
+   meio bilião apontada à conta de alguém não é um jogo.
+"""
+from __future__ import annotations
+
+import random
+
+import pytest
+
+from finding_memeland.target.harvest import (
+    TRANSFER_TOPIC,
+    HarvestBlind,
+    MintHarvester,
+    mints_in_logs,
+    name_is_cluable,
+)
+
+A = "0x" + "aa" * 20
+B = "0x" + "bb" * 20
+ZERO = "0x" + "0" * 64
+
+
+def _topic(n: int) -> str:
+    return "0x" + f"{n:064x}"
+
+
+def _mint(contract=A, tid=7, to=99):
+    return {"address": contract,
+            "topics": [TRANSFER_TOPIC, ZERO, _topic(to), _topic(tid)]}
+
+
+# --------------------------------------------------------------------------- #
+# 1. ERC-721 vs ERC-20                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_nft_mint_is_recognised():
+    assert mints_in_logs([_mint(A, 7)]) == [(A, 7)]
+
+
+def test_an_erc20_mint_is_not_a_nft():
+    """O TESTE QUE IMPORTA. Mesma assinatura de evento, mesmo tópico zero —
+    o que difere é o tokenId ser `indexed` no ERC-721 e o value não ser no
+    ERC-20. Quatro tópicos contra três. Sem esta distinção a despensa
+    enchia-se de transferências de stablecoins."""
+    erc20 = {"address": A,
+             "topics": [TRANSFER_TOPIC, ZERO, _topic(99)],
+             "data": "0x" + f"{10**18:064x}"}
+    assert mints_in_logs([erc20]) == []
+
+
+def test_a_plain_transfer_is_not_a_mint():
+    """Só conta quando a peça passa a existir."""
+    moved = {"address": A,
+             "topics": [TRANSFER_TOPIC, _topic(5), _topic(9), _topic(7)]}
+    assert mints_in_logs([moved]) == []
+
+
+def test_a_burn_is_not_a_mint():
+    """Destinatário zero: a peça deixou de existir e não serve de alvo."""
+    burn = {"address": A, "topics": [TRANSFER_TOPIC, _topic(5), ZERO, _topic(7)]}
+    assert mints_in_logs([burn]) == []
+
+
+def test_another_event_with_four_topics_is_ignored():
+    other = {"address": A, "topics": ["0x" + "de" * 32, ZERO, _topic(9), _topic(7)]}
+    assert mints_in_logs([other]) == []
+
+
+def test_token_id_zero_is_a_real_token():
+    """Muitas colecções começam em 0. Tratá-lo como falso perdia o primeiro
+    alvo de cada contrato que o faça."""
+    assert mints_in_logs([_mint(A, 0)]) == [(A, 0)]
+
+
+def test_a_malformed_log_does_not_kill_the_batch():
+    logs = [{"address": "lixo", "topics": [TRANSFER_TOPIC, ZERO, _topic(9), _topic(1)]},
+            {"topics": []}, _mint(B, 3)]
+    assert mints_in_logs(logs) == [(B, 3)]
+
+
+# --------------------------------------------------------------------------- #
+# 2. O canário                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def _harv(*, logs_by_block=None, canary_block=100, canary_mints=1,
+          names=None, seed=0, raise_on=()):
+    calls = {"logs": [], "names": []}
+
+    def get_logs(a, b):
+        calls["logs"].append((a, b))
+        if a in raise_on:
+            raise RuntimeError("rpc down")
+        return (logs_by_block or {}).get(a, [])
+
+    def read_name(contract, tid):
+        calls["names"].append((contract, tid))
+        return (names or {}).get((contract, tid), "Grease Pencil Gospel")
+
+    h = MintHarvester(
+        chain="ethereum", latest_block=lambda: 1_000_000,
+        get_logs=get_logs, read_name=read_name,
+        canary_block=canary_block, canary_mints=canary_mints,
+        rng=random.Random(seed))
+    return h, calls
+
+
+def test_the_canary_must_match_exactly():
+    """Igualdade, não '>= 1'. Um provedor que trunca em silêncio devolve
+    uma página parcial — o bloco TEM mints, só que menos — e passaria um
+    teste de existência com folga, enquanto a despensa cresce devagar e
+    tudo parece saudável."""
+    h, _ = _harv(logs_by_block={100: [_mint(A, 1), _mint(A, 2)]}, canary_mints=2)
+    assert h.canary_passes()
+    h2, _ = _harv(logs_by_block={100: [_mint(A, 1)]}, canary_mints=2)
+    assert not h2.canary_passes()
+
+
+def test_harvest_refuses_when_the_canary_fails():
+    h, calls = _harv(logs_by_block={100: []}, canary_mints=1)
+    with pytest.raises(HarvestBlind):
+        h.harvest(10)
+    assert len(calls["logs"]) == 1, "nem tentou varrer"
+
+
+def test_no_canary_configured_means_no_harvest():
+    """Um canário opcional é um canário que ninguém liga."""
+    h, _ = _harv(canary_block=0, canary_mints=0)
+    assert not h.canary_passes()
+    with pytest.raises(HarvestBlind):
+        h.harvest(5)
+
+
+def test_a_transport_failure_on_the_canary_counts_as_blind():
+    h, _ = _harv(logs_by_block={100: [_mint()]}, raise_on=(100,))
+    assert not h.canary_passes()
+
+
+# --------------------------------------------------------------------------- #
+# 3. O nome                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_domain_names_never_enter():
+    """São identidades de pessoas, não obras."""
+    for n in ["vitalik.eth", "yoso167.base.eth", "perúesclave.eth ⚠",
+              "gödel.eth ⚠️", "nick.sol", "something.xyz"]:
+        assert not name_is_cluable(n), n
+
+
+def test_real_titles_pass():
+    for n in ["Grease Pencil Gospel", "Rekt Surveillance", "The Halvening",
+              "Oh my Clown!", "Dionysius of Ephesus", "last meal",
+              "$243M Theft - August 19, 2024"]:
+        assert name_is_cluable(n), n
+
+
+def test_one_word_and_junk_do_not_pass():
+    for n in ["", "   ", "Solo", "#42", "0.64% Voting Power",
+              "Lv. 1 Power Gem - (7,54)"]:
+        assert not name_is_cluable(n), n
+
+
+def test_a_serialised_pfp_name_still_fails_on_words():
+    """'Tiny Punk #9278' → base 'Tiny Punk' → duas palavras → PASSA aqui.
+    E está certo: a regra do Pedro é uma só, o nome dar para pista. Quem
+    mata o PFP é a UNICIDADE NO MERCADO, no depósito, porque há dez mil
+    peças com esse nome-base. Este teste existe para registar que a
+    separação é deliberada e não um esquecimento."""
+    assert name_is_cluable("Tiny Punk #9278")
+
+
+# --------------------------------------------------------------------------- #
+# O varrimento                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_refs_come_out_in_the_deposit_format():
+    """A saída do colector é a entrada do depósito — se os formatos se
+    separarem, descobre-se com uma lista inteira recusada.
+
+    O rng é controlado de propósito. A primeira versão deste teste mandava
+    sortear 400 blocos num intervalo de um milhão e esperava acertar nos
+    dois que têm mints: uma hipótese em 2500. Um teste que depende da sorte
+    do seed não prova nada e falha um dia ao calhas."""
+    from finding_memeland.target.prepare import parse_ref
+
+    h, _ = _harv(logs_by_block={100: [_mint()], 500: [_mint(B, 42)]},
+                 canary_mints=1)
+
+    class _R:
+        def __init__(self):
+            self.blocks = iter((500, 100))
+
+        def randrange(self, lo, hi):
+            return next(self.blocks)
+    h._rng = _R()
+
+    refs, rep = h.harvest(2)
+    assert len(refs) == 2, rep.render()
+    for r in refs:
+        assert parse_ref(r) is not None, r
+
+
+def test_one_drop_cannot_flood_the_larder():
+    """Um bloco pode conter um drop de 500 peças do mesmo contrato. Deixá-
+    las entrar todas repunha exactamente o problema que isto vem resolver."""
+    drop = {100: [_mint(A, 1)], 7: [_mint(B, i) for i in range(500)]}
+    h, _ = _harv(logs_by_block=drop, canary_mints=1)
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 7
+    h._rng = _R()
+    refs, rep = h.harvest(3, max_per_contract=2)
+    assert len(refs) == 2
+    assert rep.mints == 1500 and rep.kept == 2
+
+
+def test_an_unreadable_token_is_counted_not_guessed():
+    """R8: 'não conseguimos ler' nunca é 'não presta'."""
+    h, _ = _harv(logs_by_block={100: [_mint()], 7: [_mint(B, 3)]},
+                 names={(B, 3): None}, canary_mints=1)
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 7
+    h._rng = _R()
+    refs, rep = h.harvest(1)
+    assert refs == [] and rep.unreadable == 1 and rep.rejected_name == 0
+
+
+def test_a_lost_block_does_not_abort_the_run():
+    h, _ = _harv(logs_by_block={100: [_mint()]}, canary_mints=1, raise_on=(7,))
+
+    class _R:
+        def __init__(self):
+            self.n = 0
+
+        def randrange(self, lo, hi):
+            self.n += 1
+            return 7 if self.n == 1 else 100
+    h._rng = _R()
+    refs, rep = h.harvest(2)
+    assert rep.blocks == 1, "o bloco perdido não conta como varrido"
+    assert len(refs) == 1
+
+
+def test_the_chain_is_carried_into_every_ref():
+    """Sem a cadeia, a referência é ambígua: o mesmo contrato pode existir
+    em Base e em Ethereum e são alvos diferentes."""
+    h, _ = _harv(logs_by_block={100: [_mint()]}, canary_mints=1)
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 100
+    h._rng = _R()
+    refs, _ = h.harvest(1)
+    assert all(r.startswith("ethereum:") for r in refs)
