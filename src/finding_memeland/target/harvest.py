@@ -57,6 +57,37 @@ from .selector import name_qualifies, normalize_name
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ZERO_TOPIC = "0x" + "0" * 64
 
+# Onde começar a sortear blocos, por cadeia. É uma OPTIMIZAÇÃO DE CUSTO, não
+# uma regra de correcção: um bloco anterior à existência de NFTs devolve zero
+# mints e custa uma chamada, mais nada. Em Ethereum os primeiros NFTs com o
+# Transfer no formato ERC-721 aparecem no fim de 2017 (bloco ~4,6M); sortear
+# de 1 gastaria um quinto das chamadas em blocos garantidamente vazios. Em
+# Base a cadeia inteira é da era dos NFTs.
+HARVEST_SPAN_START = {"ethereum": 4_600_000, "base": 1}
+# Nunca sortear os blocos mais recentes: um bloco ainda sujeito a reorg pode
+# mudar de conteúdo, e um alvo que desaparece da cadeia depois de depositado
+# é um alvo que morre no /prepare — ou pior, depois.
+HARVEST_SAFE_DEPTH = 1_000
+
+# Um contrato ou uma cadeia que o jogo não conhece não pode ser colhido: as
+# pistas, o claim e o resolver de links só sabem destas.
+HARVEST_CHAINS = ("ethereum", "base")
+
+
+def parse_canary(spec: str) -> tuple[int, int]:
+    """"bloco:mints" → (bloco, mints). (0, 0) se vazio ou torto.
+
+    Devolver (0, 0) em vez de levantar é deliberado e seguro, porque o
+    `MintHarvester` trata (0, 0) como "sem canário" e RECUSA varrer. Uma
+    configuração torta não pode transformar-se numa colheita cega."""
+    try:
+        block, mints = (int(x) for x in str(spec or "").strip().split(":"))
+    except ValueError:
+        return 0, 0
+    if block <= 0 or mints <= 0:
+        return 0, 0
+    return block, mints
+
 
 def _as_int(topic: str) -> int:
     return int(topic, 16)
@@ -183,6 +214,7 @@ class MintHarvester:
 
     def __init__(self, *, chain: str, latest_block, get_logs, read_name,
                  canary_block: int = 0, canary_mints: int = 0,
+                 span_start: int = 1,
                  rng: random.Random | None = None,
                  min_words: int = 2):
         if not chain:
@@ -193,6 +225,7 @@ class MintHarvester:
         self._read_name = read_name
         self._canary = int(canary_block)
         self._canary_mints = int(canary_mints)
+        self._span_start = max(1, int(span_start))
         self._rng = rng or random.SystemRandom()
         self._min_words = int(min_words)
 
@@ -214,8 +247,8 @@ class MintHarvester:
                 max_per_contract: int = 2,
                 notify: Callable[[str], None] | None = None,
                 ) -> tuple[list[str], HarvestReport]:
-        """`n_blocks` blocos ao calhas dentro de `span` (por omissão, toda a
-        cadeia até ao bloco actual).
+        """`n_blocks` blocos ao calhas dentro de `span` (por omissão, do
+        `span_start` da cadeia até ao bloco seguro mais recente).
 
         `max_per_contract` existe porque um único bloco pode conter um drop
         de 500 peças do mesmo contrato, e deixá-las entrar todas repunha o
@@ -228,7 +261,7 @@ class MintHarvester:
                 f"{self._canary_mints} mints esperados) — não varro às cegas")
 
         latest = self._latest()
-        lo, hi = span or (1, latest)
+        lo, hi = span or (self._span_start, latest)
         hi = min(hi, latest)
         if lo >= hi:
             raise HarvestBlind(f"intervalo de blocos vazio: [{lo}, {hi}]")

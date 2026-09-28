@@ -1338,6 +1338,27 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return "usage: /fill [1..500]"
         return _target_job("fill", lambda: target_wiring.fill(want))
 
+    def _harvest(arg: str = "") -> str:
+        """Colher alvos da cadeia — Ethereum e Base — e depositá-los na
+        despensa (28/09, decisões do Pedro: só manual, 200 blocos).
+
+        Um bloco ao calhas não tem opinião: sem marketplace, sem ordenação,
+        o alvo pode ser qualquer NFT alguma vez mintado — incluindo um
+        contrato com uma única peça. Cada candidato passa pelas mesmas cinco
+        verificações do /fill.
+
+        Pelo `_target_job`, e isso não é detalhe: recusa durante uma hunt
+        (a verificação de unicidade gasta a MESMA quota do OpenSea que a
+        guarda das pistas) e partilha a flag com /fill e /prepare, que
+        gravariam a despensa por cima uns dos outros."""
+        try:
+            n = int(arg.strip()) if arg.strip() else int(s.harvest_blocks)
+        except ValueError:
+            return "usage: /harvest [blocos por cadeia]"
+        if n < 1 or n > 2000:
+            return "usage: /harvest [1..2000]"
+        return _target_job("harvest", lambda: target_wiring.harvest(n))
+
     def _prepare(arg: str = "") -> str:
         """Take one target out of the larder, re-verify it live, write Clue 1
         through every guard, and seal the lot to the database.
@@ -1358,6 +1379,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         "scan": _scan,
         "snapshot": _snapshot,
         "fill": _fill,
+        "harvest": _harvest,
         "prepare": _prepare,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,

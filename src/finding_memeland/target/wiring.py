@@ -19,7 +19,7 @@ Doctrine carried here, not in main.py:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Callable
 
@@ -50,6 +50,16 @@ from .clues import (
     describe_image_batched,
 )
 from .discovery import DiscoveryStateStore, EraDiscovery
+from .harvest import (
+    HARVEST_CHAINS,
+    HARVEST_SAFE_DEPTH,
+    HARVEST_SPAN_START,
+    TRANSFER_TOPIC,
+    ZERO_TOPIC,
+    HarvestBlind,
+    MintHarvester,
+    parse_canary,
+)
 from .hunt import (
     LIVE_HASH_RESOLVED,
     LIVE_HASH_UNRESOLVABLE,
@@ -153,6 +163,12 @@ class TargetWiring:
     larder_preparer: object = None            # prepare.TargetPreparer
     pool_key: str = ""
     notify: object = None        # progress lines for /fill and /prepare
+    # /harvest (28/09): um colector por cadeia, e as cadeias onde o depósito
+    # pode guardar alvos — as que têm RPC com chave E provedor público para o
+    # live check. Uma cadeia colhível mas não depositável é pior que inútil:
+    # gasta chamadas para produzir alvos que o depósito vai recusar.
+    harvesters: dict = field(default_factory=dict)
+    deposit_chains: frozenset = frozenset()
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -243,6 +259,59 @@ class TargetWiring:
         finally:
             self.larder_store.save(larder)      # keep whatever was found
         return f"fill: {tally.render()} · despensa {larder.size()}"
+
+    def harvest(self, n_blocks: int) -> str:
+        """Colher alvos da cadeia e depositá-los na despensa.
+
+        POR CADEIA, e cada uma responde por si: uma cadeia sem canário ou
+        sem provedor público é SALTADA com a razão escrita, e as outras
+        correm na mesma. Uma configuração em falta em Base não pode impedir
+        a colheita em Ethereum.
+
+        A despensa é gravada no `finally`, como no /fill: o que foi
+        encontrado antes de uma falha fica guardado.
+
+        Nada do que sai daqui tem nome, contrato ou tokenId — só contagens
+        e causas. A despensa são as próximas respostas; o relatório vai para
+        o Telegram e fica no histórico."""
+        if self.finder is None or self.larder_store is None:
+            return "despensa não configurada"
+        if not self.harvesters:
+            return "colheita não configurada"
+        larder: Larder = self.larder_store.load()
+        before = larder.size()
+        lines: list[str] = []
+        try:
+            for chain, harvester in self.harvesters.items():
+                if chain not in self.deposit_chains:
+                    # Saltar ANTES de varrer: colher alvos que o depósito vai
+                    # recusar é gastar chamadas para nada.
+                    lines.append(
+                        f"{chain}: saltada — sem provedor público para o live "
+                        f"check (TARGET_PUBLIC_RPCS_{chain.upper()} no Doppler dev)")
+                    continue
+                try:
+                    refs, hrep = harvester.harvest(n_blocks)
+                except HarvestBlind as e:
+                    lines.append(f"{chain}: ⛔ {e}")
+                    continue
+                except Exception as e:  # noqa: BLE001 — uma cadeia, não a corrida
+                    # R8: o RPC desta cadeia não respondeu (eth_blockNumber,
+                    # tipicamente). Isso é NOSSO e diz zero sobre os NFTs
+                    # dela — e não pode apagar o relatório da outra cadeia.
+                    # Só o tipo: a mensagem de um transporte pode citar URLs.
+                    lines.append(f"{chain}: NÃO MEDIDA — o RPC falhou "
+                                 f"({type(e).__name__}); nada foi concluído "
+                                 "sobre esta cadeia")
+                    continue
+                dep = self.finder.deposit(
+                    larder, refs, chain_ok=lambda c: c in self.deposit_chains)
+                lines.append(f"{chain}: {hrep.render()} → depósito: {dep.render()}")
+        finally:
+            self.larder_store.save(larder)
+        added = larder.size() - before
+        return ("harvest:\n" + "\n".join(lines)
+                + f"\ndespensa {before} → {larder.size()} (+{added})")
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -671,8 +740,54 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         used_hmacs=lambda: repo.used_target_hmacs(),
         now_iso=_now_iso, rng=rng, notify=say)
 
+    # -- /harvest (28/09): colher da cadeia, não de catálogos ------------- #
+    #
+    # Onde se pode DEPOSITAR: cadeias com RPC com chave (para verificar) E
+    # com um provedor público (para o live check no dia da hunt). Sem o
+    # segundo, um alvo depositado seria lido hoje e rebentaria a meio da
+    # hunt, com a pista publicada. É o mesmo invariante das guardas de
+    # arranque acima, aplicado a cadeias que o SOURCES não conhece.
+    deposit_chains = frozenset(c for c in HARVEST_CHAINS
+                               if c in rpcs and c in covered)
+    # O colector precisa de um nó que fale eth_getLogs e eth_blockNumber,
+    # que o ChainRpc não expõe — daí um JsonRpc próprio por cadeia, sobre
+    # o MESMO URL com chave. Composição pura: nenhuma chamada sai daqui.
+    harvest_urls = {"ethereum": s.eth_rpc_url, "base": s.base_rpc_url}
+    canaries = {"ethereum": s.harvest_canary_ethereum,
+                "base": s.harvest_canary_base}
+    harvesters: dict[str, MintHarvester] = {}
+    for chain in HARVEST_CHAINS:
+        url = harvest_urls.get(chain) or ""
+        if not url:
+            continue
+        node = JsonRpc(url=url, http_post=http_post, label=f"harvest:{chain}")
+
+        def _latest(node=node) -> int:
+            return int(str(node.call("eth_blockNumber", [])), 16) - HARVEST_SAFE_DEPTH
+
+        def _logs(a: int, b: int, node=node) -> list:
+            # Filtro no servidor: só Transfers cujo remetente é o endereço
+            # zero. O resto (ERC-20 vs ERC-721) decide-o mints_in_logs.
+            return node.get_logs(from_block=a, to_block=b,
+                                 topics=[TRANSFER_TOPIC, ZERO_TOPIC])
+
+        def _name(contract: str, tid: int, chain=chain) -> str | None:
+            read = keyed_meta.read(chain, contract, tid)
+            if read is None or not isinstance(read.metadata, dict):
+                return None      # revert, ou URI não endereçado por conteúdo
+            name = read.metadata.get("name")
+            return str(name) if name else None
+
+        block, mints = parse_canary(canaries.get(chain, ""))
+        harvesters[chain] = MintHarvester(
+            chain=chain, latest_block=_latest, get_logs=_logs,
+            read_name=_name, canary_block=block, canary_mints=mints,
+            span_start=HARVEST_SPAN_START.get(chain, 1), rng=rng)
+
     return TargetWiring(finder=finder, larder_store=larder_store,
                         notify=say,
+                        harvesters=harvesters,
+                        deposit_chains=deposit_chains,
                         prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,

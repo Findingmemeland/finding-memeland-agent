@@ -183,6 +183,18 @@ class Settings(BaseSettings):
     target_uniqueness_rates: str = Field(default="")
     # Blocks scanned per /scan run (Alchemy free: one block per eth_getLogs).
     target_scan_blocks: int = Field(default=300)
+    # /harvest (28/09, decisões do Pedro): blocos ao calhas POR CADEIA em cada
+    # corrida — mints ERC-721 lidos da cadeia, sem marketplace, e depositados
+    # na despensa pelas mesmas 5 verificações do /fill. Só manual.
+    harvest_blocks: int = Field(default=200)
+    # CANÁRIO R2 por cadeia, "bloco:mints" — um bloco FIXO com a contagem
+    # EXACTA de mints ERC-721, MEDIDA com o RPC de produção por
+    # scripts/measure_canary.py. Sem ele a colheita dessa cadeia recusa-se a
+    # correr: um RPC que devolve listas vazias ou truncadas é indistinguível
+    # de "não havia mints", e uma colheita cega parece saudável durante
+    # semanas. Nunca estimar — medir.
+    harvest_canary_ethereum: str = Field(default="")
+    harvest_canary_base: str = Field(default="")
     # /snapshot by SAMPLING (13/09): at most this many tokens PER STRATUM,
     # drawn uniformly, instead of the full listing (epoch 1 = ~850k tokens,
     # 40 h and ~$46 of RPC, died to transport). 0 = full listing.
