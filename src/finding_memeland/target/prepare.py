@@ -991,9 +991,29 @@ class TargetPreparer:
         # with the larder untouched — not a larder emptied by a 429.
         unavailable = 0
         max_unavailable = max(3, self._max_attempts)
+
+        # UMA VEZ, ANTES DO CICLO — e isto é uma correcção, não uma
+        # preferência de estilo (28/09, descoberta na #14).
+        #
+        # Estava a ser recalculado a cada tentativa, e o `consume()` corre em
+        # TODOS os caminhos de rejeição aqui em baixo. Ou seja: bastava um
+        # candidato ser rejeitado para o `used[-1]` deixar de ser o alvo da
+        # hunt anterior e passar a ser o descarte acabado de fazer — e o
+        # contrato que queríamos evitar voltava a ser elegível na tentativa
+        # seguinte. A guarda desarmava-se sozinha.
+        #
+        # Aconteceu à primeira vez que correu a sério: o /prepare da #14
+        # selou à 2.ª tentativa e o alvo saiu do mesmo contrato das #12 e
+        # #13. Três hunts seguidas do superrare2, com a guarda instalada.
+        #
+        # FICA UM RESTO POR RESOLVER, e é honesto dizê-lo: o `used` mistura
+        # alvos que correram hunts com candidatos descartados no /prepare.
+        # Se um /prepare falhar por completo, o `used[-1]` seguinte é um
+        # descarte e isto volta a apontar ao sítio errado. Resolver a sério
+        # exige distinguir as duas coisas no histórico.
+        avoid = larder.last_contract()
         for attempt in range(1, self._max_attempts + 1):
-            cand = larder.take(self._rng,
-                               avoid_contract=larder.last_contract())
+            cand = larder.take(self._rng, avoid_contract=avoid)
             if cand is None:
                 raise PrepareRefused(
                     f"despensa esgotada ao fim de {attempt - 1} tentativa(s) — "
