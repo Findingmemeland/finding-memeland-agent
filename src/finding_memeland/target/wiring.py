@@ -311,7 +311,7 @@ class TargetWiring:
                         "TARGET_PUBLIC_RPCS_ETHEREUM)")
                     continue
                 try:
-                    refs, hrep = harvester.harvest(n_blocks)
+                    refs, hrep = harvester.harvest(n_blocks, notify=self.notify)
                 except HarvestBlind as e:
                     lines.append(f"{chain}: ⛔ {e}")
                     continue
@@ -327,6 +327,10 @@ class TargetWiring:
                 dep = self.finder.deposit(
                     larder, refs, chain_ok=lambda c: c in self.deposit_chains)
                 lines.append(f"{chain}: {hrep.render()} → depósito: {dep.render()}")
+                # Gravar a cada cadeia, não só no fim (29/09): a primeira
+                # corrida real teve de ser morta ao fim de uma hora, e tudo
+                # o que Ethereum já tinha encontrado ia com ela.
+                self.larder_store.save(larder)
         finally:
             self.larder_store.save(larder)
         added = larder.size() - before

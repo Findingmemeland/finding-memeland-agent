@@ -245,6 +245,9 @@ class MintHarvester:
 
     def harvest(self, n_blocks: int, *, span: tuple[int, int] | None = None,
                 max_per_contract: int = 2,
+                max_reads_per_contract: int = 3,
+                max_mints_per_block: int = 40,
+                every: int = 20,
                 notify: Callable[[str], None] | None = None,
                 ) -> tuple[list[str], HarvestReport]:
         """`n_blocks` blocos ao calhas dentro de `span` (por omissão, do
@@ -253,7 +256,20 @@ class MintHarvester:
         `max_per_contract` existe porque um único bloco pode conter um drop
         de 500 peças do mesmo contrato, e deixá-las entrar todas repunha o
         problema que isto vem resolver: a despensa dominada por um contrato.
-        Dois por contrato por corrida chega."""
+        Dois por contrato por corrida chega.
+
+        `max_reads_per_contract` É O LIMITE QUE FALTAVA (29/09). O de cima
+        conta os que FICAM; um contrato cujos nomes não servem nunca lá
+        chegava, e o colector lia-lhe as 500 peças, uma a uma, cada leitura
+        até 25 s num gateway lento. A primeira corrida real passou mais de
+        uma hora sem acabar. Três tentativas por contrato chegam para saber
+        se ele tem nomes que prestem; depois disso é gasto puro.
+
+        `max_mints_per_block` é a segunda cinta: nenhum bloco sozinho pode
+        custar mais do que isto, por muitos contratos que tenha.
+
+        `every`: uma linha de progresso a cada tantos blocos, como o /fill.
+        Uma corrida longa sem notícias é indistinguível de uma pendurada."""
         note = notify or (lambda _t: None)
         if not self.canary_passes():
             raise HarvestBlind(
@@ -267,19 +283,27 @@ class MintHarvester:
             raise HarvestBlind(f"intervalo de blocos vazio: [{lo}, {hi}]")
 
         rep = HarvestReport()
-        seen: dict[str, int] = {}
+        seen: dict[str, int] = {}          # quantos FICARAM, por contrato
+        tried: dict[str, int] = {}         # quantos foram LIDOS, por contrato
         refs: list[str] = []
-        for _ in range(max(1, n_blocks)):
+        for i in range(1, max(1, n_blocks) + 1):
+            if every and i % every == 0:
+                note(f"harvest {self._chain}: {i}/{n_blocks} blocos · "
+                     f"{rep.kept} alvo(s) de {len(rep.contracts)} contrato(s)")
             block = self._rng.randrange(lo, hi)
             try:
                 logs = self._get_logs(block, block)
             except Exception:  # noqa: BLE001 — bloco perdido, não é veredicto
                 continue
             rep.blocks += 1
-            for contract, tid in mints_in_logs(logs):
-                rep.mints += 1
+            found = mints_in_logs(logs)
+            rep.mints += len(found)        # o que a cadeia TEM, não o que lemos
+            for contract, tid in found[:max_mints_per_block]:
                 if seen.get(contract, 0) >= max_per_contract:
                     continue
+                if tried.get(contract, 0) >= max_reads_per_contract:
+                    continue
+                tried[contract] = tried.get(contract, 0) + 1
                 try:
                     name = self._read_name(contract, tid)
                 except Exception:  # noqa: BLE001

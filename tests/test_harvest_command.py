@@ -48,7 +48,7 @@ class _Harv:
         self.boom = boom
         self.calls = 0
 
-    def harvest(self, n):
+    def harvest(self, n, **kw):
         self.calls += 1
         if self.blind:
             raise HarvestBlind("canário falhou em teste")
@@ -121,11 +121,31 @@ def test_harvested_refs_go_through_the_deposit_and_land_in_the_larder():
     assert "0 → 3 (+3)" in out
 
 
-def test_the_larder_is_saved_once_per_run():
-    """Como no /fill: guarda o que encontrou, no fim, uma vez."""
-    tw, store = _wiring({"ethereum": _Harv([f"ethereum:{A}:1"])}, {"ethereum"})
+def test_the_larder_is_saved_after_each_chain():
+    """A primeira corrida real teve de ser morta ao fim de uma hora (29/09),
+    e com ela ia tudo o que Ethereum já tinha encontrado. Grava-se a cada
+    cadeia, e outra vez no fim."""
+    tw, store = _wiring({"ethereum": _Harv([f"ethereum:{A}:1"]),
+                         "base": _Harv([f"base:{B}:2"])},
+                        {"ethereum", "base"})
     tw.harvest(200)
-    assert store.saves == 1
+    assert store.saves >= 2
+
+
+def test_a_run_killed_after_the_first_chain_keeps_the_first_chain():
+    """O que Ethereum encontrou fica gravado mesmo que Base rebente de uma
+    forma que nem o except apanha."""
+    class _Die(_Harv):
+        def harvest(self, n, **kw):
+            raise KeyboardInterrupt      # simula o processo a ser morto
+
+    tw, store = _wiring({"ethereum": _Harv([f"ethereum:{A}:1"]),
+                         "base": _Die()}, {"ethereum", "base"})
+    try:
+        tw.harvest(200)
+    except KeyboardInterrupt:
+        pass
+    assert store.larder.size() == 1
 
 
 def test_the_five_checks_still_apply_to_harvested_refs():

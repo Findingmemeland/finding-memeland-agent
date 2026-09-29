@@ -241,6 +241,50 @@ def test_one_drop_cannot_flood_the_larder():
     assert rep.mints == 1500 and rep.kept == 2
 
 
+def test_a_big_drop_of_useless_names_costs_three_reads_not_five_hundred():
+    """O DEFEITO DA PRIMEIRA CORRIDA REAL (29/09). O limite antigo contava
+    só os que FICAVAM; um contrato cujos nomes não prestam nunca lá chegava,
+    e o colector lia-lhe as 500 peças, cada uma até 25 s. Mais de uma hora
+    sem acabar. Três leituras por contrato chegam para saber."""
+    drop = {100: [_mint(A, 1)], 7: [_mint(B, i) for i in range(500)]}
+    h, calls = _harv(logs_by_block=drop, canary_mints=1,
+                     names={(B, i): "Solo" for i in range(500)})
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 7
+    h._rng = _R()
+    h.harvest(1)
+    assert len(calls["names"]) == 3
+
+
+def test_no_single_block_can_cost_more_than_the_cap():
+    """Um bloco com 500 contratos diferentes não pode custar 500 leituras."""
+    block = [_mint("0x" + f"{i:040x}", 1) for i in range(1, 501)]
+    h, calls = _harv(logs_by_block={100: [_mint()], 7: block}, canary_mints=1)
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 7
+    h._rng = _R()
+    h.harvest(1, max_mints_per_block=40)
+    assert len(calls["names"]) == 40
+
+
+def test_a_long_run_reports_progress():
+    """Uma hora sem notícias é indistinguível de uma corrida pendurada."""
+    h, _ = _harv(logs_by_block={100: [_mint()]}, canary_mints=1)
+    lines = []
+
+    class _R:
+        def randrange(self, lo, hi):
+            return 999
+    h._rng = _R()
+    h.harvest(60, every=20, notify=lines.append)
+    progress = [x for x in lines if "/60 blocos" in x]
+    assert len(progress) == 3
+
+
 def test_an_unreadable_token_is_counted_not_guessed():
     """R8: 'não conseguimos ler' nunca é 'não presta'."""
     h, _ = _harv(logs_by_block={100: [_mint()], 7: [_mint(B, 3)]},
