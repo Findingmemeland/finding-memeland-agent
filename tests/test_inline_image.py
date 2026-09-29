@@ -12,38 +12,52 @@ morreram assim 8 em 8 candidatos numa corrida, 43 em 50 noutra.
 
 O que estes testes fixam:
 1. PNG / JPEG / GIF / WebP em base64 passam o teste E chegam à visão.
-2. SVG continua recusado — a visão não o lê — mas conta à parte, porque
-   aceitá-lo é a decisão seguinte e o número diz se vale a pena.
+2. SVG é convertido para PNG (decisão do Pedro, 30/09 — 5 de 9 candidatos
+   da primeira colheita morriam aqui), com recusas pelas razões certas:
+   referências externas, tamanho ilegível, render de uma só cor.
 3. Uma string gigante não vira gigabytes em memória.
+4. O "único" diz porquê (não-único / cheio / índice-cego / rede-NOSSO).
 """
 from __future__ import annotations
 
 import base64
 import struct
+import sys
+import types
 import zlib
+from contextlib import contextmanager
+
+import pytest
 
 from finding_memeland.target.adapters import (
+    SVG_RENDER_EDGE,
     decode_data_image,
     decode_data_uri,
     inline_artwork,
     probe_inline_image,
+    rasterize_svg,
+    svg_size,
 )
 from finding_memeland.target.refresh import image_uri_kind
 
 
-def _real_png() -> bytes:
-    """Um PNG 1×1 verdadeiro, feito à mão — o Pillow (quando existe)
+def _real_png(*pixels: tuple[int, int, int]) -> bytes:
+    """Um PNG verdadeiro de N×1, feito à mão — o Pillow (quando existe)
     recusa bytes que só COMEÇAM como PNG, e bem."""
+    pixels = pixels or ((255, 0, 0),)
+
     def chunk(tag: bytes, body: bytes) -> bytes:
         return (struct.pack(">I", len(body)) + tag + body
                 + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
-    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    idat = zlib.compress(b"\x00\xff\x00\x00")
+    ihdr = struct.pack(">IIBBBBB", len(pixels), 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00" + b"".join(bytes(p) for p in pixels))
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
             + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
 
 
 PNG = _real_png()
+TWO_COLOURS = _real_png((255, 0, 0), (0, 0, 255))
+ONE_COLOUR = _real_png((9, 9, 9), (9, 9, 9))
 GIF = b"GIF89a" + b"\x00" * 50
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
 
@@ -106,10 +120,13 @@ def test_an_onchain_gif_passes_the_probe():
                               probe_bytes=64) is not None
 
 
-def test_an_onchain_svg_is_still_refused():
-    """A visão não lê SVG. Recusado como antes — agora pela razão certa."""
-    assert probe_inline_image(_b64("image/svg+xml", SVG), max_bytes=10_000,
-                              probe_bytes=64) is None
+def test_without_the_library_an_svg_is_refused_not_a_crash():
+    """Se o resvg-py faltar no Railway, o SVG volta a ser recusado — como
+    antes de 30/09 — e nada rebenta."""
+    with _no_resvg():
+        assert probe_inline_image(_b64("image/svg+xml", WIDE), max_bytes=10_000,
+                                  probe_bytes=64) is None
+        assert inline_artwork(_b64("image/svg+xml", WIDE), max_bytes=10_000) is None
 
 
 def test_bytes_claiming_to_be_png_but_are_not_are_refused():
@@ -128,8 +145,155 @@ def test_an_onchain_png_reaches_the_vision_step():
     assert inline_artwork(_b64("image/png", PNG), max_bytes=10_000) is not None
 
 
-def test_an_onchain_svg_does_not_reach_vision():
-    assert inline_artwork(_b64("image/svg+xml", SVG), max_bytes=10_000) is None
+# --------------------------------------------------------------------------- #
+# SVG → PNG                                                                     #
+# --------------------------------------------------------------------------- #
+
+WIDE = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"><rect/></svg>'
+TALL = b'<svg xmlns="http://www.w3.org/2000/svg" width="50" height="300"><rect/></svg>'
+
+
+@contextmanager
+def _no_resvg():
+    saved = sys.modules.get("resvg_py", _MISSING)
+    sys.modules["resvg_py"] = None           # import → ImportError
+    try:
+        yield
+    finally:
+        _restore(saved)
+
+
+@contextmanager
+def _fake_resvg(png: bytes = TWO_COLOURS, *, boom: bool = False):
+    calls: list[dict] = []
+
+    def svg_to_bytes(**kw):
+        calls.append(kw)
+        if boom:
+            raise ValueError("bad svg")
+        return png
+    saved = sys.modules.get("resvg_py", _MISSING)
+    sys.modules["resvg_py"] = types.SimpleNamespace(svg_to_bytes=svg_to_bytes)
+    try:
+        yield calls
+    finally:
+        _restore(saved)
+
+
+_MISSING = object()
+
+
+def _restore(saved):
+    if saved is _MISSING:
+        sys.modules.pop("resvg_py", None)
+    else:
+        sys.modules["resvg_py"] = saved
+
+
+def test_an_onchain_svg_passes_the_probe_as_png():
+    """O TESTE de 30/09. Um SVG on-chain chega ao probe como PNG."""
+    with _fake_resvg() as calls:
+        got = probe_inline_image(_b64("image/svg+xml", WIDE), max_bytes=10_000,
+                                 probe_bytes=64)
+    assert got is not None and got[0].startswith(b"\x89PNG")
+    assert len(calls) == 1
+
+
+def test_an_onchain_svg_reaches_the_vision_step_as_png():
+    with _fake_resvg():
+        art = inline_artwork("data:image/svg+xml;utf8," + WIDE.decode(),
+                             max_bytes=10_000)
+    assert art is not None and art.startswith(b"\x89PNG")
+
+
+def test_the_long_edge_is_the_one_fixed():
+    """Fixar o lado MAIOR garante que o outro nunca passa de 1024 — um SVG
+    de 1×100000 não vira gigabytes."""
+    with _fake_resvg() as calls:
+        rasterize_svg(WIDE)
+        rasterize_svg(TALL)
+    assert calls[0].get("width") == SVG_RENDER_EDGE and "height" not in calls[0]
+    assert calls[1].get("height") == SVG_RENDER_EDGE and "width" not in calls[1]
+
+
+def test_the_bundled_font_is_passed():
+    """Sem fonte, o texto de um SVG desaparece e a visão descreve um vazio."""
+    with _fake_resvg() as calls:
+        rasterize_svg(WIDE)
+    fonts = calls[0].get("font_files") or []
+    assert any(f.endswith("DejaVuSans.ttf") for f in fonts)
+
+
+def test_external_references_are_refused_before_rendering():
+    """O renderizador podia ler ficheiros do NOSSO contentor, e uma obra que
+    depende de fora não é a que está na cadeia."""
+    bad = [
+        b'<image href="https://x.io/a.png"/>',
+        b'<image xlink:href="/etc/passwd"/>',
+        b'<image href="file:///app/secret"/>',
+        b'<rect style="fill:url(https://x.io/p.svg#g)"/>',
+        b'<style>@import "https://x.io/f.css";</style>',
+    ]
+    for frag in bad:
+        svg = WIDE.replace(b"<rect/>", frag)
+        with _fake_resvg() as calls:
+            assert rasterize_svg(svg) is None, frag
+        assert calls == [], frag
+
+
+def test_internal_references_are_fine():
+    ok = [b'<use href="#a"/>', b'<rect fill="url(#g)"/>',
+          b'<image href="data:image/png;base64,AAAA"/>']
+    for frag in ok:
+        with _fake_resvg():
+            assert rasterize_svg(WIDE.replace(b"<rect/>", frag)) is not None, frag
+
+
+def test_an_svg_without_a_readable_size_is_refused():
+    with _fake_resvg() as calls:
+        assert rasterize_svg(SVG) is None                 # no viewBox, no size
+        assert rasterize_svg(SVG.replace(b"<svg ", b'<svg width="100%" ')) is None
+    assert calls == []
+
+
+def test_a_render_of_one_colour_is_refused():
+    """Uma só cor é texto sem fonte, ou arte que não desenhou."""
+    with _fake_resvg(ONE_COLOUR):
+        assert rasterize_svg(WIDE) is None
+
+
+def test_a_render_that_throws_is_the_candidate_s_problem():
+    with _fake_resvg(boom=True):
+        assert rasterize_svg(WIDE) is None
+
+
+def test_an_oversized_svg_is_refused_before_rendering():
+    big = WIDE.replace(b"<rect/>", b"<!--" + b"x" * 3_000_000 + b"-->")
+    with _fake_resvg() as calls:
+        assert rasterize_svg(big) is None
+    assert calls == []
+
+
+def test_svg_size_reads_viewbox_then_dimensions():
+    assert svg_size(WIDE) == (400.0, 100.0)
+    assert svg_size(TALL) == (50.0, 300.0)
+    assert svg_size(b'<svg viewBox="0,0,24,24"/>') == (24.0, 24.0)
+    assert svg_size(SVG) is None
+
+
+def test_the_real_library_renders_shapes_and_text():
+    """Só corre onde o resvg-py está instalado (no teu Mac, depois do
+    `pip install -r requirements.txt`). Prova a biblioteca e a fonte."""
+    pytest.importorskip("resvg_py")
+    shapes = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">'
+              b'<rect width="20" height="20" fill="red"/>'
+              b'<rect x="20" width="20" height="20" fill="blue"/></svg>')
+    png = rasterize_svg(shapes)
+    assert png is not None and png.startswith(b"\x89PNG")
+    text_only = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 50">'
+                 b'<rect width="200" height="50" fill="black"/>'
+                 b'<text x="10" y="35" font-size="30" fill="white">Hi there</text></svg>')
+    assert rasterize_svg(text_only) is not None, "texto não desenhou: fonte?"
 
 
 # --------------------------------------------------------------------------- #
@@ -165,3 +329,59 @@ def test_the_deposit_report_names_the_kind_of_dead_image():
                     chain_ok=lambda c: True)
     assert rep.added == 0
     assert "imagem 1 (data-svg 1)" in rep.render()
+
+
+# --------------------------------------------------------------------------- #
+# "único", pela razão                                                           #
+# --------------------------------------------------------------------------- #
+
+
+class _Guard:
+    """Imita MarketNameUniqueness: devolve `answer` e mexe no contador
+    `moves`, tal como a guarda verdadeira faz."""
+
+    def __init__(self, answer, moves):
+        self.answer, self.moves = answer, moves
+        self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
+                      "crowded": 0, "transport": 0}
+
+    def __call__(self, *a):
+        self.stats[self.moves] += 1
+        return self.answer
+
+
+def _deposit_with(uniqueness):
+    import random
+
+    from finding_memeland.target.prepare import Larder, Source, TargetFinder
+    from finding_memeland.target.refresh import TokenRead
+
+    f = TargetFinder(
+        sources=[Source("x", "base", "0x" + "cd" * 20)],
+        total_supply=lambda c, k: 10, token_by_index=lambda c, k, i: i + 1,
+        read_token=lambda c, k, t: TokenRead(
+            token_uri="ipfs://bafymeta",
+            metadata={"name": "Some Two Words", "image": "ipfs://bafyimg"}),
+        probe_image=lambda u: (PNG, len(PNG)), owner_is_eoa=lambda *a: True,
+        name_is_unique=uniqueness, rng=random.Random(0))
+    return f.deposit(Larder(), ["base:0x" + "ab" * 20 + ":1"],
+                     chain_ok=lambda c: True).render()
+
+
+def test_unique_says_why_from_the_guard_s_own_counters():
+    for answer, moves, label in [(False, "not_unique", "não-único"),
+                                 (None, "crowded", "cheio"),
+                                 (None, "blind", "índice-cego"),
+                                 (None, "transport", "rede-NOSSO")]:
+        out = _deposit_with(_Guard(answer, moves))
+        assert f"único 1 ({label} 1)" in out, (moves, out)
+
+
+def test_unique_without_counters_still_separates_a_verdict_from_none():
+    assert "único 1 (não-único 1)" in _deposit_with(lambda *a: False)
+    assert "único 1 (sem-veredicto 1)" in _deposit_with(lambda *a: None)
+
+
+def test_the_unique_split_never_names_the_candidate():
+    out = _deposit_with(_Guard(None, "blind"))
+    assert "Some Two Words" not in out and "abab" not in out

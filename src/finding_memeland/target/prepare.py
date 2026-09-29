@@ -375,6 +375,22 @@ class LarderStore:
 # --------------------------------------------------------------------------- #
 
 
+# What MarketNameUniqueness.stats calls each outcome, in the operator's words.
+_UNIQUE_REASONS = {"not_unique": "não-único", "crowded": "cheio",
+                   "blind": "índice-cego", "transport": "rede-NOSSO"}
+
+
+def _unique_reason(uniq, before: dict | None, stats) -> str:
+    """Which of the guard's own counters moved during THIS call. A fake or
+    any callable without `stats` still splits the one thing it can: a False
+    is a verdict, anything else is not."""
+    if before is not None and isinstance(stats, dict):
+        for key, label in _UNIQUE_REASONS.items():
+            if stats.get(key, 0) > before.get(key, 0):
+                return label
+    return "não-único" if uniq is False else "sem-veredicto"
+
+
 @dataclass
 class Tally:
     """Why draws were spent. A healthy source yields in a handful of draws;
@@ -408,6 +424,12 @@ class Tally:
     # image stored on-chain (`data:`) could never pass the probe, and every
     # one was reported as a dead pin. Split, it shows up at once.
     image_kinds: dict = field(default_factory=dict)
+    # The `unique` count again, BY REASON (30/09). "único 3" hid four
+    # different facts — another piece carries the name; the name has more
+    # bearers than a page holds; the index cannot see the target at all; the
+    # request itself failed (OURS). The first calls for nothing, the last
+    # two for fixing something on our side.
+    unique_kinds: dict = field(default_factory=dict)
 
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
@@ -421,6 +443,10 @@ class Tally:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.image_kinds.items()))
             causes = causes.replace(f"imagem {self.image}",
                                     f"imagem {self.image} ({kinds})", 1)
+        if self.unique_kinds and self.unique:
+            kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.unique_kinds.items()))
+            causes = causes.replace(f"único {self.unique}",
+                                    f"único {self.unique} ({kinds})", 1)
         if self.not_ca:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.not_ca.items()))
             causes = (causes + ", " if causes else "") + \
@@ -680,6 +706,8 @@ class TargetFinder:
         if eoa is not True:
             tally.owner += 1
             return None
+        stats = getattr(self._name_is_unique, "stats", None)
+        before = dict(stats) if isinstance(stats, dict) else None
         try:
             uniq = self._name_is_unique(base, src.chain, src.contract, tid)
         except Exception as e:  # noqa: BLE001
@@ -688,6 +716,8 @@ class TargetFinder:
             uniq = None
         if uniq is not True:
             tally.unique += 1
+            k = _unique_reason(uniq, before, stats)
+            tally.unique_kinds[k] = tally.unique_kinds.get(k, 0) + 1
             return None
         return Candidate(
             chain=src.chain, contract=src.contract.lower(), token_id=tid,

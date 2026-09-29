@@ -66,6 +66,7 @@ import re
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterator, Sequence
 from urllib.parse import quote, urlsplit
 
@@ -940,12 +941,25 @@ def decode_data_image(uri: str, *, max_bytes: int) -> bytes | None:
     return data if 0 < len(data) <= max_bytes else None
 
 
+def _inline_bitmap(uri: str, *, max_bytes: int) -> bytes | None:
+    """Os bytes de um `data:` numa forma que a visão lê: PNG/JPEG/GIF/WebP
+    tal como vêm, SVG convertido para PNG. None se nenhuma das duas."""
+    data = decode_data_image(uri, max_bytes=max_bytes)
+    if not data:
+        return None
+    if sniff_media_type(data) is not None:
+        return data
+    if looks_like_svg(data):
+        return rasterize_svg(data)
+    return None
+
+
 def probe_inline_image(uri: str, *, max_bytes: int,
                        probe_bytes: int) -> tuple[bytes, int] | None:
     """O teste da imagem para `data:` — mesma forma que o probe por
-    gateway: (primeiros bytes, tamanho), ou None. Um SVG descodifica mas
-    não passa o sniff (a visão não o lê): None, pela razão certa."""
-    data = decode_data_image(uri, max_bytes=max_bytes)
+    gateway: (primeiros bytes, tamanho), ou None. Um SVG só passa se
+    rasterizar (ver `rasterize_svg`)."""
+    data = _inline_bitmap(uri, max_bytes=max_bytes)
     if data and sniff_media_type(data[:probe_bytes]) is not None:
         return data[:probe_bytes], len(data)
     return None
@@ -953,10 +967,122 @@ def probe_inline_image(uri: str, *, max_bytes: int,
 
 def inline_artwork(uri: str, *, max_bytes: int) -> bytes | None:
     """A arte inteira de um `data:`, já pronta para a visão, ou None."""
-    data = decode_data_image(uri, max_bytes=max_bytes)
+    data = _inline_bitmap(uri, max_bytes=max_bytes)
     if data and sniff_media_type(data) is not None:
         return shrink_for_vision(data)
     return None
+
+
+# --------------------------------------------------------------------------- #
+# SVG → PNG (30/09)                                                             #
+# --------------------------------------------------------------------------- #
+#
+# PORQUÊ. A primeira colheita com imagens on-chain a funcionar deu 9
+# candidatos e 0 guardados; 5 dos 9 eram SVG. Arte gerada dentro do contrato
+# é quase sempre SVG, e a visão só lê PNG/JPEG/GIF/WebP. Decisão do Pedro,
+# 30/09: converter para PNG, para que a visão veja a imagem real — as pistas
+# têm de descrever o que o jogador vê no marketplace.
+#
+# PORQUE resvg-py (e não CairoSVG): wheel autocontido (Rust), sem biblioteca
+# de sistema — o CairoSVG precisa do libcairo instalado no Railway. MIT.
+#
+# O QUE RECUSAMOS, e porquê cada um:
+#   · referências externas (href/src/url() que não sejam `#…` nem `data:`) —
+#     o renderizador podia ler ficheiros do nosso contentor, e uma obra que
+#     depende de recursos de fora não é a obra que está na cadeia;
+#   · sem tamanho legível (viewBox ou width/height) — sem ele não sabemos
+#     limitar o PNG, e um SVG de 1×100000 viraria gigabytes;
+#   · o PNG sair de uma só cor — é o sintoma de texto sem fonte, ou de arte
+#     que não desenhou. Dar isso à visão escreveria pistas sobre um vazio.
+# Sem a biblioteca instalada: None — o SVG fica recusado como antes, nunca
+# rebenta.
+
+SVG_MAX_BYTES = 2_000_000        # o código SVG; arte on-chain real é KB
+SVG_RENDER_EDGE = 1024           # lado maior do PNG; a visão não ganha acima
+
+_SVG_EXTERNAL = re.compile(
+    rb"""(?:\bhref|\bsrc)\s*=\s*["']\s*(?!#|data:)[^"'\s]"""
+    rb"""|url\(\s*["']?\s*(?!#|data:)[^)"'\s]"""
+    rb"""|@import""", re.I)
+_SVG_ROOT = re.compile(rb"<svg\b[^>]*>", re.I | re.S)
+_SVG_VIEWBOX = re.compile(
+    rb"""viewBox\s*=\s*["']\s*[-\d.eE+]+[\s,]+[-\d.eE+]+[\s,]+([\d.eE+]+)[\s,]+([\d.eE+]+)""",
+    re.I)
+_SVG_DIM = re.compile(rb"""\b(width|height)\s*=\s*["']\s*([\d.]+)\s*(?:px)?\s*["']""", re.I)
+
+# Uma fonte que viaja com o código: no contentor do Railway não há garantia
+# de fontes de sistema, e SVG on-chain tem muito texto. DejaVu Sans —
+# licença Bitstream Vera, redistribuição livre (ver fonts/LICENSE-DejaVu).
+_FONT_DIR = Path(__file__).with_name("fonts")
+
+
+def looks_like_svg(data: bytes) -> bool:
+    head = data[:4096].lstrip().lower()
+    return head.startswith(b"<") and b"<svg" in head
+
+
+def svg_size(data: bytes) -> tuple[float, float] | None:
+    """(largura, altura) intrínsecas — viewBox primeiro, depois width/height
+    em unidades absolutas. None se não se consegue ler (percentagens, nada)."""
+    root = _SVG_ROOT.search(data[:65536])
+    if not root:
+        return None
+    tag = root.group(0)
+    m = _SVG_VIEWBOX.search(tag)
+    if m:
+        w, h = float(m.group(1)), float(m.group(2))
+    else:
+        dims = {k.lower(): float(v) for k, v in _SVG_DIM.findall(tag)}
+        w, h = dims.get(b"width", 0.0), dims.get(b"height", 0.0)
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def rasterize_svg(data: bytes, *, max_bytes: int = SVG_MAX_BYTES,
+                  edge: int = SVG_RENDER_EDGE) -> bytes | None:
+    """SVG → PNG com o lado maior em `edge`, ou None (ver a lista acima).
+    Todas as recusas baratas vêm ANTES de importar a biblioteca, e nenhuma
+    exceção sai daqui: um SVG torto é do candidato, não nosso."""
+    if not data or len(data) > max_bytes or not looks_like_svg(data):
+        return None
+    if _SVG_EXTERNAL.search(data):
+        return None
+    size = svg_size(data)
+    if size is None:
+        return None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        import resvg_py
+    except ImportError:
+        return None
+    w, h = size
+    fit = {"width": edge} if w >= h else {"height": edge}
+    fonts = [str(p) for p in sorted(_FONT_DIR.glob("*.ttf"))]
+    try:
+        png = bytes(resvg_py.svg_to_bytes(svg_string=text, font_files=fonts or None,
+                                          **fit))
+    except Exception:  # noqa: BLE001 — o SVG não renderiza: do candidato
+        return None
+    if sniff_media_type(png) != "image/png" or _is_blank(png):
+        return None
+    return png
+
+
+def _is_blank(png: bytes) -> bool:
+    """Uma só cor em toda a imagem. Sem Pillow, não se sabe: não é vazio."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    import io
+    try:
+        with Image.open(io.BytesIO(png)) as im:
+            im = im.convert("RGBA")
+            return all(lo == hi for lo, hi in im.getextrema())
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def sniff_media_type(data: bytes) -> str | None:
