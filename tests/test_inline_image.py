@@ -16,7 +16,7 @@ O que estes testes fixam:
    da primeira colheita morriam aqui), com recusas pelas razões certas:
    referências externas, tamanho ilegível, render de uma só cor.
 3. Uma string gigante não vira gigabytes em memória.
-4. O "único" diz porquê (não-único / cheio / índice-cego / rede-NOSSO).
+(O "único" e o "dono" pela razão: test_rejection_reasons.py.)
 """
 from __future__ import annotations
 
@@ -329,59 +329,3 @@ def test_the_deposit_report_names_the_kind_of_dead_image():
                     chain_ok=lambda c: True)
     assert rep.added == 0
     assert "imagem 1 (data-svg 1)" in rep.render()
-
-
-# --------------------------------------------------------------------------- #
-# "único", pela razão                                                           #
-# --------------------------------------------------------------------------- #
-
-
-class _Guard:
-    """Imita MarketNameUniqueness: devolve `answer` e mexe no contador
-    `moves`, tal como a guarda verdadeira faz."""
-
-    def __init__(self, answer, moves):
-        self.answer, self.moves = answer, moves
-        self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
-                      "crowded": 0, "transport": 0}
-
-    def __call__(self, *a):
-        self.stats[self.moves] += 1
-        return self.answer
-
-
-def _deposit_with(uniqueness):
-    import random
-
-    from finding_memeland.target.prepare import Larder, Source, TargetFinder
-    from finding_memeland.target.refresh import TokenRead
-
-    f = TargetFinder(
-        sources=[Source("x", "base", "0x" + "cd" * 20)],
-        total_supply=lambda c, k: 10, token_by_index=lambda c, k, i: i + 1,
-        read_token=lambda c, k, t: TokenRead(
-            token_uri="ipfs://bafymeta",
-            metadata={"name": "Some Two Words", "image": "ipfs://bafyimg"}),
-        probe_image=lambda u: (PNG, len(PNG)), owner_is_eoa=lambda *a: True,
-        name_is_unique=uniqueness, rng=random.Random(0))
-    return f.deposit(Larder(), ["base:0x" + "ab" * 20 + ":1"],
-                     chain_ok=lambda c: True).render()
-
-
-def test_unique_says_why_from_the_guard_s_own_counters():
-    for answer, moves, label in [(False, "not_unique", "não-único"),
-                                 (None, "crowded", "cheio"),
-                                 (None, "blind", "índice-cego"),
-                                 (None, "transport", "rede-NOSSO")]:
-        out = _deposit_with(_Guard(answer, moves))
-        assert f"único 1 ({label} 1)" in out, (moves, out)
-
-
-def test_unique_without_counters_still_separates_a_verdict_from_none():
-    assert "único 1 (não-único 1)" in _deposit_with(lambda *a: False)
-    assert "único 1 (sem-veredicto 1)" in _deposit_with(lambda *a: None)
-
-
-def test_the_unique_split_never_names_the_candidate():
-    out = _deposit_with(_Guard(None, "blind"))
-    assert "Some Two Words" not in out and "abab" not in out

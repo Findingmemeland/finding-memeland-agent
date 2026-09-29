@@ -477,8 +477,18 @@ class ChainEoaCheck:
 
     def __init__(self, *, rpcs: dict[str, ChainRpc]):
         self._rpcs = rpcs
+        # Counts only, never addresses (30/09): "dono 2" hid two opposite
+        # facts — the owner IS a contract (the candidate's), or we could not
+        # tell (ours, or a burned token). Same pattern as the uniqueness
+        # guard's `stats`.
+        self.stats = {"eoa": 0, "contract": 0, "unverifiable": 0}
 
     def __call__(self, chain: str, contract: str, token_id: int) -> bool | None:
+        got = self._check(chain, contract, token_id)
+        self.stats[{True: "eoa", False: "contract"}.get(got, "unverifiable")] += 1
+        return got
+
+    def _check(self, chain: str, contract: str, token_id: int) -> bool | None:
         rpc = self._rpcs.get(chain)
         if rpc is None or rpc.chain != chain:
             return None

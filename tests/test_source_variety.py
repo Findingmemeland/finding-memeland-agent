@@ -136,3 +136,46 @@ def test_casing_does_not_defeat_the_filter():
 
 def test_an_empty_larder_still_returns_none():
     assert Larder().take(random.Random(0), avoid_contract="x:y") is None
+
+
+# --------------------------------------------------------------------------- #
+# 3. A despensa sorteia por contrato, não por peça (30/09)                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_each_contract_weighs_the_same_whatever_its_size():
+    """A primeira colheita a dar alvos: 3 colhidos contra 33 das fontes
+    davam ~9% de sair um colhido. Por contrato, um contrato de UMA peça
+    pesa o mesmo que um de vinte."""
+    from collections import Counter
+    lar = Larder(candidates=[_cand(A, i) for i in range(20)]
+                 + [_cand(B, 1), _cand(C, 1)])
+    rng = random.Random(7)
+    counts = Counter(lar.take(rng).contract for _ in range(3000))
+    for k in (A, B, C):
+        assert 850 < counts[k] < 1150, counts
+
+
+def test_every_piece_of_a_contract_can_still_be_drawn():
+    from collections import Counter
+    lar = Larder(candidates=[_cand(A, i) for i in range(5)])
+    rng = random.Random(3)
+    seen = Counter(lar.take(rng).token_id for _ in range(500))
+    assert set(seen) == set(range(5))
+
+
+def test_by_contract_still_avoids_the_previous_contract():
+    lar = Larder(candidates=[_cand(A, i) for i in range(20)] + [_cand(B, 1)],
+                 used=[f"ethereum:{A}:11385"])
+    rng = random.Random(0)
+    assert all(lar.take(rng, avoid_contract=lar.last_contract()).contract == B
+               for _ in range(30))
+
+
+def test_the_same_address_on_two_chains_is_two_contracts():
+    from collections import Counter
+    lar = Larder(candidates=[_cand(A, i) for i in range(10)]
+                 + [_cand(A, 1, chain="base")])
+    rng = random.Random(5)
+    counts = Counter(lar.take(rng).chain for _ in range(2000))
+    assert 850 < counts["base"] < 1150, counts

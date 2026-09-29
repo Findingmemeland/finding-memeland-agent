@@ -467,8 +467,14 @@ class MarketNameUniqueness:
         self._page = page_size
         self._retries = retries
         self._sleep = sleep_s
+        # `crowded_same` (30/09) is a SUB-count of `crowded`, never instead
+        # of it: a full page on which at least one OTHER item carries the
+        # exact base name. The first /harvest runs lost every candidate to
+        # "crowded" and nobody could tell a real namesake from an obscure
+        # piece OpenSea merely ranked below 50 look-alikes. Measurement only:
+        # the answer stays None either way.
         self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
-                      "crowded": 0, "transport": 0}
+                      "crowded": 0, "crowded_same": 0, "transport": 0}
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
@@ -485,13 +491,16 @@ class MarketNameUniqueness:
                 self.stats["transport"] += 1
                 return None
         ids = {_canonical(i): n for i, n in rows}
+        key = base.casefold()
         if want not in ids:                   # canary failed
             if len(rows) >= self._page:
                 self.stats["crowded"] += 1
+                if any(normalize_name(n or "").casefold() == key
+                       for n in ids.values()):
+                    self.stats["crowded_same"] += 1
             else:
                 self.stats["blind"] += 1
             return None
-        key = base.casefold()
         others = [i for i, n in ids.items()
                   if i != want and normalize_name(n or "").casefold() == key]
         self.stats["not_unique" if others else "unique"] += 1

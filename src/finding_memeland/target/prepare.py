@@ -249,7 +249,17 @@ class Larder:
         MAS A HUNT TEM DE CORRER (regra do Pedro, 09/09): se evitar o
         contrato anterior esvaziar o balde, o filtro cai e sorteia-se de
         tudo. Uma guarda de variedade não pode deixar o jogo sem alvo —
-        preferir repetir a não haver hunt."""
+        preferir repetir a não haver hunt.
+
+        UNIFORME POR CONTRATO (decisão do Pedro, 30/09): sorteia-se primeiro
+        o contrato, depois a peça dentro dele. Até aqui era uniforme por
+        CANDIDATO, e a primeira colheita a dar alvos mostrou o custo: 3
+        colhidos contra 33 do SuperRare/Foundation davam ~9% de sair um
+        colhido — a despensa ficava a repetir as mesmas fontes por pura
+        aritmética. É a regra que o /fill já seguia entre fontes (22/09),
+        aplicada ao balde: um contrato com UMA peça pesa o mesmo que um com
+        vinte, porque a pergunta do jogo é "de que contrato sai o próximo
+        alvo?", não "que peça entre todas?"."""
         if not self.candidates:
             return None
         pool = self.candidates
@@ -258,7 +268,12 @@ class Larder:
                      if f"{c.chain}:{c.contract.lower()}" != avoid_contract]
             if other:
                 pool = other
-        return pool[rng.randrange(len(pool))]
+        by_contract: dict[str, list[Candidate]] = {}
+        for c in pool:
+            by_contract.setdefault(f"{c.chain}:{c.contract.lower()}", []).append(c)
+        keys = sorted(by_contract)          # fixed order: a seed reproduces
+        group = by_contract[keys[rng.randrange(len(keys))]]
+        return group[rng.randrange(len(group))]
 
     def consume(self, cid: str) -> None:
         self.candidates = [c for c in self.candidates if c.id() != cid]
@@ -375,20 +390,31 @@ class LarderStore:
 # --------------------------------------------------------------------------- #
 
 
-# What MarketNameUniqueness.stats calls each outcome, in the operator's words.
-_UNIQUE_REASONS = {"not_unique": "não-único", "crowded": "cheio",
-                   "blind": "índice-cego", "transport": "rede-NOSSO"}
+# What the guards' own `stats` call each outcome, in the operator's words.
+# ORDER MATTERS: the first counter that moved wins, and `crowded_same` is a
+# sub-count of `crowded` (both move together), so it must come first.
+_UNIQUE_REASONS = {"not_unique": "não-único", "crowded_same": "cheio-com-igual",
+                   "crowded": "cheio-sem-igual", "blind": "índice-cego",
+                   "transport": "rede-NOSSO"}
+_OWNER_REASONS = {"contract": "contrato", "unverifiable": "sem-veredicto"}
 
 
-def _unique_reason(uniq, before: dict | None, stats) -> str:
+def _snapshot(guard) -> dict | None:
+    stats = getattr(guard, "stats", None)
+    return dict(stats) if isinstance(stats, dict) else None
+
+
+def _reason(guard, before: dict | None, answer, labels: dict, *,
+            if_false: str) -> str:
     """Which of the guard's own counters moved during THIS call. A fake or
     any callable without `stats` still splits the one thing it can: a False
     is a verdict, anything else is not."""
+    stats = getattr(guard, "stats", None)
     if before is not None and isinstance(stats, dict):
-        for key, label in _UNIQUE_REASONS.items():
+        for key, label in labels.items():
             if stats.get(key, 0) > before.get(key, 0):
                 return label
-    return "não-único" if uniq is False else "sem-veredicto"
+    return if_false if answer is False else "sem-veredicto"
 
 
 @dataclass
@@ -430,6 +456,10 @@ class Tally:
     # request itself failed (OURS). The first calls for nothing, the last
     # two for fixing something on our side.
     unique_kinds: dict = field(default_factory=dict)
+    # The `owner` count again, BY REASON (30/09): a contract owns it (the
+    # candidate's) or we could not tell (ours / burned). EIP-7702 wallets
+    # were never here — ChainRpc.is_eoa has accepted them since 06/09.
+    owner_kinds: dict = field(default_factory=dict)
 
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
@@ -443,10 +473,11 @@ class Tally:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.image_kinds.items()))
             causes = causes.replace(f"imagem {self.image}",
                                     f"imagem {self.image} ({kinds})", 1)
-        if self.unique_kinds and self.unique:
-            kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.unique_kinds.items()))
-            causes = causes.replace(f"único {self.unique}",
-                                    f"único {self.unique} ({kinds})", 1)
+        for label, n, split in (("único", self.unique, self.unique_kinds),
+                                ("dono", self.owner, self.owner_kinds)):
+            if split and n:
+                kinds = ", ".join(f"{k} {v}" for k, v in sorted(split.items()))
+                causes = causes.replace(f"{label} {n}", f"{label} {n} ({kinds})", 1)
         if self.not_ca:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.not_ca.items()))
             causes = (causes + ", " if causes else "") + \
@@ -697,6 +728,7 @@ class TargetFinder:
         if self._max_image and head[1] and head[1] > self._max_image:
             tally.too_big += 1          # 171 MB, measured — vision cannot use it
             return None
+        before = _snapshot(self._owner_is_eoa)
         try:
             eoa = self._owner_is_eoa(src.chain, src.contract, tid)
         except Exception as e:  # noqa: BLE001
@@ -705,9 +737,11 @@ class TargetFinder:
             eoa = None
         if eoa is not True:
             tally.owner += 1
+            k = _reason(self._owner_is_eoa, before, eoa, _OWNER_REASONS,
+                        if_false="contrato")
+            tally.owner_kinds[k] = tally.owner_kinds.get(k, 0) + 1
             return None
-        stats = getattr(self._name_is_unique, "stats", None)
-        before = dict(stats) if isinstance(stats, dict) else None
+        before = _snapshot(self._name_is_unique)
         try:
             uniq = self._name_is_unique(base, src.chain, src.contract, tid)
         except Exception as e:  # noqa: BLE001
@@ -716,7 +750,8 @@ class TargetFinder:
             uniq = None
         if uniq is not True:
             tally.unique += 1
-            k = _unique_reason(uniq, before, stats)
+            k = _reason(self._name_is_unique, before, uniq, _UNIQUE_REASONS,
+                        if_false="não-único")
             tally.unique_kinds[k] = tally.unique_kinds.get(k, 0) + 1
             return None
         return Candidate(
