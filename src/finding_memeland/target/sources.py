@@ -92,7 +92,52 @@ class ChainUnavailable(RuntimeError):
     reverts. Listers let it propagate so a broken platform fails the refresh
     loudly (previous snapshot keeps serving) instead of being swallowed as
     'zero tokens' — the silently-smaller-pool failure the refresh exists to
-    refuse."""
+    refuse.
+
+    `kind` / `theirs` (30/09): WHERE it failed, for the reports only. The
+    subclasses below are still ChainUnavailable, so every existing `except`
+    and every caller's behaviour is unchanged — they only let a report say
+    "gateway 60, rpc 10" instead of one lump, and keep the NFT's own
+    defects (theirs=True) out of the count we call ours."""
+
+    kind: str = "outro"
+    theirs: bool = False
+
+
+class RpcUnavailable(ChainUnavailable):
+    """The node did not answer, or answered with an error that is not a
+    revert. Ours."""
+    kind = "rpc"
+
+
+class GatewayUnavailable(ChainUnavailable):
+    """The IPFS gateway threw (timeout, HTTP error) on the metadata. Ours —
+    or a pin nobody serves any more; one gateway cannot tell which."""
+    kind = "gateway"
+
+
+class GatewayNotJson(ChainUnavailable):
+    """The gateway answered, but not JSON: a throttle page (ours) or a CID
+    that is not metadata at all (theirs). Ambiguous, so kept apart."""
+    kind = "gateway-não-json"
+
+
+class ImageGatewaysDown(ChainUnavailable):
+    """Every gateway threw on the IMAGE probe. Ours."""
+    kind = "gateway-imagem"
+
+
+class MetadataInvalid(ChainUnavailable):
+    """The NFT's own metadata is broken: not an object, too large, an
+    undecodable `data:`, a URI of unknown scheme. Theirs."""
+    kind = "metadata-inválida"
+    theirs = True
+
+
+class TokenUriUndecodable(ChainUnavailable):
+    """tokenURI answered, but not as an ABI string. Theirs."""
+    kind = "tokenURI-ilegível"
+    theirs = True
 
 
 class ContractInvisible(RuntimeError):

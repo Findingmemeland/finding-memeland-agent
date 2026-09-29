@@ -237,6 +237,12 @@ class HarvestReport:
     series: int = 0              # nome numerado ("#123") — peça de uma série
     drops: int = 0               # contratos que mintaram muitas peças no bloco
     unavailable: int = 0         # NOSSO: o RPC ou o gateway rebentou
+    # 30/09: o mesmo número, POR ONDE falhou (rpc / gateway / gateway-não-json
+    # / outro). E os defeitos do próprio NFT que antes caíam aqui — metadata
+    # que não é um objecto, tokenURI ilegível, `data:` que não descodifica —
+    # saem para `bad_meta`: não são nossos e não se contam como nossos.
+    unavailable_kinds: dict = field(default_factory=dict)
+    bad_meta: dict = field(default_factory=dict)
     gone: int = 0                # tokenURI reverte: queimado ou inexistente
     no_name: int = 0             # metadata sem campo "name"
     uri_not_ca: dict = field(default_factory=dict)    # tokenURI fora de IPFS
@@ -258,6 +264,12 @@ class HarvestReport:
                          ("indisponível-NOSSO", self.unavailable)):
             if n:
                 parts.append(f"{label} {n}")
+        if self.unavailable and self.unavailable_kinds:
+            parts[-1] = (f"indisponível-NOSSO {self.unavailable} "
+                         f"({self._kinds(self.unavailable_kinds)})")
+        if self.bad_meta:
+            parts.append(f"metadata-inválida {sum(self.bad_meta.values())} "
+                         f"({self._kinds(self.bad_meta)})")
         if self.uri_not_ca:
             parts.append(f"tokenURI fora de IPFS ({self._kinds(self.uri_not_ca)})")
         if self.image_not_ca:
@@ -388,8 +400,13 @@ class MintHarvester:
                 tried[contract] = tried.get(contract, 0) + 1
                 try:
                     read = self._read_meta(contract, tid)
-                except Exception:  # noqa: BLE001 — NOSSO, não do NFT
-                    rep.unavailable += 1
+                except Exception as e:  # noqa: BLE001 — NOSSO, salvo se disser que não
+                    kind = getattr(e, "kind", None) or "outro"
+                    if getattr(e, "theirs", False):
+                        rep.bad_meta[kind] = rep.bad_meta.get(kind, 0) + 1
+                    else:
+                        rep.unavailable += 1
+                        rep.unavailable_kinds[kind] = rep.unavailable_kinds.get(kind, 0) + 1
                     continue
                 if read is None:
                     rep.gone += 1

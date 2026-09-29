@@ -460,6 +460,25 @@ class Tally:
     # candidate's) or we could not tell (ours / burned). EIP-7702 wallets
     # were never here — ChainRpc.is_eoa has accepted them since 06/09.
     owner_kinds: dict = field(default_factory=dict)
+    # `unavailable` again, BY WHERE (rpc / gateway / gateway-imagem / …), and
+    # the NFT's own broken metadata kept OUT of it (30/09) — see
+    # sources.ChainUnavailable.kind / .theirs.
+    unavailable_kinds: dict = field(default_factory=dict)
+    bad_meta: dict = field(default_factory=dict)
+
+    def count_unavailable(self, e: BaseException) -> None:
+        """One failed read or probe, filed by where it failed. Theirs (the
+        metadata itself is broken) goes to `bad_meta`, never to ours."""
+        kind = getattr(e, "kind", None) or "outro"
+        if getattr(e, "theirs", False):
+            self.bad_meta[kind] = self.bad_meta.get(kind, 0) + 1
+            return
+        self.note_ours(kind)
+
+    def note_ours(self, kind: str) -> None:
+        """An outage of ours at a named step — so the split always adds up."""
+        self.unavailable += 1
+        self.unavailable_kinds[kind] = self.unavailable_kinds.get(kind, 0) + 1
 
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
@@ -474,7 +493,9 @@ class Tally:
             causes = causes.replace(f"imagem {self.image}",
                                     f"imagem {self.image} ({kinds})", 1)
         for label, n, split in (("único", self.unique, self.unique_kinds),
-                                ("dono", self.owner, self.owner_kinds)):
+                                ("dono", self.owner, self.owner_kinds),
+                                ("indisponível-NOSSO", self.unavailable,
+                                 self.unavailable_kinds)):
             if split and n:
                 kinds = ", ".join(f"{k} {v}" for k, v in sorted(split.items()))
                 causes = causes.replace(f"{label} {n}", f"{label} {n} ({kinds})", 1)
@@ -482,6 +503,10 @@ class Tally:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.not_ca.items()))
             causes = (causes + ", " if causes else "") + \
                 f"imagem-fora-de-IPFS ({kinds})"
+        if self.bad_meta:
+            kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.bad_meta.items()))
+            causes = (causes + ", " if causes else "") + \
+                f"metadata-inválida {sum(self.bad_meta.values())} ({kinds})"
         return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
                 + (f" — {causes}" if causes else ""))
 
@@ -682,8 +707,9 @@ class TargetFinder:
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
             # OURS — the RPC or the gateway threw. Counting it as 'metadata'
-            # (as until 29/09) blamed the candidate for our transport.
-            tally.unavailable += 1
+            # (as until 29/09) blamed the candidate for our transport. Unless
+            # the adapter says the metadata itself is broken (30/09).
+            tally.count_unavailable(e)
             return None
         if read is None or not isinstance(read.metadata, dict) or not read.metadata:
             tally.metadata += 1
@@ -718,7 +744,7 @@ class TargetFinder:
                 raise ReadUnavailable(type(e).__name__) from None
             # The probe only RAISES when every gateway threw — ours. Until
             # 29/09 this fell through to 'imagem' and blamed the NFT.
-            tally.unavailable += 1
+            tally.count_unavailable(e)
             return None
         if not head or not head[0]:
             tally.image += 1            # Hunt #11: a perfect URI, no bytes
@@ -1126,7 +1152,7 @@ class TargetPreparer:
                                             tally, strict=True)
             except ReadUnavailable as e:
                 unavailable += 1
-                tally.unavailable += 1
+                tally.note_ours("leitura")
                 self._notify(f"prepare: leitura indisponível ({e}) — candidato "
                              "MANTIDO na despensa, tento outro")
                 if unavailable >= max_unavailable:
@@ -1167,7 +1193,7 @@ class TargetPreparer:
                     larder.consume(cand.id())
                     continue
                 unavailable += 1
-                tally.unavailable += 1
+                tally.note_ours("visão")
                 self._notify(f"prepare: visão indisponível ({why}) — candidato "
                              "MANTIDO na despensa, tento outro")
                 if unavailable >= max_unavailable:
@@ -1191,7 +1217,7 @@ class TargetPreparer:
                 # a void, and the next candidate gets its turn.
                 if _is_guard_unavailable(e):
                     unavailable += 1
-                    tally.unavailable += 1
+                    tally.note_ours("guarda")
                     self._notify(f"prepare: guarda nossa indisponível "
                                  f"({type(e).__name__}) — candidato MANTIDO "
                                  f"na despensa, tento outro · {str(e)[:220]}")

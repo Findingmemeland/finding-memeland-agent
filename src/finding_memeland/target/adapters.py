@@ -74,7 +74,17 @@ from .claim import CHAIN_ALIASES, TargetRef, _ADDR_RE, _ADDR_TID_RE, _QUERY_TID_
 from .hunt import JudgeVerdict, LiveRead
 from .refresh import TokenRead, uri_is_content_addressed
 from .selector import Target
-from .sources import SEL_OWNEROF, SEL_TOKENURI, ChainRpc, ChainUnavailable
+from .sources import (
+    SEL_OWNEROF,
+    SEL_TOKENURI,
+    ChainRpc,
+    ChainUnavailable,
+    GatewayNotJson,
+    GatewayUnavailable,
+    MetadataInvalid,
+    RpcUnavailable,
+    TokenUriUndecodable,
+)
 
 HttpGet = Callable[[str, dict], str]           # (url, headers) -> body text
 HttpPost = Callable[[str, bytes, dict], str]   # (url, body, headers) -> text
@@ -444,20 +454,22 @@ class Erc721Metadata:
             raise ValueError("ChainRpc/chain mismatch (R1)")
         try:
             data = rpc.eth_call(contract, SEL_TOKENURI + abi_uint(token_id))
-        except ChainUnavailable:
-            raise
+        except ChainUnavailable as e:
+            if type(e) is not ChainUnavailable:
+                raise                                 # already says where
+            raise RpcUnavailable(str(e)) from e
         except RpcError as e:
             if e.revert:
                 return None                           # no such token (burned)
-            raise ChainUnavailable(f"{chain}: node error, not a revert") from e
+            raise RpcUnavailable(f"{chain}: node error, not a revert") from e
         except Exception as e:  # noqa: BLE001 — a fake/other adapter raising
-            raise ChainUnavailable(f"{chain}: {type(e).__name__}") from e
+            raise RpcUnavailable(f"{chain}: {type(e).__name__}") from e
         if not data or data == "0x":
             return None                               # no return data: no token
         try:
             return decode_abi_string(data)
         except ValueError as e:
-            raise ChainUnavailable(f"tokenURI undecodable on {chain}") from e
+            raise TokenUriUndecodable(f"tokenURI undecodable on {chain}") from e
 
     def read(self, chain: str, contract: str, token_id: int) -> TokenRead | None:
         """The refresh's collaborator: raw tokenURI + resolved metadata in
@@ -476,14 +488,16 @@ class Erc721Metadata:
         rpc = self._rpcs[chain]
         try:
             data = rpc.eth_call(contract, SEL_OWNEROF + abi_uint(token_id))
-        except ChainUnavailable:
-            raise
+        except ChainUnavailable as e:
+            if type(e) is not ChainUnavailable:
+                raise
+            raise RpcUnavailable(str(e)) from e
         except RpcError as e:
             if e.revert:
                 return None
-            raise ChainUnavailable(f"{chain}: node error, not a revert") from e
+            raise RpcUnavailable(f"{chain}: node error, not a revert") from e
         except Exception as e:  # noqa: BLE001
-            raise ChainUnavailable(f"{chain}: {type(e).__name__}") from e
+            raise RpcUnavailable(f"{chain}: {type(e).__name__}") from e
         return address_from_word(data)
 
     def read_live(self, chain: str, contract: str, token_id: int) -> LiveRead:
@@ -504,24 +518,24 @@ class Erc721Metadata:
         if uri.lower().startswith("data:"):
             doc = decode_data_uri(uri)
             if doc is None:
-                raise ChainUnavailable("data: URI undecodable")
+                raise MetadataInvalid("data: URI undecodable")
             return doc
         url = gateway_url(uri, self._gateway)
         if url is None:
-            raise ChainUnavailable("token URI of unknown scheme")
+            raise MetadataInvalid("token URI of unknown scheme")
         try:
             text = self._get(url, {"Accept": "application/json"})
         except Exception as e:  # noqa: BLE001
-            raise ChainUnavailable(f"gateway: {type(e).__name__}") from e
+            raise GatewayUnavailable(f"gateway: {type(e).__name__}") from e
         if len(text) > self._max:
-            raise ChainUnavailable("metadata body too large")
+            raise MetadataInvalid("metadata body too large")
         try:
             doc = json.loads(text)
         except ValueError as e:
             # a 200 with an HTML throttle page must NOT read as burned
-            raise ChainUnavailable("gateway answered non-JSON") from e
+            raise GatewayNotJson("gateway answered non-JSON") from e
         if not isinstance(doc, dict):
-            raise ChainUnavailable("metadata is not an object")
+            raise MetadataInvalid("metadata is not an object")
         return doc
 
 

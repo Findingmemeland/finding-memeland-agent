@@ -94,7 +94,7 @@ from .sources import (
     EPOCH1_CHAINS,
     EPOCH1_STRATA,
     ChainEoaCheck,
-    ChainUnavailable,
+    ImageGatewaysDown,
     RegistryStore,
 )
 
@@ -702,7 +702,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                 return head, size
         if tried and errors == tried:
             # every host we asked threw: ours, not the candidate's
-            raise ChainUnavailable(f"no gateway answered ({errors} tried)")
+            raise ImageGatewaysDown(f"no gateway answered ({errors} tried)")
         return None
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
