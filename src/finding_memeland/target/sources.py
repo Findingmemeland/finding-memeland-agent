@@ -127,8 +127,37 @@ class GatewayNotJson(ChainUnavailable):
 
 
 class ImageGatewaysDown(ChainUnavailable):
-    """Every gateway threw on the IMAGE probe. Ours."""
+    """No gateway served the IMAGE, and none answered about the content
+    itself: timeouts, 5xx, an empty body, an HTML page. Ours — Pedro's rule
+    (29/09), the metadata's: the candidate stays in the larder."""
     kind = "gateway-imagem"
+
+
+class ImagePinGone(ChainUnavailable):
+    """No gateway served the image, and at least one said CLEARLY that it
+    does not have it (HTTP 404/410). Theirs — /prepare drops the candidate."""
+    kind = "pin-morto"
+    theirs = True
+
+
+class ImageUnusable(ChainUnavailable):
+    """A gateway served the image's bytes, and they are clearly something
+    vision cannot use — a video, a PDF, an SVG, or bigger than we download.
+    The CONTENT's answer (no throttle page is an mp4). Theirs; `kind` names
+    what it is."""
+    theirs = True
+
+    def __init__(self, kind: str):
+        super().__init__(f"not a still image: {kind}")
+        self.kind = kind
+
+
+class ArtworkUnreadable(ChainUnavailable):
+    """The full artwork was served and sniffs as an image, but would not
+    open or shrink for vision. A corrupt file (theirs) or a read of ours
+    that cut it short — the /prepare transport stops at 5 MB. Ambiguous, so
+    ours by Pedro's rule (29/09): the candidate stays."""
+    kind = "arte-ilegível"
 
 
 class MetadataInvalid(ChainUnavailable):

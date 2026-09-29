@@ -76,7 +76,12 @@ from typing import Callable, Sequence
 from .commitment import compute_commitment_v2, generate_salt
 from .refresh import content_id, image_uri_kind, uri_is_content_addressed, uri_kind
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
-from .sources import MetadataPinGone
+from .sources import ImagePinGone, ImageUnusable, MetadataPinGone
+
+# The image verdicts that are the CONTENT's answer (Pedro, 29/09): a gateway
+# said 404/410, or served bytes that are clearly not a still image. Only these
+# spend a candidate in /prepare; every other image failure keeps it.
+_IMAGE_VERDICTS = (ImagePinGone, ImageUnusable)
 
 # --------------------------------------------------------------------------- #
 # Sources                                                                      #
@@ -736,18 +741,23 @@ class TargetFinder:
         EOA, the name is unique. Uniqueness LAST: it is the only paid call,
         so nothing that a free check can kill ever spends one.
 
-        `strict`: see named_token. Note what it does NOT cover — a probe
-        that ANSWERS with no bytes is a dead pin, and that is the candidate's
-        fault, not ours (Hunt #11). Only a throw is ours."""
+        `strict`: see named_token. Note what it does NOT cover — the probe's
+        verdicts about the CONTENT (a 404/410, bytes that are not a still
+        image) and a probe that returns no bytes are the candidate's fault,
+        not ours (Hunt #11; Pedro, 29/09). Every other throw is ours."""
         meta = read.metadata
         image_uri = str(meta.get("image") or "")
         try:
             head = self._probe_image(image_uri)
+        except _IMAGE_VERDICTS as e:
+            tally.image += 1
+            tally.image_kinds[e.kind] = tally.image_kinds.get(e.kind, 0) + 1
+            return None
         except Exception as e:  # noqa: BLE001
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
-            # The probe only RAISES when every gateway threw — ours. Until
-            # 29/09 this fell through to 'imagem' and blamed the NFT.
+            # Every gateway failed without a word about the content — ours.
+            # Until 29/09 this fell through to 'imagem' and blamed the NFT.
             tally.count_unavailable(e)
             return None
         if not head or not head[0]:
@@ -1169,7 +1179,29 @@ class TargetPreparer:
                 larder.consume(cand.id())
                 continue
 
-            target_bytes = self._fetch_image(fresh.image)
+            try:
+                target_bytes = self._fetch_image(fresh.image)
+            except _IMAGE_VERDICTS as e:
+                tally.image += 1
+                tally.image_kinds[e.kind] = tally.image_kinds.get(e.kind, 0) + 1
+                self._notify(f"prepare: a arte não serve ({e.kind}) — "
+                             "candidato descartado, tento outro")
+                larder.consume(cand.id())
+                continue
+            except Exception as e:  # noqa: BLE001 — ours: the candidate stays
+                # Pedro's rule (29/09): timeouts, 5xx, a page that is not the
+                # artwork, bytes that will not open — none of it is an answer
+                # about the content. Until 29/09 this path spent the target.
+                unavailable += 1
+                tally.count_unavailable(e)
+                self._notify(f"prepare: arte indisponível ({type(e).__name__}) "
+                             "— candidato MANTIDO na despensa, tento outro")
+                if unavailable >= max_unavailable:
+                    raise PrepareRefused(
+                        f"{unavailable} falhas seguidas por nossa causa "
+                        "(gateway/visão/RPC) — despensa INTACTA. Tenta daqui "
+                        "a pouco.") from None
+                continue
             if not target_bytes:
                 tally.image += 1
                 larder.consume(cand.id())

@@ -29,6 +29,7 @@ from .adapters import (
     Erc721Metadata,
     FailoverMetadata,
     GenericMetadata,
+    _http_status,
     JsonRpc,
     MarketplaceLinkResolver,
     OpenSeaChainProbe,
@@ -94,8 +95,11 @@ from .sources import (
     EPOCH1_CAP_EXEMPT,
     EPOCH1_CHAINS,
     EPOCH1_STRATA,
+    ArtworkUnreadable,
     ChainEoaCheck,
     ImageGatewaysDown,
+    ImagePinGone,
+    ImageUnusable,
     RegistryStore,
 )
 
@@ -409,6 +413,22 @@ def _media_kind(data: bytes) -> str:
     return "unknown"
 
 
+# What a gateway can serve INSTEAD of a still image that is the CONTENT's own
+# answer, never the gateway's: no throttle page is an mp4 (Pedro's rule, 29/09).
+_NOT_STILL = frozenset({"video/mp4", "video/webm", "pdf", "svg"})
+
+
+def _not_a_still_image(data: bytes) -> str | None:
+    """The media kind when the bytes are clearly some OTHER content; None when
+    they could be a gateway's own page — empty, HTML, unknown. Those are ours."""
+    if not data:
+        return None
+    kind = _media_kind(data)
+    if kind == "svg" and b"<svg" not in data[:8192].lower():
+        return None            # `<?xml` alone could be an XML error page
+    return kind if kind in _NOT_STILL else None
+
+
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                  http_get_range=None, http_get_fallback=None,
                  get_artwork_bytes=None, solver=None,
@@ -702,10 +722,44 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                    http_get=http_get,
                                    fallback_get=http_get_fallback)
 
+    def ask_every_gateway(uri: str, fetch, head_of):
+        """Every gateway, in order, until one serves a still image — what
+        `fetch(url)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
+        the metadata's rule: the candidate is blamed only when a gateway
+        answers about the content itself.
+
+          · bytes that are clearly not a still image → ImageUnusable (theirs)
+          · a 404/410                                  → ImagePinGone (theirs)
+          · timeouts, 5xx, empty, HTML, anything else  → ImageGatewaysDown (OURS)
+
+        Until 29/09 one HTML page among timeouts made a dead pin (and /prepare
+        spent the target), while a 404 on every gateway kept it."""
+        urls = list(dict.fromkeys(u for u in (gateway_url(uri, g)
+                                              for g in probe_gateways) if u))
+        gone, unusable = 0, []
+        for url in urls:
+            try:
+                got = fetch(url)
+            except Exception as e:  # noqa: BLE001 — this host; try the next
+                if _http_status(e) in (404, 410):
+                    gone += 1
+                continue
+            head = head_of(got)
+            if head and sniff_media_type(head) is not None:
+                return got
+            kind = _not_a_still_image(head)
+            if kind:
+                unusable.append(kind)
+        if unusable:
+            raise ImageUnusable(unusable[0])
+        if gone:
+            raise ImagePinGone(f"{gone} of {len(urls)} gateway(s) said 404/410")
+        raise ImageGatewaysDown(f"no gateway served an image ({len(urls)} tried)")
+
     def probe_image(uri: str):
         """RANGED read: the first few KB plus the size. Proves the bytes are
         there (Hunt #11) without pulling a 15 MB artwork. Tried across every
-        gateway we have before a pin is called dead."""
+        gateway we have; the verdict is `ask_every_gateway`'s."""
         # IMAGEM NA CADEIA (29/09): não há gateway a quem perguntar — os
         # bytes estão na própria string. Antes daqui, `gateway_url` devolvia
         # None, o ciclo saltava todos os gateways, e um NFT on-chain era
@@ -714,25 +768,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         if (uri or "").strip().lower().startswith("data:"):
             return probe_inline_image(uri, max_bytes=MAX_IMAGE_BYTES,
                                       probe_bytes=PROBE_BYTES)
-        errors = 0
-        tried = 0
-        for gw in probe_gateways:
-            url = gateway_url(uri, gw)
-            if url is None:
-                continue
-            tried += 1
-            try:
-                got = ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"})
-            except Exception:  # noqa: BLE001 — this host, not the pin
-                errors += 1
-                continue
-            head, size = got if isinstance(got, tuple) else (got, 0)
-            if head and sniff_media_type(head) is not None:
-                return head, size
-        if tried and errors == tried:
-            # every host we asked threw: ours, not the candidate's
-            raise ImageGatewaysDown(f"no gateway answered ({errors} tried)")
-        return None
+        got = ask_every_gateway(
+            uri, lambda url: ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"}),
+            lambda g: g[0] if isinstance(g, tuple) else g)
+        return got if isinstance(got, tuple) else (got, 0)
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
     # called enumerable_sources() here and made boot depend on an RPC round
@@ -767,20 +806,16 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         # isto, um NFT on-chain que passasse o depósito morria aqui.
         if (uri or "").strip().lower().startswith("data:"):
             return inline_artwork(uri, max_bytes=MAX_IMAGE_BYTES)
-        for gw in probe_gateways:            # same rotation as the probe
-            url = gateway_url(uri, gw)
-            if url is None:
-                continue
-            try:
-                data = get_art(url, {})
-            except Exception:  # noqa: BLE001 — try the next host
-                continue
-            if not data or len(data) > MAX_IMAGE_BYTES:
-                continue
-            if sniff_media_type(data) is None:
-                continue
-            return shrink_for_vision(data)
-        return None
+        # Same rotation and same verdicts as the probe (29/09). Until then,
+        # timeouts on every gateway returned None here and /prepare SPENT
+        # the target — the one thing Pedro's rule forbids.
+        data = ask_every_gateway(uri, lambda url: get_art(url, {}), lambda d: d)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ImageUnusable("tamanho")
+        shrunk = shrink_for_vision(data)
+        if shrunk is None:
+            raise ArtworkUnreadable(f"{len(data):,} bytes would not open")
+        return shrunk
 
     def write_clue_one(target, description: str):
         """Clue 1, written and put through every guard, ON THE DAY BEFORE.
