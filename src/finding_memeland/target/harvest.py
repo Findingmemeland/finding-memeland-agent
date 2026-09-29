@@ -49,6 +49,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
+from .refresh import uri_is_content_addressed, uri_kind
 from .selector import name_qualifies, normalize_name
 
 # keccak256("Transfer(address,address,uint256)") — o mesmo que o holdings.py
@@ -185,18 +186,44 @@ class HarvestBlind(RuntimeError):
 
 @dataclass
 class HarvestReport:
+    """O que a colheita viu, POR CAUSA.
+
+    Até 29/09 havia um só "ilegíveis", e na primeira corrida real ele valia
+    1297 em 2675 mints sem que se soubesse o que era: RPC em baixo (nosso),
+    token queimado, metadata num servidor HTTP, metadata em Arweave. Quatro
+    coisas com quatro respostas diferentes — uma delas (o Arweave) é uma
+    decisão de produto pendente que só se toma com este número à frente."""
+
     blocks: int = 0
     mints: int = 0
     named: int = 0
     kept: int = 0
-    unreadable: int = 0          # tokenURI/metadata não respondeu
     rejected_name: int = 0
+    unavailable: int = 0         # NOSSO: o RPC ou o gateway rebentou
+    gone: int = 0                # tokenURI reverte: queimado ou inexistente
+    no_name: int = 0             # metadata sem campo "name"
+    uri_not_ca: dict = field(default_factory=dict)    # tokenURI fora de IPFS
+    image_not_ca: dict = field(default_factory=dict)  # imagem fora de IPFS
     contracts: set = field(default_factory=set)
 
+    @staticmethod
+    def _kinds(d: dict) -> str:
+        return ", ".join(f"{k} {v}" for k, v in sorted(d.items()))
+
     def render(self) -> str:
-        return (f"{self.kept} alvo(s) de {self.contracts.__len__()} contrato(s) "
-                f"· {self.blocks} bloco(s), {self.mints} mint(s) · "
-                f"nome recusado {self.rejected_name} · ilegíveis {self.unreadable}")
+        parts = [f"{self.kept} alvo(s) de {len(self.contracts)} contrato(s)",
+                 f"{self.blocks} bloco(s), {self.mints} mint(s)"]
+        for label, n in (("nome recusado", self.rejected_name),
+                         ("sem nome", self.no_name),
+                         ("queimados", self.gone),
+                         ("indisponível-NOSSO", self.unavailable)):
+            if n:
+                parts.append(f"{label} {n}")
+        if self.uri_not_ca:
+            parts.append(f"tokenURI fora de IPFS ({self._kinds(self.uri_not_ca)})")
+        if self.image_not_ca:
+            parts.append(f"imagem fora de IPFS ({self._kinds(self.image_not_ca)})")
+        return " · ".join(parts)
 
 
 class MintHarvester:
@@ -205,14 +232,15 @@ class MintHarvester:
     Portas injectadas, todas levantando em falha de transporte:
       latest_block()                    -> int
       get_logs(from_block, to_block)    -> [log]   (já filtrado por Transfer)
-      read_name(contract, token_id)     -> str | None
+      read_meta(contract, token_id)     -> TokenRead | None
+          (None = tokenURI reverte; metadata None = URI fora de IPFS)
 
     `canary_block` e `canary_mints` são MEDIDOS quando o bloco é fixado,
     nunca estimados, e a igualdade é exacta — um provedor que trunca a
     resposta em silêncio devolve uma página parcial e passaria um teste de
     ">= 1" com folga."""
 
-    def __init__(self, *, chain: str, latest_block, get_logs, read_name,
+    def __init__(self, *, chain: str, latest_block, get_logs, read_meta,
                  canary_block: int = 0, canary_mints: int = 0,
                  span_start: int = 1,
                  rng: random.Random | None = None,
@@ -222,7 +250,7 @@ class MintHarvester:
         self._chain = chain
         self._latest = latest_block
         self._get_logs = get_logs
-        self._read_name = read_name
+        self._read_meta = read_meta
         self._canary = int(canary_block)
         self._canary_mints = int(canary_mints)
         self._span_start = max(1, int(span_start))
@@ -305,13 +333,35 @@ class MintHarvester:
                     continue
                 tried[contract] = tried.get(contract, 0) + 1
                 try:
-                    name = self._read_name(contract, tid)
-                except Exception:  # noqa: BLE001
-                    rep.unreadable += 1
+                    read = self._read_meta(contract, tid)
+                except Exception:  # noqa: BLE001 — NOSSO, não do NFT
+                    rep.unavailable += 1
                     continue
+                if read is None:
+                    rep.gone += 1
+                    continue
+                meta = read.metadata
+                if not isinstance(meta, dict):
+                    # O leitor só resolve URIs endereçados por conteúdo;
+                    # os outros voltam com metadata None. Conta-se o tipo.
+                    k = uri_kind(read.token_uri)
+                    rep.uri_not_ca[k] = rep.uri_not_ca.get(k, 0) + 1
+                    continue
+                # A IMAGEM também tem de estar em IPFS (29/09). O depósito
+                # exige-o, e sem esta verificação aqui a primeira corrida
+                # passou-lhe 143 candidatos que ele recusou todos — cada um
+                # com leituras gastas dos dois lados. Não custa rede: é só
+                # olhar para a string que já temos.
+                image = str(meta.get("image") or "")
+                if not uri_is_content_addressed(image):
+                    k = uri_kind(image)
+                    rep.image_not_ca[k] = rep.image_not_ca.get(k, 0) + 1
+                    continue
+                name = meta.get("name")
                 if not name:
-                    rep.unreadable += 1
+                    rep.no_name += 1
                     continue
+                name = str(name)
                 rep.named += 1
                 if not name_is_cluable(name, min_words=self._min_words):
                     rep.rejected_name += 1

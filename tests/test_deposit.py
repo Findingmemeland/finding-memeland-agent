@@ -104,7 +104,45 @@ def test_metadata_that_is_not_content_addressed_is_refused():
         metadata=_meta(image="https://example.com/1.png")))
     lar = Larder()
     rep = f.deposit(lar, [f"base:{B}:42"], chain_ok=_ok)
-    assert rep.added == 0 and rep.rejected.metadata == 1 and lar.size() == 0
+    assert rep.added == 0 and lar.size() == 0
+    # Contado pelo TIPO de URI da imagem, e NÃO como 'metadata' (29/09):
+    # misturados, "a imagem está num servidor HTTP" e "o RPC falhou" eram o
+    # mesmo número, e a primeira colheita real não se conseguia ler.
+    assert rep.rejected.not_ca == {"http": 1}
+    assert rep.rejected.metadata == 0
+
+
+def test_our_rpc_failing_is_not_blamed_on_the_candidate():
+    """R8 no depósito: uma leitura que rebenta é NOSSA. Antes contava como
+    'metadata' e dizia ao operador que o NFT não prestava."""
+    f, _ = _finder()
+
+    def boom(chain, contract, tid):
+        raise ConnectionError("rpc down")
+    f._read_token = boom
+    rep = f.deposit(Larder(), [f"base:{B}:1"], chain_ok=_ok)
+    assert rep.added == 0
+    assert rep.rejected.unavailable == 1 and rep.rejected.metadata == 0
+
+
+def test_every_gateway_failing_is_ours_not_a_dead_pin():
+    """O probe só LEVANTA quando todos os gateways rebentaram — isso é
+    nosso. Um pin morto é o gateway a RESPONDER sem bytes. Antes, os dois
+    eram 'imagem'."""
+    f, _ = _finder()
+
+    def boom(uri):
+        raise ConnectionError("all gateways down")
+    f._probe_image = boom
+    rep = f.deposit(Larder(), [f"base:{B}:1"], chain_ok=_ok)
+    assert rep.rejected.unavailable == 1 and rep.rejected.image == 0
+
+
+def test_the_deposit_report_shows_the_split_causes():
+    f, _ = _finder(read=TokenRead(
+        token_uri=IPFS, metadata=_meta(image="https://arweave.net/xyz")))
+    rep = f.deposit(Larder(), [f"base:{B}:1"], chain_ok=_ok)
+    assert "imagem-fora-de-IPFS (arweave 1)" in rep.render()
 
 
 def test_a_one_word_name_is_refused():

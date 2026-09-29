@@ -33,10 +33,12 @@ import pytest
 from finding_memeland.target.harvest import (
     TRANSFER_TOPIC,
     HarvestBlind,
+    HarvestReport,
     MintHarvester,
     mints_in_logs,
     name_is_cluable,
 )
+from finding_memeland.target.refresh import TokenRead
 
 A = "0x" + "aa" * 20
 B = "0x" + "bb" * 20
@@ -107,8 +109,19 @@ def test_a_malformed_log_does_not_kill_the_batch():
 # --------------------------------------------------------------------------- #
 
 
+IPFS_URI = "ipfs://bafkre" + "a" * 50
+IPFS_IMG = "ipfs://bafyimg" + "b" * 50
+
+
+def _read(name="Grease Pencil Gospel", image=IPFS_IMG, token_uri=IPFS_URI):
+    return TokenRead(token_uri=token_uri,
+                     metadata={"name": name, "image": image})
+
+
 def _harv(*, logs_by_block=None, canary_block=100, canary_mints=1,
-          names=None, seed=0, raise_on=()):
+          names=None, reads=None, seed=0, raise_on=()):
+    """`names` troca só o nome; `reads` substitui a leitura inteira — um
+    TokenRead, None (token queimado) ou uma excepção (o nosso RPC)."""
     calls = {"logs": [], "names": []}
 
     def get_logs(a, b):
@@ -117,13 +130,19 @@ def _harv(*, logs_by_block=None, canary_block=100, canary_mints=1,
             raise RuntimeError("rpc down")
         return (logs_by_block or {}).get(a, [])
 
-    def read_name(contract, tid):
+    def read_meta(contract, tid):
         calls["names"].append((contract, tid))
-        return (names or {}).get((contract, tid), "Grease Pencil Gospel")
+        if reads and (contract, tid) in reads:
+            r = reads[(contract, tid)]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        return _read(name=(names or {}).get((contract, tid),
+                                            "Grease Pencil Gospel"))
 
     h = MintHarvester(
         chain="ethereum", latest_block=lambda: 1_000_000,
-        get_logs=get_logs, read_name=read_name,
+        get_logs=get_logs, read_meta=read_meta,
         canary_block=canary_block, canary_mints=canary_mints,
         rng=random.Random(seed))
     return h, calls
@@ -285,17 +304,73 @@ def test_a_long_run_reports_progress():
     assert len(progress) == 3
 
 
-def test_an_unreadable_token_is_counted_not_guessed():
-    """R8: 'não conseguimos ler' nunca é 'não presta'."""
+def _one_mint(read):
+    """Um bloco com um só mint de B:3, cuja leitura é `read`."""
     h, _ = _harv(logs_by_block={100: [_mint()], 7: [_mint(B, 3)]},
-                 names={(B, 3): None}, canary_mints=1)
+                 reads={(B, 3): read}, canary_mints=1)
 
     class _R:
         def randrange(self, lo, hi):
             return 7
     h._rng = _R()
-    refs, rep = h.harvest(1)
-    assert refs == [] and rep.unreadable == 1 and rep.rejected_name == 0
+    return h.harvest(1)
+
+
+# O "ilegíveis" da primeira corrida real eram 1297 mints em 2675 sem causa
+# nenhuma. Cada uma destas é uma causa diferente com uma resposta diferente.
+
+
+def test_our_rpc_failing_is_ours_never_the_nft_s():
+    """R8: 'não conseguimos ler' nunca é 'não presta'."""
+    refs, rep = _one_mint(ConnectionError("rpc down"))
+    assert refs == [] and rep.unavailable == 1
+    assert rep.gone == 0 and not rep.uri_not_ca
+
+
+def test_a_burned_token_is_counted_as_gone():
+    refs, rep = _one_mint(None)
+    assert refs == [] and rep.gone == 1 and rep.unavailable == 0
+
+
+def test_a_token_uri_outside_ipfs_is_counted_by_kind():
+    """Arweave separado de HTTP: é o número que decide se o Arweave passa
+    a ser aceite — decisão do Pedro, pendente desta medição."""
+    refs, rep = _one_mint(TokenRead(token_uri="ar://abcdef", metadata=None))
+    assert refs == [] and rep.uri_not_ca == {"arweave": 1}
+    refs, rep = _one_mint(TokenRead(token_uri="https://api.x.io/1", metadata=None))
+    assert rep.uri_not_ca == {"http": 1}
+
+
+def test_an_image_outside_ipfs_is_refused_here_not_in_the_deposit():
+    """O DEFEITO DA PRIMEIRA CORRIDA: o colector só olhava para o nome, e
+    passou ao depósito 143 candidatos que ele recusou todos. A imagem vê-se
+    na string que já temos — sem rede."""
+    refs, rep = _one_mint(_read(image="https://cdn.example.com/1.png"))
+    assert refs == [] and rep.image_not_ca == {"http": 1}
+    refs, rep = _one_mint(_read(image="https://arweave.net/abc"))
+    assert rep.image_not_ca == {"arweave": 1}
+
+
+def test_metadata_without_a_name_is_counted_apart():
+    refs, rep = _one_mint(_read(name=None))
+    assert refs == [] and rep.no_name == 1 and rep.rejected_name == 0
+
+
+def test_a_good_token_still_goes_through():
+    refs, rep = _one_mint(_read())
+    assert refs == [f"ethereum:{B}:3"] and rep.kept == 1
+
+
+def test_the_report_names_every_cause_it_saw():
+    """O relatório é o que chega ao Telegram. Se uma causa aconteceu e não
+    aparece, voltamos a ter um 'ilegíveis' mudo."""
+    rep = HarvestReport(unavailable=2, gone=3, no_name=1,
+                        uri_not_ca={"arweave": 4, "http": 5},
+                        image_not_ca={"http": 6})
+    out = rep.render()
+    for bit in ("indisponível-NOSSO 2", "queimados 3", "sem nome 1",
+                "arweave 4", "http 5", "imagem fora de IPFS (http 6)"):
+        assert bit in out, bit
 
 
 def test_a_lost_block_does_not_abort_the_run():

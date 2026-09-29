@@ -74,7 +74,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
-from .refresh import content_id, uri_is_content_addressed
+from .refresh import content_id, uri_is_content_addressed, uri_kind
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
 
 # --------------------------------------------------------------------------- #
@@ -381,9 +381,9 @@ class Tally:
     a cause that dominates is a named symptom instead of a 40-hour census."""
 
     draws: int = 0
-    metadata: int = 0        # tokenURI reverts, or is not content-addressed
+    metadata: int = 0        # tokenURI reverts, or metadata came back empty
     name: int = 0            # base name has fewer than two real words
-    image: int = 0           # the image did not come back as bytes
+    image: int = 0           # the gateway ANSWERED without bytes (dead pin)
     too_big: int = 0         # bigger than vision can use (171 MB, measured)
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
     unique: int = 0          # another piece carries the same base name
@@ -395,8 +395,15 @@ class Tally:
     blind: int = 0           # vision refused the bytes (4xx / empty answer)
     unwritable: int = 0      # guards exhausted: no clue can be written here
     no_index: int = 0        # the marketplace index cannot see this piece
-    unavailable: int = 0     # OURS (gateway/RPC/guard down) — candidate KEPT
+    unavailable: int = 0     # OURS (gateway/RPC down) — never the candidate's
     found: int = 0
+    # The IMAGE is not content-addressed, BY KIND (http / arweave / …).
+    # 29/09: this used to be folded into `metadata`, together with "the read
+    # failed" (ours) and "the metadata was empty" (theirs). The first real
+    # /harvest threw away 143 candidates under 'metadata' and 'imagem' and
+    # nobody could say whether the cause was the NFTs or us. Three causes
+    # that call for three different responses cannot share one number.
+    not_ca: dict = field(default_factory=dict)
 
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
@@ -406,6 +413,10 @@ class Tally:
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
             ("sem-pista", self.unwritable), ("sem-índice", self.no_index),
             ("indisponível-NOSSO", self.unavailable)) if v)
+        if self.not_ca:
+            kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.not_ca.items()))
+            causes = (causes + ", " if causes else "") + \
+                f"imagem-fora-de-IPFS ({kinds})"
         return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
                 + (f" — {causes}" if causes else ""))
 
@@ -605,14 +616,18 @@ class TargetFinder:
         except Exception as e:  # noqa: BLE001 — this draw, not the run
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
-            tally.metadata += 1
+            # OURS — the RPC or the gateway threw. Counting it as 'metadata'
+            # (as until 29/09) blamed the candidate for our transport.
+            tally.unavailable += 1
             return None
         if read is None or not isinstance(read.metadata, dict) or not read.metadata:
             tally.metadata += 1
             return None
         meta = read.metadata
-        if not uri_is_content_addressed(str(meta.get("image") or "")):
-            tally.metadata += 1
+        image = str(meta.get("image") or "")
+        if not uri_is_content_addressed(image):
+            kind = uri_kind(image)
+            tally.not_ca[kind] = tally.not_ca.get(kind, 0) + 1
             return None
         base = normalize_name(str(meta.get("name") or "").strip())
         if not name_qualifies(base, min_words=self._min_words):
@@ -636,7 +651,10 @@ class TargetFinder:
         except Exception as e:  # noqa: BLE001
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
-            head = None
+            # The probe only RAISES when every gateway threw — ours. Until
+            # 29/09 this fell through to 'imagem' and blamed the NFT.
+            tally.unavailable += 1
+            return None
         if not head or not head[0]:
             tally.image += 1            # Hunt #11: a perfect URI, no bytes
             return None

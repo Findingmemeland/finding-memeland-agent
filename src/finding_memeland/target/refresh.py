@@ -74,6 +74,28 @@ def uri_is_content_addressed(uri: str | None) -> bool:
     return bool(_IPFS_GATEWAY_PATH.match(u))
 
 
+def uri_kind(uri: str | None) -> str:
+    """Que tipo de URI é um que NÃO passou em `uri_is_content_addressed`.
+
+    Serve para CONTAR, não para decidir (29/09). A primeira colheita real
+    deitou fora 143 candidatos sem que se soubesse porquê, e havia uma
+    pergunta pendente que só números respondem: quantos morrem por estarem
+    em Arweave? O Arweave também é imutável — o id da transacção é o hash
+    do conteúdo — mas hoje não é aceite. Separar os tipos é o que deixa o
+    Pedro decidir isso com a medição à frente, em vez de com um palpite.
+
+    Não muda o que se aceita. `uri_is_content_addressed` continua a ser a
+    única porta."""
+    u = (uri or "").strip().lower()
+    if not u:
+        return "vazio"
+    if u.startswith("ar://") or "arweave.net/" in u or "arweave.dev/" in u:
+        return "arweave"
+    if u.startswith("http://") or u.startswith("https://"):
+        return "http"
+    return "outro"
+
+
 _CID_PATH = re.compile(r"(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-zA-Z0-9]{20,})((?:/[^?#]*)?)")
 
 

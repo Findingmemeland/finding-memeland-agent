@@ -796,17 +796,16 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             return node.get_logs(from_block=a, to_block=b,
                                  topics=[TRANSFER_TOPIC, ZERO_TOPIC])
 
-        def _name(contract: str, tid: int, chain=chain) -> str | None:
-            read = keyed_meta.read(chain, contract, tid)
-            if read is None or not isinstance(read.metadata, dict):
-                return None      # revert, ou URI não endereçado por conteúdo
-            name = read.metadata.get("name")
-            return str(name) if name else None
+        def _meta(contract: str, tid: int, chain=chain):
+            # A leitura INTEIRA, não só o nome (29/09): o colector precisa
+            # de ver a imagem e de distinguir "queimado" de "fora de IPFS"
+            # de "o RPC falhou" — três causas que antes eram um "ilegível".
+            return keyed_meta.read(chain, contract, tid)
 
         block, mints = parse_canary(canaries.get(chain, ""))
         harvesters[chain] = MintHarvester(
             chain=chain, latest_block=_latest, get_logs=_logs,
-            read_name=_name, canary_block=block, canary_mints=mints,
+            read_meta=_meta, canary_block=block, canary_mints=mints,
             span_start=HARVEST_SPAN_START.get(chain, 1), rng=rng)
 
     return TargetWiring(finder=finder, larder_store=larder_store,

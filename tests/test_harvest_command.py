@@ -241,7 +241,7 @@ def test_blocks_are_drawn_from_the_chain_s_span_start():
         return []
 
     h = MintHarvester(chain="ethereum", latest_block=lambda: 10_000,
-                      get_logs=get_logs, read_name=lambda c, t: None,
+                      get_logs=get_logs, read_meta=lambda c, t: None,
                       canary_block=0, canary_mints=0, span_start=9_000,
                       rng=random.Random(0))
     h.canary_passes = lambda: True          # o canário tem teste próprio
