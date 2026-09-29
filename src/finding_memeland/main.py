@@ -96,6 +96,46 @@ def _http_get_artwork(url: str, headers: dict | None = None) -> bytes:
         return r.read(MAX_ARTWORK_BYTES + 1)
 
 
+# The FULL artwork for /prepare (30/09) — what vision describes, not the
+# reveal's picture. Since 16/09 it went through _http_get_artwork above (10 s,
+# 5 MB cap): anything bigger arrived cut short and would not open. Here: the
+# larder's own ceiling (MAX_IMAGE_BYTES, 24 MB), 60 s per network wait
+# (IMAGE_FETCH_TIMEOUT_S), and a total deadline so a gateway that drips bytes
+# cannot hold /prepare for ever. 24 MB in 180 s is ~140 KB/s at the slowest.
+LARDER_ART_DEADLINE_S = 180
+
+
+def _http_get_larder_art(url: str, headers: dict | None = None) -> bytes:
+    """Reads at most MAX_IMAGE_BYTES + 1, so the caller refuses size by
+    size — the 171 MB piece is never downloaded whole. Redirects are
+    followed, as in the probe: the URL is one of our gateways, and a
+    gateway may hand the CID to its subdomain host."""
+    import time
+    import urllib.request
+
+    from .target import wiring
+
+    cap = wiring.MAX_IMAGE_BYTES + 1
+    req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
+                                               **(headers or {})})
+    deadline = time.monotonic() + LARDER_ART_DEADLINE_S
+    chunks: list[bytes] = []
+    got = 0
+    with urllib.request.urlopen(req, timeout=IMAGE_FETCH_TIMEOUT_S) as r:
+        while got < cap:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"artwork incomplete after {LARDER_ART_DEADLINE_S} s "
+                                   f"({got:,} bytes)")
+            # read1: at most ONE network read, so the deadline is checked
+            # between reads — read(n) would wait for all n bytes.
+            chunk = r.read1(min(1 << 20, cap - got))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    return b"".join(chunks)
+
+
 def _http_get_range(url: str, headers: dict | None = None) -> tuple[bytes, int]:
     """A RANGED read for the larder's image probe: a few KB and a short
     timeout. Proving that an artwork's bytes exist (Hunt #11) must not cost
@@ -384,6 +424,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
             target_wiring = build_target(
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
                 http_get_range=_http_get_range, http_get_fallback=_http_get_fallback,
+                http_get_larder_art=_http_get_larder_art,
                 http_post=_http_post, http_get_bytes=_http_get_image_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
                 progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),

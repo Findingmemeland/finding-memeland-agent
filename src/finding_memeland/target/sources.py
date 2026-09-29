@@ -155,8 +155,9 @@ class ImageUnusable(ChainUnavailable):
 class ArtworkUnreadable(ChainUnavailable):
     """The full artwork was served and sniffs as an image, but would not
     open or shrink for vision. A corrupt file (theirs) or a read of ours
-    that cut it short — the /prepare transport stops at 5 MB. Ambiguous, so
-    ours by Pedro's rule (29/09): the candidate stays."""
+    that cut it short — until 30/09 the /prepare transport stopped at 5 MB;
+    now at the 24 MB ceiling, over which the file is refused by size.
+    Ambiguous, so ours by Pedro's rule (29/09): the candidate stays."""
     kind = "arte-ilegível"
 
 

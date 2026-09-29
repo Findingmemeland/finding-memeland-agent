@@ -73,7 +73,7 @@ def _fetch(**hosts):
     w = build_target(settings(), anthropic=object(), repo=FakeRepo(),
                      http_get=lambda u, h: "{}", http_post=rpc_ok,
                      http_get_bytes=lambda u, h: b"",
-                     get_artwork_bytes=_by_host(**hosts))
+                     http_get_larder_art=_by_host(**hosts))
     return w.larder_preparer._fetch_image(URI)                     # noqa: SLF001
 
 

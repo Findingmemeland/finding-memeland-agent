@@ -431,6 +431,7 @@ def _not_a_still_image(data: bytes) -> str | None:
 
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                  http_get_range=None, http_get_fallback=None,
+                 http_get_larder_art=None,
                  get_artwork_bytes=None, solver=None,
                  rng: random.Random | None = None,
                  progress=None) -> TargetWiring:
@@ -440,8 +441,11 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     http_get_bytes(url, headers) -> bytes — all raise on HTTP/transport
     failure. `http_get_fallback` (same shape as http_get, SHORT timeout)
     reads the larder's metadata from the fallback gateways; defaults to
-    http_get for tests. `get_artwork_bytes` (same shape) is the reveal's transport:
-    short timeout, NO redirects, reads at most the cap (main._http_get_artwork);
+    http_get for tests. `http_get_larder_art` (same shape as http_get_bytes)
+    reads the FULL artwork for /prepare, up to MAX_IMAGE_BYTES + 1 — never
+    the reveal's transport; defaults to http_get_bytes.
+    `get_artwork_bytes` (same shape) is the reveal's transport: short timeout,
+    NO redirects, reads at most the cap (main._http_get_artwork);
     defaults to http_get_bytes for tests. `repo` provides get_blob/put_blob (db.client.Repo). `solver`
     is the blind solver main.py already selects for relic clues (an
     INDEPENDENT model by default — Hunt #7 post-mortem); None keeps the
@@ -790,6 +794,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
 
     larder_store = LarderStore(**store(BLOB_LARDER))
     prepared_store = PreparedStore(**store(BLOB_PREPARED))
+    larder_art = http_get_larder_art or http_get_bytes
+
     def fetch_artwork_once(uri: str) -> bytes | None:
         """The FULL artwork, once, for the accepted candidate — the only
         place a whole image is downloaded, and then SHRUNK to what the
@@ -809,7 +815,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         # Same rotation and same verdicts as the probe (29/09). Until then,
         # timeouts on every gateway returned None here and /prepare SPENT
         # the target — the one thing Pedro's rule forbids.
-        data = ask_every_gateway(uri, lambda url: get_art(url, {}), lambda d: d)
+        #
+        # ITS OWN TRANSPORT (30/09), never the reveal's: from 16/09 this read
+        # went through `get_art` (10 s, 5 MB cap), so an artwork over 5 MB
+        # arrived cut short and would not open. The larder's reads up to
+        # MAX_IMAGE_BYTES + 1, which makes the size check below reachable.
+        data = ask_every_gateway(uri, lambda url: larder_art(url, {}), lambda d: d)
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageUnusable("tamanho")
         shrunk = shrink_for_vision(data)
