@@ -1,6 +1,6 @@
 """Porque morreu — "único" e "dono" pela razão, não por um número só.
 
-30/09. Com a imagem resolvida, a colheita passou a morrer em "único" e
+29/09. Com a imagem resolvida, a colheita passou a morrer em "único" e
 "dono", e esses dois números escondiam factos opostos:
 
   único  → não-único       outra peça tem o nome (do candidato)
@@ -136,7 +136,7 @@ def test_the_eoa_check_counts_each_answer():
 
 def test_an_eip7702_wallet_is_still_a_person():
     """Já era assim desde 06/09 (ChainRpc.is_eoa). Fica preso aqui porque a
-    30/09 quase o dei como causa das recusas em Base — não é."""
+    29/09 quase o dei como causa das recusas em Base — não é."""
     delegated = "0xef0100" + "22" * 20
     c = _eoa_check(delegated)
     assert c("base", "0x" + "cd" * 20, 1) is True

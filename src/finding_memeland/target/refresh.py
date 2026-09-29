@@ -99,7 +99,7 @@ def uri_kind(uri: str | None) -> str:
 def image_uri_kind(uri: str | None) -> str:
     """Para CONTAR imagens que não deram bytes: "ipfs", "data-svg", "data".
 
-    Até 30/09 uma imagem guardada na cadeia (`data:`) nunca passava o teste
+    Até 29/09 uma imagem guardada na cadeia (`data:`) nunca passava o teste
     — nenhum caminho sabia descodificá-la — e contava como "pin morto".
     Separar os tipos é o que mostrou isso, e o SVG tem contador próprio
     porque é a decisão seguinte: a visão não o lê, e aceitá-lo exige

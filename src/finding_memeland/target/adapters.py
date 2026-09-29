@@ -82,6 +82,7 @@ from .sources import (
     GatewayNotJson,
     GatewayUnavailable,
     MetadataInvalid,
+    MetadataPinGone,
     RpcUnavailable,
     TokenUriUndecodable,
 )
@@ -539,6 +540,88 @@ class Erc721Metadata:
         return doc
 
 
+def _http_status(e: BaseException) -> int | None:
+    """The HTTP status an http_get exception carries (urllib's HTTPError has
+    `.code`), or None for a timeout / connection error."""
+    code = getattr(e, "code", None)
+    return code if isinstance(code, int) and 100 <= code <= 599 else None
+
+
+class FailoverMetadata(Erc721Metadata):
+    """The LARDER's reader (29/09): /harvest, /fill, the deposit and the
+    /prepare re-read. Our gateway first; when it fails, every other gateway
+    we have, one after the other, before the read is called failed.
+
+    WHY. The 29/09 /harvest lost 116 reads to "gateway" — 93 of them in Base,
+    more than half of Base's IPFS metadata reads — and 6 Base candidates that
+    had JUST been read in the harvest failed their second read, minutes later,
+    through the same gateway. Those 6 are measured: the content was there. It
+    is the image probe's rule (wiring.probe_image, 17/09), applied to the
+    metadata where it was missing.
+
+    NOT the live check: that path is the GENERIC family, one provider per
+    batch, and must stay so. This reader reads everyone (harvest) or
+    candidates whose image the probe already falls back for, through the
+    same gateways in the same order — no exposure the larder did not
+    already have.
+
+    Outcomes, when no gateway served JSON:
+      · one said 404/410                  → MetadataPinGone (theirs)
+      · one answered, but not JSON        → GatewayNotJson (ambiguous, as before)
+      · every one threw (timeout, 5xx, …) → GatewayUnavailable (ours, Pedro's rule)
+
+    `fallback_get` reads the fallbacks — main.py gives it a SHORT timeout, so
+    a pin nobody serves costs the primary's wait plus a few seconds per extra
+    gateway, not 25 s each. `stats["rescued"]` counts reads the primary lost
+    and a fallback served: OURS, measured, for the /harvest report."""
+
+    def __init__(self, *, rpcs: dict[str, ChainRpc], gateways: Sequence[str],
+                 http_get: HttpGet, fallback_get: HttpGet | None = None,
+                 max_bytes: int = 2_000_000):
+        gws = [g for g in dict.fromkeys(gateways) if g]
+        if not gws:
+            raise ValueError("FailoverMetadata needs at least one gateway")
+        super().__init__(rpcs=rpcs, gateway=gws[0], http_get=http_get,
+                         max_bytes=max_bytes)
+        self._gateways = tuple(gws)
+        self._fallback_get = fallback_get or http_get
+        self.stats = {"rescued": 0}
+
+    def _resolve(self, uri: str) -> dict:
+        if uri.lower().startswith("data:"):
+            return super()._resolve(uri)            # inline: no gateway at all
+        urls = list(dict.fromkeys(u for u in (gateway_url(uri, g)
+                                              for g in self._gateways) if u))
+        if not urls:
+            raise MetadataInvalid("token URI of unknown scheme")
+        gone = not_json = 0
+        for i, url in enumerate(urls):
+            get = self._get if i == 0 else self._fallback_get
+            try:
+                text = get(url, {"Accept": "application/json"})
+            except Exception as e:  # noqa: BLE001 — this host; try the next
+                if _http_status(e) in (404, 410):
+                    gone += 1
+                continue
+            if len(text) > self._max:
+                raise MetadataInvalid("metadata body too large")
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                not_json += 1                       # a throttle page, maybe
+                continue
+            if not isinstance(doc, dict):
+                raise MetadataInvalid("metadata is not an object")
+            if i:
+                self.stats["rescued"] += 1
+            return doc
+        if gone:
+            raise MetadataPinGone(f"{gone} of {len(urls)} gateway(s) said 404/410")
+        if not_json:
+            raise GatewayNotJson(f"{not_json} of {len(urls)} gateway(s) answered non-JSON")
+        raise GatewayUnavailable(f"{len(urls)} gateway(s), none answered")
+
+
 # --------------------------------------------------------------------------- #
 # GENERIC family — per-batch rotation                                          #
 # --------------------------------------------------------------------------- #
@@ -920,7 +1003,7 @@ def decode_data_image(uri: str, *, max_bytes: int) -> bytes | None:
     on-chain e devolve um dict. Nomes diferentes de propósito: com o mesmo
     nome, este sobrepunha-se àquele e a leitura de metadata `data:` partia.
 
-    O DEFEITO QUE ISTO FECHA (30/09). `uri_is_content_addressed` aceita
+    O DEFEITO QUE ISTO FECHA (29/09). `uri_is_content_addressed` aceita
     `data:` — e bem: é a forma mais imutável que existe, a imagem vive no
     próprio contrato. Mas o teste da imagem e o descarregamento da arte só
     sabiam ir a gateways IPFS, e `gateway_url` devolve None para `data:`.
@@ -988,13 +1071,13 @@ def inline_artwork(uri: str, *, max_bytes: int) -> bytes | None:
 
 
 # --------------------------------------------------------------------------- #
-# SVG → PNG (30/09)                                                             #
+# SVG → PNG (29/09)                                                             #
 # --------------------------------------------------------------------------- #
 #
 # PORQUÊ. A primeira colheita com imagens on-chain a funcionar deu 9
 # candidatos e 0 guardados; 5 dos 9 eram SVG. Arte gerada dentro do contrato
 # é quase sempre SVG, e a visão só lê PNG/JPEG/GIF/WebP. Decisão do Pedro,
-# 30/09: converter para PNG, para que a visão veja a imagem real — as pistas
+# 29/09: converter para PNG, para que a visão veja a imagem real — as pistas
 # têm de descrever o que o jogador vê no marketplace.
 #
 # PORQUE resvg-py (e não CairoSVG): wheel autocontido (Rust), sem biblioteca

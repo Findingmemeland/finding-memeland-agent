@@ -1,6 +1,6 @@
 """Imagens guardadas na cadeia (`data:`) — o caminho que nunca existiu.
 
-O DEFEITO (30/09). `uri_is_content_addressed` aceita `data:`, e bem: é a
+O DEFEITO (29/09). `uri_is_content_addressed` aceita `data:`, e bem: é a
 forma mais imutável que há, a imagem vive dentro do contrato. Mas o teste da
 imagem e o descarregamento da arte só sabiam perguntar a gateways IPFS, e
 `gateway_url` devolve None para `data:`. O teste saltava todos os gateways e
@@ -12,7 +12,7 @@ morreram assim 8 em 8 candidatos numa corrida, 43 em 50 noutra.
 
 O que estes testes fixam:
 1. PNG / JPEG / GIF / WebP em base64 passam o teste E chegam à visão.
-2. SVG é convertido para PNG (decisão do Pedro, 30/09 — 5 de 9 candidatos
+2. SVG é convertido para PNG (decisão do Pedro, 29/09 — 5 de 9 candidatos
    da primeira colheita morriam aqui), com recusas pelas razões certas:
    referências externas, tamanho ilegível, render de uma só cor.
 3. Uma string gigante não vira gigabytes em memória.
@@ -107,7 +107,7 @@ def test_the_metadata_decoder_is_not_shadowed():
 
 
 def test_an_onchain_png_passes_the_probe():
-    """O TESTE. Antes de 30/09 isto devolvia None — "pin morto"."""
+    """O TESTE. Antes de 29/09 isto devolvia None — "pin morto"."""
     got = probe_inline_image(_b64("image/png", PNG), max_bytes=10_000,
                              probe_bytes=64)
     assert got is not None
@@ -122,7 +122,7 @@ def test_an_onchain_gif_passes_the_probe():
 
 def test_without_the_library_an_svg_is_refused_not_a_crash():
     """Se o resvg-py faltar no Railway, o SVG volta a ser recusado — como
-    antes de 30/09 — e nada rebenta."""
+    antes de 29/09 — e nada rebenta."""
     with _no_resvg():
         assert probe_inline_image(_b64("image/svg+xml", WIDE), max_bytes=10_000,
                                   probe_bytes=64) is None
@@ -191,7 +191,7 @@ def _restore(saved):
 
 
 def test_an_onchain_svg_passes_the_probe_as_png():
-    """O TESTE de 30/09. Um SVG on-chain chega ao probe como PNG."""
+    """O TESTE de 29/09. Um SVG on-chain chega ao probe como PNG."""
     with _fake_resvg() as calls:
         got = probe_inline_image(_b64("image/svg+xml", WIDE), max_bytes=10_000,
                                  probe_bytes=64)

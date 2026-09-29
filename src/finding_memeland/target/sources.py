@@ -94,7 +94,7 @@ class ChainUnavailable(RuntimeError):
     'zero tokens' — the silently-smaller-pool failure the refresh exists to
     refuse.
 
-    `kind` / `theirs` (30/09): WHERE it failed, for the reports only. The
+    `kind` / `theirs` (29/09): WHERE it failed, for the reports only. The
     subclasses below are still ChainUnavailable, so every existing `except`
     and every caller's behaviour is unchanged — they only let a report say
     "gateway 60, rpc 10" instead of one lump, and keep the NFT's own
@@ -112,7 +112,11 @@ class RpcUnavailable(ChainUnavailable):
 
 class GatewayUnavailable(ChainUnavailable):
     """The IPFS gateway threw (timeout, HTTP error) on the metadata. Ours —
-    or a pin nobody serves any more; one gateway cannot tell which."""
+    or a pin nobody serves any more; one gateway cannot tell which.
+
+    Through FailoverMetadata (29/09) it means EVERY gateway threw without a
+    clear 'not here' — and by Pedro's rule that counts as ours: timeouts and
+    5xx everywhere keep the candidate."""
     kind = "gateway"
 
 
@@ -137,6 +141,18 @@ class MetadataInvalid(ChainUnavailable):
 class TokenUriUndecodable(ChainUnavailable):
     """tokenURI answered, but not as an ABI string. Theirs."""
     kind = "tokenURI-ilegível"
+    theirs = True
+
+
+class MetadataPinGone(ChainUnavailable):
+    """No gateway served the metadata, and at least one said CLEARLY that it
+    does not have it (HTTP 404/410). Theirs.
+
+    Pedro's rule (29/09): this is the ONLY metadata failure that lets
+    /prepare discard a candidate as a dead pin. A timeout or a 5xx on every
+    gateway is not an answer about the content — it stays ours
+    (GatewayUnavailable) and the candidate stays in the larder."""
+    kind = "pin-morto"
     theirs = True
 
 
@@ -522,7 +538,7 @@ class ChainEoaCheck:
 
     def __init__(self, *, rpcs: dict[str, ChainRpc]):
         self._rpcs = rpcs
-        # Counts only, never addresses (30/09): "dono 2" hid two opposite
+        # Counts only, never addresses (29/09): "dono 2" hid two opposite
         # facts — the owner IS a contract (the candidate's), or we could not
         # tell (ours, or a burned token). Same pattern as the uniqueness
         # guard's `stats`.

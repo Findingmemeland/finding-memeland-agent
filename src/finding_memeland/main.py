@@ -61,6 +61,18 @@ def _http_get(url: str, headers: dict | None = None) -> str:
     return _http_get_bytes(url, headers).decode("utf-8", "ignore")
 
 
+# Metadata JSON from a FALLBACK gateway (29/09): our gateway has already had
+# its 25 s. The same 8 s the image probe gives a gateway (17/09) — without a
+# short budget, a pin nobody serves would cost 25 s per extra gateway, and the
+# 29/09 /harvest lost 116 reads at the gateway.
+FALLBACK_META_TIMEOUT_S = 8
+
+
+def _http_get_fallback(url: str, headers: dict | None = None) -> str:
+    return _http_get_bytes(url, headers,
+                           timeout=FALLBACK_META_TIMEOUT_S).decode("utf-8", "ignore")
+
+
 class _NoRedirect(Exception):
     pass
 
@@ -371,7 +383,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         try:
             target_wiring = build_target(
                 s, anthropic=anthropic, repo=repo, http_get=_http_get,
-                http_get_range=_http_get_range,
+                http_get_range=_http_get_range, http_get_fallback=_http_get_fallback,
                 http_post=_http_post, http_get_bytes=_http_get_image_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
                 progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),

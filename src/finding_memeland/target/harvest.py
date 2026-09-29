@@ -237,7 +237,7 @@ class HarvestReport:
     series: int = 0              # nome numerado ("#123") — peça de uma série
     drops: int = 0               # contratos que mintaram muitas peças no bloco
     unavailable: int = 0         # NOSSO: o RPC ou o gateway rebentou
-    # 30/09: o mesmo número, POR ONDE falhou (rpc / gateway / gateway-não-json
+    # 29/09: o mesmo número, POR ONDE falhou (rpc / gateway / gateway-não-json
     # / outro). E os defeitos do próprio NFT que antes caíam aqui — metadata
     # que não é um objecto, tokenURI ilegível, `data:` que não descodifica —
     # saem para `bad_meta`: não são nossos e não se contam como nossos.
@@ -268,7 +268,10 @@ class HarvestReport:
             parts[-1] = (f"indisponível-NOSSO {self.unavailable} "
                          f"({self._kinds(self.unavailable_kinds)})")
         if self.bad_meta:
-            parts.append(f"metadata-inválida {sum(self.bad_meta.values())} "
+            # "defeito-DELES", não "metadata-inválida" (29/09): o grupo passou
+            # a ter o pin morto, que não é metadata inválida — é metadata que
+            # um gateway disse não ter.
+            parts.append(f"defeito-DELES {sum(self.bad_meta.values())} "
                          f"({self._kinds(self.bad_meta)})")
         if self.uri_not_ca:
             parts.append(f"tokenURI fora de IPFS ({self._kinds(self.uri_not_ca)})")

@@ -76,6 +76,7 @@ from typing import Callable, Sequence
 from .commitment import compute_commitment_v2, generate_salt
 from .refresh import content_id, image_uri_kind, uri_is_content_addressed, uri_kind
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
+from .sources import MetadataPinGone
 
 # --------------------------------------------------------------------------- #
 # Sources                                                                      #
@@ -251,7 +252,7 @@ class Larder:
         tudo. Uma guarda de variedade não pode deixar o jogo sem alvo —
         preferir repetir a não haver hunt.
 
-        UNIFORME POR CONTRATO (decisão do Pedro, 30/09): sorteia-se primeiro
+        UNIFORME POR CONTRATO (decisão do Pedro, 29/09): sorteia-se primeiro
         o contrato, depois a peça dentro dele. Até aqui era uniforme por
         CANDIDATO, e a primeira colheita a dar alvos mostrou o custo: 3
         colhidos contra 33 do SuperRare/Foundation davam ~9% de sair um
@@ -446,22 +447,22 @@ class Tally:
     # nobody could say whether the cause was the NFTs or us. Three causes
     # that call for three different responses cannot share one number.
     not_ca: dict = field(default_factory=dict)
-    # The `image` count again, BY KIND (ipfs / data / data-svg). 30/09: an
+    # The `image` count again, BY KIND (ipfs / data / data-svg). 29/09: an
     # image stored on-chain (`data:`) could never pass the probe, and every
     # one was reported as a dead pin. Split, it shows up at once.
     image_kinds: dict = field(default_factory=dict)
-    # The `unique` count again, BY REASON (30/09). "único 3" hid four
+    # The `unique` count again, BY REASON (29/09). "único 3" hid four
     # different facts — another piece carries the name; the name has more
     # bearers than a page holds; the index cannot see the target at all; the
     # request itself failed (OURS). The first calls for nothing, the last
     # two for fixing something on our side.
     unique_kinds: dict = field(default_factory=dict)
-    # The `owner` count again, BY REASON (30/09): a contract owns it (the
+    # The `owner` count again, BY REASON (29/09): a contract owns it (the
     # candidate's) or we could not tell (ours / burned). EIP-7702 wallets
     # were never here — ChainRpc.is_eoa has accepted them since 06/09.
     owner_kinds: dict = field(default_factory=dict)
     # `unavailable` again, BY WHERE (rpc / gateway / gateway-imagem / …), and
-    # the NFT's own broken metadata kept OUT of it (30/09) — see
+    # the NFT's own broken metadata kept OUT of it (29/09) — see
     # sources.ChainUnavailable.kind / .theirs.
     unavailable_kinds: dict = field(default_factory=dict)
     bad_meta: dict = field(default_factory=dict)
@@ -505,8 +506,9 @@ class Tally:
                 f"imagem-fora-de-IPFS ({kinds})"
         if self.bad_meta:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.bad_meta.items()))
+            # same label as HarvestReport: the group now holds the dead pin
             causes = (causes + ", " if causes else "") + \
-                f"metadata-inválida {sum(self.bad_meta.values())} ({kinds})"
+                f"defeito-DELES {sum(self.bad_meta.values())} ({kinds})"
         return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
                 + (f" — {causes}" if causes else ""))
 
@@ -700,15 +702,17 @@ class TargetFinder:
 
         `strict` (the /prepare path): a transport failure RAISES instead of
         counting as a rejection, so the caller can tell 'this candidate is
-        dead' from 'we could not read it right now' and keep the candidate."""
+        dead' from 'we could not read it right now' and keep the candidate.
+        The one exception is a dead pin a gateway NAMED (404/410): that is an
+        answer about the content, and the candidate is dropped (Pedro, 29/09)."""
         try:
             read = self._read_token(src.chain, src.contract, tid)
         except Exception as e:  # noqa: BLE001 — this draw, not the run
-            if strict:
+            if strict and not isinstance(e, MetadataPinGone):
                 raise ReadUnavailable(type(e).__name__) from None
             # OURS — the RPC or the gateway threw. Counting it as 'metadata'
             # (as until 29/09) blamed the candidate for our transport. Unless
-            # the adapter says the metadata itself is broken (30/09).
+            # the adapter says the metadata itself is broken (29/09).
             tally.count_unavailable(e)
             return None
         if read is None or not isinstance(read.metadata, dict) or not read.metadata:

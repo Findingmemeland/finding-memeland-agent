@@ -27,6 +27,7 @@ from .adapters import (
     AnthropicBatchJudge,
     AnthropicVision,
     Erc721Metadata,
+    FailoverMetadata,
     GenericMetadata,
     JsonRpc,
     MarketplaceLinkResolver,
@@ -189,6 +190,9 @@ class TargetWiring:
     # gasta chamadas para produzir alvos que o depósito vai recusar.
     harvesters: dict = field(default_factory=dict)
     deposit_chains: frozenset = frozenset()
+    # o leitor de metadata da despensa (29/09) — só para o /harvest contar
+    # quantas leituras a rotação de gateways salvou
+    larder_meta: object = None
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -312,6 +316,7 @@ class TargetWiring:
                         "Doppler dev, com tantos URLs como "
                         "TARGET_PUBLIC_RPCS_ETHEREUM)")
                     continue
+                rescued_before = self._rescued()
                 try:
                     refs, hrep = harvester.harvest(n_blocks, notify=self.notify)
                 except HarvestBlind as e:
@@ -326,9 +331,18 @@ class TargetWiring:
                                  f"({type(e).__name__}); nada foi concluído "
                                  "sobre esta cadeia")
                     continue
+                after_harvest = self._rescued()
                 dep = self.finder.deposit(
                     larder, refs, chain_ok=lambda c: c in self.deposit_chains)
-                lines.append(f"{chain}: {hrep.render()} → depósito: {dep.render()}")
+                line = f"{chain}: {hrep.render()} → depósito: {dep.render()}"
+                if after_harvest is not None:
+                    # Leituras que o 1.º gateway perdeu e outro serviu: NOSSAS,
+                    # medidas (29/09). Mostra-se também o zero — é informação.
+                    in_harvest = after_harvest - rescued_before
+                    in_deposit = self._rescued() - after_harvest
+                    line += (f" · rotação de gateways salvou {in_harvest} na "
+                             f"colheita e {in_deposit} no depósito")
+                lines.append(line)
                 # Gravar a cada cadeia, não só no fim (29/09): a primeira
                 # corrida real teve de ser morta ao fim de uma hora, e tudo
                 # o que Ethereum já tinha encontrado ia com ela.
@@ -338,6 +352,10 @@ class TargetWiring:
         added = larder.size() - before
         return ("harvest:\n" + "\n".join(lines)
                 + f"\ndespensa {before} → {larder.size()} (+{added})")
+
+    def _rescued(self) -> int | None:
+        stats = getattr(self.larder_meta, "stats", None)
+        return stats.get("rescued", 0) if isinstance(stats, dict) else None
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -392,7 +410,7 @@ def _media_kind(data: bytes) -> str:
 
 
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
-                 http_get_range=None,
+                 http_get_range=None, http_get_fallback=None,
                  get_artwork_bytes=None, solver=None,
                  rng: random.Random | None = None,
                  progress=None) -> TargetWiring:
@@ -400,7 +418,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
 
     http_get(url, headers) -> str · http_post(url, body, headers) -> str ·
     http_get_bytes(url, headers) -> bytes — all raise on HTTP/transport
-    failure. `get_artwork_bytes` (same shape) is the reveal's transport:
+    failure. `http_get_fallback` (same shape as http_get, SHORT timeout)
+    reads the larder's metadata from the fallback gateways; defaults to
+    http_get for tests. `get_artwork_bytes` (same shape) is the reveal's transport:
     short timeout, NO redirects, reads at most the cap (main._http_get_artwork);
     defaults to http_get_bytes for tests. `repo` provides get_blob/put_blob (db.client.Repo). `solver`
     is the blind solver main.py already selects for relic clues (an
@@ -673,11 +693,20 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     probe_gateways = [g for g in ([s.target_ipfs_gateway]
                                   + list(s.target_ipfs_gateway_list)) if g]
 
+    # THE SAME ROTATION FOR THE METADATA (29/09) — /harvest, /fill, the
+    # deposit and the /prepare re-read. The 29/09 /harvest lost 116 reads to
+    # one gateway, and 6 candidates it had just read failed the deposit's
+    # re-read through that same gateway. Everything else keyed (refresh,
+    # live hash, reveal) keeps `keyed_meta`; the live check is untouched.
+    larder_meta = FailoverMetadata(rpcs=rpcs, gateways=probe_gateways,
+                                   http_get=http_get,
+                                   fallback_get=http_get_fallback)
+
     def probe_image(uri: str):
         """RANGED read: the first few KB plus the size. Proves the bytes are
         there (Hunt #11) without pulling a 15 MB artwork. Tried across every
         gateway we have before a pin is called dead."""
-        # IMAGEM NA CADEIA (30/09): não há gateway a quem perguntar — os
+        # IMAGEM NA CADEIA (29/09): não há gateway a quem perguntar — os
         # bytes estão na própria string. Antes daqui, `gateway_url` devolvia
         # None, o ciclo saltava todos os gateways, e um NFT on-chain era
         # dado como "pin morto". Um SVG descodifica-se mas não passa no
@@ -716,7 +745,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         total_supply=lambda c, k: int(rpcs[c].eth_call(k, SEL_TOTAL), 16),
         token_by_index=lambda c, k, i: int(
             rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
-        read_token=keyed_meta.read, probe_image=probe_image,
+        read_token=larder_meta.read, probe_image=probe_image,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
         rng=rng, now_iso=_now_iso)
 
@@ -734,7 +763,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         API as a bare BadRequestError. Now it gets resized instead — a clue
         about a lighthouse does not need the pixels the collector paid
         for."""
-        # Imagem na cadeia (30/09): o mesmo caminho do probe acima. Sem
+        # Imagem na cadeia (29/09): o mesmo caminho do probe acima. Sem
         # isto, um NFT on-chain que passasse o depósito morria aqui.
         if (uri or "").strip().lower().startswith("data:"):
             return inline_artwork(uri, max_bytes=MAX_IMAGE_BYTES)
@@ -814,7 +843,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             # A leitura INTEIRA, não só o nome (29/09): o colector precisa
             # de ver a imagem e de distinguir "queimado" de "fora de IPFS"
             # de "o RPC falhou" — três causas que antes eram um "ilegível".
-            return keyed_meta.read(chain, contract, tid)
+            return larder_meta.read(chain, contract, tid)
 
         block, mints = parse_canary(canaries.get(chain, ""))
         harvesters[chain] = MintHarvester(
@@ -826,6 +855,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         notify=say,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,
+                        larder_meta=larder_meta,
                         prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,

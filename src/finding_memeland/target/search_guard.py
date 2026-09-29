@@ -467,7 +467,7 @@ class MarketNameUniqueness:
         self._page = page_size
         self._retries = retries
         self._sleep = sleep_s
-        # `crowded_same` (30/09) is a SUB-count of `crowded`, never instead
+        # `crowded_same` (29/09) is a SUB-count of `crowded`, never instead
         # of it: a full page on which at least one OTHER item carries the
         # exact base name. The first /harvest runs lost every candidate to
         # "crowded" and nobody could tell a real namesake from an obscure

@@ -15,7 +15,7 @@ openai>=1.40.0
 # Degrades to a plain size cap if absent (target/adapters.shrink_for_vision).
 pillow>=10.4.0
 
-# SVG → PNG for art stored on-chain (30/09). Vision reads PNG/JPEG/GIF/WebP
+# SVG → PNG for art stored on-chain (29/09). Vision reads PNG/JPEG/GIF/WebP
 # only, and on-chain art is almost always SVG: 5 of the first 9 harvested
 # candidates died of it. Self-contained Rust wheel — no system library, unlike
 # CairoSVG (needs libcairo on Railway). MIT. Minor pinned: one maintainer.

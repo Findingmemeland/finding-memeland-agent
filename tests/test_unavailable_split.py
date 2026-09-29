@@ -1,6 +1,6 @@
 """O "indisponível-NOSSO" dividido por onde falhou — e o que não é nosso, fora.
 
-30/09. A colheita perdeu 116 leituras numa corrida (76 em Ethereum, 40 em
+29/09. A colheita perdeu 116 leituras numa corrida (76 em Ethereum, 40 em
 Base) sob um só número. Ao olhar para o código, o número misturava duas
 coisas de natureza oposta:
 
@@ -152,7 +152,7 @@ def test_harvest_splits_ours_by_where():
 def test_harvest_keeps_the_nft_s_defects_out_of_ours():
     out = _render(MetadataInvalid("metadata is not an object"))
     assert "indisponível-NOSSO" not in out, out
-    assert "metadata-inválida 1 (metadata-inválida 1)" in out, out
+    assert "defeito-DELES 1 (metadata-inválida 1)" in out, out
 
 
 def test_an_unknown_exception_is_still_ours_as_before():
@@ -201,7 +201,7 @@ def test_deposit_names_the_image_gateways():
 def test_deposit_keeps_broken_metadata_out_of_ours():
     out = _deposit(read=TokenUriUndecodable("tokenURI undecodable"))
     assert "indisponível-NOSSO" not in out, out
-    assert "metadata-inválida 1 (tokenURI-ilegível 1)" in out, out
+    assert "defeito-DELES 1 (tokenURI-ilegível 1)" in out, out
 
 
 def test_prepare_steps_are_named_so_the_split_adds_up():

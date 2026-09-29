@@ -139,7 +139,7 @@ def test_an_empty_larder_still_returns_none():
 
 
 # --------------------------------------------------------------------------- #
-# 3. A despensa sorteia por contrato, não por peça (30/09)                      #
+# 3. A despensa sorteia por contrato, não por peça (29/09)                      #
 # --------------------------------------------------------------------------- #
 
 
