@@ -44,3 +44,7 @@ findability_log.txt
 # vier a ser sorteado, quem tenha lido o repositório fica com uma
 # short-list. Custa zero mantê-las fora e não há nada a ganhar em pô-las cá.
 alvos_*.txt
+
+# Contexto local do Claude Code (regras e estado do projecto) — fica só nesta
+# máquina. O repositório é público.
+CLAUDE.local.md
