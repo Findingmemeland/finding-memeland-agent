@@ -150,6 +150,41 @@ _COORDISH = re.compile(r"\(\s*-?\d+\s*,\s*-?\d+\s*\)")
 _TRAILING_JUNK = re.compile(r"[\s​-‏⁠]*[⚠️✅❗‼⁉️🔺]*\s*$")
 
 
+# Série numerada (29/09, decisão do Pedro). A segunda colheita real mostrou
+# o padrão: dos 24 candidatos que passaram o nome, 16 morreram no teste de
+# unicidade do mercado — "Cool Cat #123" tem duas palavras, mas há milhares
+# de "Cool Cat". Deixá-los chegar lá gastava a única chamada paga em
+# candidatos que já se sabia que morriam. A unicidade continua a ser o juiz
+# final; isto só lhe poupa os casos óbvios.
+#
+# Mais estreito do que o `normalize_name` de produção DE PROPÓSITO: esse
+# arranca qualquer número no fim, incluindo anos ("Summer 2021" → "Summer"),
+# e aqui um ano é parte do título, não um número de série.
+_HASH_SERIAL = re.compile(r"#\s*\d+")
+_NO_SERIAL = re.compile(r"\bn[oº]\.?\s*\d+", re.IGNORECASE)
+_TAIL_NUMBER = re.compile(r"(?<![\d.,])(\d{3,})\s*$")
+
+
+def looks_serial(raw: str) -> bool:
+    """O nome parece uma peça de uma série numerada?
+
+    Sim: "#123" em qualquer sítio, "No. 7", ou um número de 3+ algarismos
+    no fim que não seja um ano (1900–2099). Não: "Vol 2", "Part 3" — um
+    número curto no fim pode ser o título de uma obra — nem "Summer 2021"
+    ou "August 19, 2024".
+
+    Decisão do Pedro, com o custo dito na altura: perde algumas obras 1/1
+    que tenham "#1" no nome."""
+    s = (raw or "").strip()
+    if _HASH_SERIAL.search(s) or _NO_SERIAL.search(s):
+        return True
+    m = _TAIL_NUMBER.search(s)
+    if m:
+        n = int(m.group(1))
+        return not (len(m.group(1)) == 4 and 1900 <= n <= 2099)
+    return False
+
+
 def name_is_cluable(raw: str, *, min_words: int = 2) -> bool:
     """O nome dá para escrever uma pista sobre ele?
 
@@ -199,6 +234,8 @@ class HarvestReport:
     named: int = 0
     kept: int = 0
     rejected_name: int = 0
+    series: int = 0              # nome numerado ("#123") — peça de uma série
+    drops: int = 0               # contratos que mintaram muitas peças no bloco
     unavailable: int = 0         # NOSSO: o RPC ou o gateway rebentou
     gone: int = 0                # tokenURI reverte: queimado ou inexistente
     no_name: int = 0             # metadata sem campo "name"
@@ -214,6 +251,8 @@ class HarvestReport:
         parts = [f"{self.kept} alvo(s) de {len(self.contracts)} contrato(s)",
                  f"{self.blocks} bloco(s), {self.mints} mint(s)"]
         for label, n in (("nome recusado", self.rejected_name),
+                         ("numerados", self.series),
+                         ("drops", self.drops),
                          ("sem nome", self.no_name),
                          ("queimados", self.gone),
                          ("indisponível-NOSSO", self.unavailable)):
@@ -275,6 +314,7 @@ class MintHarvester:
                 max_per_contract: int = 2,
                 max_reads_per_contract: int = 3,
                 max_mints_per_block: int = 40,
+                drop_threshold: int = 5,
                 every: int = 20,
                 notify: Callable[[str], None] | None = None,
                 ) -> tuple[list[str], HarvestReport]:
@@ -297,7 +337,14 @@ class MintHarvester:
         custar mais do que isto, por muitos contratos que tenha.
 
         `every`: uma linha de progresso a cada tantos blocos, como o /fill.
-        Uma corrida longa sem notícias é indistinguível de uma pendurada."""
+        Uma corrida longa sem notícias é indistinguível de uma pendurada.
+
+        `drop_threshold` (29/09, decisão do Pedro): um contrato que minta
+        MAIS do que isto no mesmo bloco é um drop — edição, PFP, série — e
+        é saltado sem uma única leitura. Um artista 1/1 minta uma peça de
+        cada vez. O custo, dito: um artista que minte 6 obras 1/1 numa só
+        transacção perde-se. O número é um parâmetro, e o relatório conta
+        os drops saltados para se ver se está bem posto."""
         note = notify or (lambda _t: None)
         if not self.canary_passes():
             raise HarvestBlind(
@@ -326,7 +373,14 @@ class MintHarvester:
             rep.blocks += 1
             found = mints_in_logs(logs)
             rep.mints += len(found)        # o que a cadeia TEM, não o que lemos
+            per_contract: dict[str, int] = {}
+            for contract, _tid in found:
+                per_contract[contract] = per_contract.get(contract, 0) + 1
+            drops = {c for c, n in per_contract.items() if n > drop_threshold}
+            rep.drops += len(drops)
             for contract, tid in found[:max_mints_per_block]:
+                if contract in drops:
+                    continue               # drop: nem uma leitura
                 if seen.get(contract, 0) >= max_per_contract:
                     continue
                 if tried.get(contract, 0) >= max_reads_per_contract:
@@ -363,6 +417,9 @@ class MintHarvester:
                     continue
                 name = str(name)
                 rep.named += 1
+                if looks_serial(name):
+                    rep.series += 1
+                    continue
                 if not name_is_cluable(name, min_words=self._min_words):
                     rep.rejected_name += 1
                     continue

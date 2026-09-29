@@ -35,6 +35,7 @@ from finding_memeland.target.harvest import (
     HarvestBlind,
     HarvestReport,
     MintHarvester,
+    looks_serial,
     mints_in_logs,
     name_is_cluable,
 )
@@ -205,12 +206,28 @@ def test_one_word_and_junk_do_not_pass():
 
 
 def test_a_serialised_pfp_name_still_fails_on_words():
-    """'Tiny Punk #9278' → base 'Tiny Punk' → duas palavras → PASSA aqui.
-    E está certo: a regra do Pedro é uma só, o nome dar para pista. Quem
-    mata o PFP é a UNICIDADE NO MERCADO, no depósito, porque há dez mil
-    peças com esse nome-base. Este teste existe para registar que a
-    separação é deliberada e não um esquecimento."""
+    """'Tiny Punk #9278' → base 'Tiny Punk' → duas palavras → a regra do
+    nome aceita-o, e está certo. Desde 29/09 quem o apanha é o
+    `looks_serial`, no colector, ANTES de gastar a chamada paga da
+    unicidade — decisão do Pedro depois de 16 em 24 candidatos morrerem lá."""
     assert name_is_cluable("Tiny Punk #9278")
+    assert looks_serial("Tiny Punk #9278")
+
+
+def test_numbered_series_are_recognised():
+    for n in ["Cool Cat #123", "#3000 - Candy Stamps", "Punk # 42",
+              "Genesis No. 7", "Nº 12 Harbour", "healing lucid glow 12684",
+              "Moonbird 4412"]:
+        assert looks_serial(n), n
+
+
+def test_titles_with_years_and_short_numbers_are_not_series():
+    """O normalize_name de produção arranca anos ("Summer 2021" →
+    "Summer"); aqui um ano é parte do título. E "Vol 2" pode ser uma obra."""
+    for n in ["Summer 2021", "$243M Theft - August 19, 2024", "Vol 2",
+              "Part 3 of the Harbour", "Grease Pencil Gospel", "The Halvening",
+              "Salt Harbor 1999", "Room 42"]:
+        assert not looks_serial(n), n
 
 
 # --------------------------------------------------------------------------- #
@@ -245,36 +262,66 @@ def test_refs_come_out_in_the_deposit_format():
         assert parse_ref(r) is not None, r
 
 
-def test_one_drop_cannot_flood_the_larder():
-    """Um bloco pode conter um drop de 500 peças do mesmo contrato. Deixá-
-    las entrar todas repunha exactamente o problema que isto vem resolver."""
-    drop = {100: [_mint(A, 1)], 7: [_mint(B, i) for i in range(500)]}
-    h, _ = _harv(logs_by_block=drop, canary_mints=1)
-
+def _block7(h):
     class _R:
         def randrange(self, lo, hi):
             return 7
     h._rng = _R()
+
+
+def test_a_drop_is_skipped_without_a_single_read():
+    """Decisão do Pedro (29/09): um contrato que minta mais do que o limite
+    no mesmo bloco é uma edição, um PFP, uma série — e um artista 1/1 minta
+    uma peça de cada vez. Saltado antes de gastar uma leitura."""
+    drop = {100: [_mint(A, 1)], 7: [_mint(B, i) for i in range(500)]}
+    h, calls = _harv(logs_by_block=drop, canary_mints=1)
+    _block7(h)
+    refs, rep = h.harvest(3)
+    assert refs == [] and calls["names"] == []
+    assert rep.drops == 3                   # um drop por bloco visto
+    assert rep.mints == 1500                # a cadeia TEM-nos; só não lemos
+
+
+def test_a_small_batch_under_the_threshold_is_still_read():
+    """Cinco no mesmo bloco não é um drop: pode ser um artista a mintar uma
+    pequena série de obras distintas. O limite é MAIS do que 5."""
+    h, calls = _harv(logs_by_block={100: [_mint(A, 1)],
+                                    7: [_mint(B, i) for i in range(5)]},
+                     canary_mints=1)
+    _block7(h)
+    _refs, rep = h.harvest(1)
+    assert rep.drops == 0 and calls["names"]
+
+
+def test_one_contract_never_gives_more_than_two_per_run():
+    """Mesmo abaixo do limite de drop, um contrato não enche a despensa."""
+    h, _ = _harv(logs_by_block={100: [_mint(A, 1)],
+                                7: [_mint(B, i) for i in range(5)]},
+                 names={(B, i): f"Distinct Title {chr(65 + i)}" for i in range(5)},
+                 canary_mints=1)
+    _block7(h)
     refs, rep = h.harvest(3, max_per_contract=2)
-    assert len(refs) == 2
-    assert rep.mints == 1500 and rep.kept == 2
+    assert len(refs) == 2 and rep.kept == 2
 
 
-def test_a_big_drop_of_useless_names_costs_three_reads_not_five_hundred():
+def test_useless_names_cost_three_reads_per_contract_not_all_of_them():
     """O DEFEITO DA PRIMEIRA CORRIDA REAL (29/09). O limite antigo contava
     só os que FICAVAM; um contrato cujos nomes não prestam nunca lá chegava,
-    e o colector lia-lhe as 500 peças, cada uma até 25 s. Mais de uma hora
-    sem acabar. Três leituras por contrato chegam para saber."""
-    drop = {100: [_mint(A, 1)], 7: [_mint(B, i) for i in range(500)]}
-    h, calls = _harv(logs_by_block=drop, canary_mints=1,
-                     names={(B, i): "Solo" for i in range(500)})
-
-    class _R:
-        def randrange(self, lo, hi):
-            return 7
-    h._rng = _R()
+    e o colector lia-lhe as peças todas, cada uma até 25 s. Três leituras
+    por contrato chegam para saber."""
+    h, calls = _harv(logs_by_block={100: [_mint(A, 1)],
+                                    7: [_mint(B, i) for i in range(5)]},
+                     canary_mints=1, names={(B, i): "Solo" for i in range(5)})
+    _block7(h)
     h.harvest(1)
     assert len(calls["names"]) == 3
+
+
+def test_a_numbered_name_is_skipped_before_the_paid_check():
+    """16 dos 24 candidatos da segunda corrida morreram na unicidade do
+    mercado — a única chamada paga. Um nome numerado não chega lá."""
+    refs, rep = _one_mint(_read(name="Cool Cat #123"))
+    assert refs == [] and rep.series == 1
 
 
 def test_no_single_block_can_cost_more_than_the_cap():
