@@ -898,6 +898,67 @@ VISION_PROMPT = ("Describe this artwork in 4-6 sentences for someone who "
                  "the artist. Plain prose, no lists.")
 
 
+def decode_data_image(uri: str, *, max_bytes: int) -> bytes | None:
+    """Os bytes de uma imagem GUARDADA NA CADEIA (`data:…`), ou None.
+
+    Não confundir com `decode_data_uri` (acima), que lê METADATA JSON
+    on-chain e devolve um dict. Nomes diferentes de propósito: com o mesmo
+    nome, este sobrepunha-se àquele e a leitura de metadata `data:` partia.
+
+    O DEFEITO QUE ISTO FECHA (30/09). `uri_is_content_addressed` aceita
+    `data:` — e bem: é a forma mais imutável que existe, a imagem vive no
+    próprio contrato. Mas o teste da imagem e o descarregamento da arte só
+    sabiam ir a gateways IPFS, e `gateway_url` devolve None para `data:`.
+    O teste saltava todos os gateways e respondia "sem bytes": nenhum NFT
+    on-chain conseguiu alguma vez entrar na despensa, e o relatório dizia
+    que era culpa deles.
+
+    Aceita base64 e percent-encoding. Recusa acima de `max_bytes` ANTES de
+    descodificar — uma string de 200 MB num tokenURI não pode virar 200 MB
+    em memória. None para qualquer coisa que não se descodifique: é do
+    candidato, não nosso."""
+    import base64
+    from urllib.parse import unquote_to_bytes
+
+    u = (uri or "").strip()
+    if not u.lower().startswith("data:"):
+        return None
+    header, sep, payload = u.partition(",")
+    if not sep:
+        return None
+    try:
+        if ";base64" in header.lower():
+            if len(payload) * 3 // 4 > max_bytes:
+                return None
+            data = base64.b64decode(payload, validate=False)
+        else:
+            if len(payload) > max_bytes * 3:      # %XX triplica o tamanho
+                return None
+            data = unquote_to_bytes(payload)
+    except Exception:  # noqa: BLE001 — base64 torto é do candidato
+        return None
+    return data if 0 < len(data) <= max_bytes else None
+
+
+def probe_inline_image(uri: str, *, max_bytes: int,
+                       probe_bytes: int) -> tuple[bytes, int] | None:
+    """O teste da imagem para `data:` — mesma forma que o probe por
+    gateway: (primeiros bytes, tamanho), ou None. Um SVG descodifica mas
+    não passa o sniff (a visão não o lê): None, pela razão certa."""
+    data = decode_data_image(uri, max_bytes=max_bytes)
+    if data and sniff_media_type(data[:probe_bytes]) is not None:
+        return data[:probe_bytes], len(data)
+    return None
+
+
+def inline_artwork(uri: str, *, max_bytes: int) -> bytes | None:
+    """A arte inteira de um `data:`, já pronta para a visão, ou None."""
+    data = decode_data_image(uri, max_bytes=max_bytes)
+    if data and sniff_media_type(data) is not None:
+        return shrink_for_vision(data)
+    return None
+
+
 def sniff_media_type(data: bytes) -> str | None:
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"

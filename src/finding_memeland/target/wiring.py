@@ -39,7 +39,9 @@ from .adapters import (
     creator_credit,
     abi_uint,
     gateway_url,
+    inline_artwork,
     mint_fetcher,
+    probe_inline_image,
     shrink_for_vision,
     sniff_media_type,
 )
@@ -675,6 +677,14 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         """RANGED read: the first few KB plus the size. Proves the bytes are
         there (Hunt #11) without pulling a 15 MB artwork. Tried across every
         gateway we have before a pin is called dead."""
+        # IMAGEM NA CADEIA (30/09): não há gateway a quem perguntar — os
+        # bytes estão na própria string. Antes daqui, `gateway_url` devolvia
+        # None, o ciclo saltava todos os gateways, e um NFT on-chain era
+        # dado como "pin morto". Um SVG descodifica-se mas não passa no
+        # sniff: fica recusado, como antes, mas agora pela razão certa.
+        if (uri or "").strip().lower().startswith("data:"):
+            return probe_inline_image(uri, max_bytes=MAX_IMAGE_BYTES,
+                                      probe_bytes=PROBE_BYTES)
         errors = 0
         tried = 0
         for gw in probe_gateways:
@@ -724,6 +734,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         API as a bare BadRequestError. Now it gets resized instead — a clue
         about a lighthouse does not need the pixels the collector paid
         for."""
+        # Imagem na cadeia (30/09): o mesmo caminho do probe acima. Sem
+        # isto, um NFT on-chain que passasse o depósito morria aqui.
+        if (uri or "").strip().lower().startswith("data:"):
+            return inline_artwork(uri, max_bytes=MAX_IMAGE_BYTES)
         for gw in probe_gateways:            # same rotation as the probe
             url = gateway_url(uri, gw)
             if url is None:

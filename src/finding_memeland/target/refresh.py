@@ -96,6 +96,20 @@ def uri_kind(uri: str | None) -> str:
     return "outro"
 
 
+def image_uri_kind(uri: str | None) -> str:
+    """Para CONTAR imagens que não deram bytes: "ipfs", "data-svg", "data".
+
+    Até 30/09 uma imagem guardada na cadeia (`data:`) nunca passava o teste
+    — nenhum caminho sabia descodificá-la — e contava como "pin morto".
+    Separar os tipos é o que mostrou isso, e o SVG tem contador próprio
+    porque é a decisão seguinte: a visão não o lê, e aceitá-lo exige
+    convertê-lo em imagem (dependência nova). O número diz se vale a pena."""
+    u = (uri or "").strip().lower()
+    if u.startswith("data:"):
+        return "data-svg" if "svg" in u.split(",", 1)[0] else "data"
+    return "ipfs"
+
+
 _CID_PATH = re.compile(r"(Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[a-zA-Z0-9]{20,})((?:/[^?#]*)?)")
 
 

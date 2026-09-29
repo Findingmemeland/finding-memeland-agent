@@ -74,7 +74,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
-from .refresh import content_id, uri_is_content_addressed, uri_kind
+from .refresh import content_id, image_uri_kind, uri_is_content_addressed, uri_kind
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
 
 # --------------------------------------------------------------------------- #
@@ -404,6 +404,10 @@ class Tally:
     # nobody could say whether the cause was the NFTs or us. Three causes
     # that call for three different responses cannot share one number.
     not_ca: dict = field(default_factory=dict)
+    # The `image` count again, BY KIND (ipfs / data / data-svg). 30/09: an
+    # image stored on-chain (`data:`) could never pass the probe, and every
+    # one was reported as a dead pin. Split, it shows up at once.
+    image_kinds: dict = field(default_factory=dict)
 
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
@@ -413,6 +417,10 @@ class Tally:
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
             ("sem-pista", self.unwritable), ("sem-índice", self.no_index),
             ("indisponível-NOSSO", self.unavailable)) if v)
+        if self.image_kinds and self.image:
+            kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.image_kinds.items()))
+            causes = causes.replace(f"imagem {self.image}",
+                                    f"imagem {self.image} ({kinds})", 1)
         if self.not_ca:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.not_ca.items()))
             causes = (causes + ", " if causes else "") + \
@@ -657,6 +665,8 @@ class TargetFinder:
             return None
         if not head or not head[0]:
             tally.image += 1            # Hunt #11: a perfect URI, no bytes
+            k = image_uri_kind(image_uri)
+            tally.image_kinds[k] = tally.image_kinds.get(k, 0) + 1
             return None
         if self._max_image and head[1] and head[1] > self._max_image:
             tally.too_big += 1          # 171 MB, measured — vision cannot use it
