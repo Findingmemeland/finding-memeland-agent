@@ -15,7 +15,9 @@ fails fast via settings.assert_ready_for_hunt() if token/wallet aren't set
 
 from __future__ import annotations
 
+import urllib.request
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from .config import Settings, get_settings
 from datetime import UTC
@@ -37,13 +39,37 @@ _BROWSER_UA = (
 )
 
 
+class _GatewayKeyStaysHome(urllib.request.HTTPRedirectHandler):
+    """urllib's own redirects, except that the dedicated gateway's key never
+    leaves its host (30/09). urllib copies every request header onto the
+    redirected request — measured: a 302 to another host carried the key
+    with it. Same scheme and host keep it; anything else drops it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from .target.adapters import GATEWAY_KEY_HEADER
+
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            was, now = urlsplit(req.full_url), urlsplit(new.full_url)
+            if (was.scheme, was.netloc.lower()) != (now.scheme, now.netloc.lower()):
+                for h in [h for h in new.headers if h.lower() == GATEWAY_KEY_HEADER]:
+                    new.remove_header(h)
+        return new
+
+
+# Every GET that may carry the key goes through this opener: metadata (primary
+# and fallback), the image probe, the larder's artwork. Without the key in a
+# request it behaves exactly like urllib.request.urlopen.
+_GATEWAY_OPENER = urllib.request.build_opener(_GatewayKeyStaysHome)
+
+
 def _http_get_bytes(url: str, headers: dict | None = None, *,
                     timeout: float = 25) -> bytes:
     import urllib.request
 
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _GATEWAY_OPENER.open(req, timeout=timeout) as r:
         return r.read()
 
 
@@ -121,7 +147,7 @@ def _http_get_larder_art(url: str, headers: dict | None = None) -> bytes:
     deadline = time.monotonic() + LARDER_ART_DEADLINE_S
     chunks: list[bytes] = []
     got = 0
-    with urllib.request.urlopen(req, timeout=IMAGE_FETCH_TIMEOUT_S) as r:
+    with _GATEWAY_OPENER.open(req, timeout=IMAGE_FETCH_TIMEOUT_S) as r:
         while got < cap:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"artwork incomplete after {LARDER_ART_DEADLINE_S} s "
@@ -146,7 +172,7 @@ def _http_get_range(url: str, headers: dict | None = None) -> tuple[bytes, int]:
 
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
-    with urllib.request.urlopen(req, timeout=8) as r:
+    with _GATEWAY_OPENER.open(req, timeout=8) as r:
         # read(N) is not optional: a gateway that IGNORES Range answers 200
         # with the whole body, and without the cap the 171 MB piece comes
         # back anyway (Fable, 17/09).
@@ -1100,6 +1126,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                         )
                 except Exception as e:  # noqa: BLE001
                     lines.append(f"despensa: ilegível ({type(e).__name__})")
+                # The larder's dedicated gateway (30/09): its STATE only —
+                # never the URL, never the key.
+                lines.append(f"gateway dedicado: {s.target_ipfs_dedicated_state}")
                 # What /launch will actually publish. COUNTS AND CLOCKS ONLY.
                 try:
                     lines.append(target_wiring.prepared_line())

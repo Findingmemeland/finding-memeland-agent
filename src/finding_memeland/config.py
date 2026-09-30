@@ -8,8 +8,20 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _dedicated_url_ok(url: str) -> bool:
+    """https://<host>/ipfs/ — the shape every gateway here has. A dedicated
+    URL without the /ipfs/ path answers 404 to every CID, and under Pedro's
+    rule (29/09) a 404 is a dead pin: OUR typo would spend verified targets
+    in /prepare. So a malformed URL switches the dedicated gateway off."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return (parts.scheme == "https" and bool(parts.hostname)
+            and parts.path.rstrip("/") == "/ipfs" and not parts.query)
 
 
 class Settings(BaseSettings):
@@ -232,6 +244,17 @@ class Settings(BaseSettings):
     # named in target_missing(). Measured working 06/09: gateway.pinata.cloud
     # (a dedicated, paid Pinata gateway is acceptable on this path).
     target_ipfs_gateway: str = Field(default="")
+    # THE LARDER'S DEDICATED GATEWAY (30/09, Pedro): /harvest, /fill and
+    # /prepare read through it first, with the public gateway behind it. The
+    # public one answered 429 to 52 of 74 Base reads on 30/09. BOTH values or
+    # neither — with one missing the bot behaves exactly as before and
+    # /status names what is missing. Never a hunt-time path.
+    #   · the base URL, like the others: https://<name>.mypinata.cloud/ipfs/
+    #   · the Gateway Key (Pinata: Access Controls → Request Key), sent only
+    #     to that host, in the x-pinata-gateway-token header. SecretStr: it
+    #     never shows in a repr, a log or a message.
+    target_ipfs_dedicated_gateway: str = Field(default="")
+    target_ipfs_dedicated_key: SecretStr = Field(default=SecretStr(""))
     # Judge (batched, text) and vision models — Anthropic client.
     target_judge_model: str = Field(default="claude-sonnet-4-6")
     target_vision_model: str = Field(default="claude-sonnet-4-6")
@@ -273,6 +296,29 @@ class Settings(BaseSettings):
     @property
     def target_ipfs_gateway_list(self) -> list[str]:
         return self._csv(self.target_ipfs_gateways)
+
+    @property
+    def target_ipfs_dedicated(self) -> tuple[str, str] | None:
+        """(base URL, key) when BOTH are set and the URL has the gateway's
+        shape; None otherwise — and then the larder is exactly as before."""
+        url = self.target_ipfs_dedicated_gateway.strip()
+        key = self.target_ipfs_dedicated_key.get_secret_value().strip()
+        return (url, key) if key and _dedicated_url_ok(url) else None
+
+    @property
+    def target_ipfs_dedicated_state(self) -> str:
+        """For /status — names what is missing or wrong, never a value."""
+        raw = self.target_ipfs_dedicated_gateway.strip()
+        key = bool(self.target_ipfs_dedicated_key.get_secret_value().strip())
+        if not raw and not key:
+            return "não configurado"
+        if not raw or not key:
+            missing = "TARGET_IPFS_DEDICATED_KEY" if raw else "TARGET_IPFS_DEDICATED_GATEWAY"
+            return f"incompleto — falta {missing}; a despensa usa só o público"
+        if not _dedicated_url_ok(raw):
+            return ("URL inválido — TARGET_IPFS_DEDICATED_GATEWAY tem de ser "
+                    "https://…/ipfs/; a despensa usa só o público")
+        return "activo"
 
     @property
     def target_cap_exempt_set(self) -> frozenset[str]:

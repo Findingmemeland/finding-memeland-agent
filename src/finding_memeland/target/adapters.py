@@ -541,6 +541,12 @@ class Erc721Metadata:
         return doc
 
 
+# The header that carries a dedicated Pinata gateway's key (30/09). Sent ONLY
+# to that gateway's host; main.py's opener drops it on any redirect that
+# leaves the host, because urllib would otherwise forward it (measured 30/09).
+GATEWAY_KEY_HEADER = "x-pinata-gateway-token"
+
+
 def _http_status(e: BaseException) -> int | None:
     """The HTTP status an http_get exception carries (urllib's HTTPError has
     `.code`), or None for a timeout / connection error."""
@@ -610,6 +616,7 @@ class FailoverMetadata(Erc721Metadata):
 
     def __init__(self, *, rpcs: dict[str, ChainRpc], gateways: Sequence[str],
                  http_get: HttpGet, fallback_get: HttpGet | None = None,
+                 gateway_headers: dict[str, dict] | None = None,
                  max_bytes: int = 2_000_000):
         gws = [g for g in dict.fromkeys(gateways) if g]
         if not gws:
@@ -618,6 +625,9 @@ class FailoverMetadata(Erc721Metadata):
                          max_bytes=max_bytes)
         self._gateways = tuple(gws)
         self._fallback_get = fallback_get or http_get
+        # extra headers PER GATEWAY (30/09): the dedicated gateway's key, for
+        # that gateway only — a public gateway never sees it
+        self._headers = {g: dict(h) for g, h in (gateway_headers or {}).items()}
         self.stats = {"rescued": 0, "outcomes": {}}
 
     @property
@@ -632,15 +642,20 @@ class FailoverMetadata(Erc721Metadata):
     def _resolve(self, uri: str) -> dict:
         if uri.lower().startswith("data:"):
             return super()._resolve(uri)            # inline: no gateway at all
-        urls = list(dict.fromkeys(u for u in (gateway_url(uri, g)
-                                              for g in self._gateways) if u))
-        if not urls:
+        pairs, seen = [], set()
+        for g in self._gateways:
+            u = gateway_url(uri, g)
+            if u and u not in seen:
+                seen.add(u)
+                pairs.append((g, u))
+        if not pairs:
             raise MetadataInvalid("token URI of unknown scheme")
+        urls = [u for _, u in pairs]
         gone = not_json = 0
-        for i, url in enumerate(urls):
+        for i, (gw, url) in enumerate(pairs):
             get = self._get if i == 0 else self._fallback_get
             try:
-                text = get(url, {"Accept": "application/json"})
+                text = get(url, {"Accept": "application/json", **self._headers.get(gw, {})})
             except Exception as e:  # noqa: BLE001 — this host; try the next
                 self._note(i + 1, _failure_kind(e))
                 if _http_status(e) in (404, 410):

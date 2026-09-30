@@ -103,10 +103,10 @@ def test_each_network_wait_gets_the_image_timeout(monkeypatch):
         def read1(self, n):
             return b""
 
-    def urlopen(req, timeout):
+    def open_(req, timeout):
         seen["timeout"] = timeout
         return _Resp()
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr(main._GATEWAY_OPENER, "open", open_)       # noqa: SLF001
     main._http_get_larder_art("http://gw.example/ipfs/x")           # noqa: SLF001
     assert seen["timeout"] == main.IMAGE_FETCH_TIMEOUT_S == 60
 

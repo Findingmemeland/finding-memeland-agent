@@ -27,6 +27,7 @@ from .adapters import (
     AnthropicBatchJudge,
     AnthropicVision,
     Erc721Metadata,
+    GATEWAY_KEY_HEADER,
     FailoverMetadata,
     GatewayTally,
     GenericMetadata,
@@ -201,6 +202,10 @@ class TargetWiring:
     larder_meta: object = None
     # o contador do teste da imagem (30/09), pela mesma razão
     larder_image: object = None
+    # o gateway 1 da despensa é o dedicado (30/09): o relatório chama-lhe
+    # "dedicado" e diz quantos pedidos cada corrida lhe gastou — a quota do
+    # plano Free são 10 mil por mês
+    dedicated_gateway: bool = False
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -313,6 +318,7 @@ class TargetWiring:
         larder: Larder = self.larder_store.load()
         before = larder.size()
         lines: list[str] = []
+        run_start = self._meta_snapshot()
         try:
             for chain, harvester in self.harvesters.items():
                 if chain not in self.deposit_chains:
@@ -357,8 +363,19 @@ class TargetWiring:
         finally:
             self.larder_store.save(larder)
         added = larder.size() - before
-        return ("harvest:\n" + "\n".join(lines)
-                + f"\ndespensa {before} → {larder.size()} (+{added})")
+        tail = f"\ndespensa {before} → {larder.size()} (+{added})"
+        if self.dedicated_gateway and run_start is not None:
+            tail += self._dedicated_spend(run_start, self._meta_snapshot())
+        return "harvest:\n" + "\n".join(lines) + tail
+
+    @staticmethod
+    def _dedicated_spend(start: dict, end: dict) -> str:
+        """Requests this run sent to the dedicated gateway (position 1), for
+        the quota (30/09). What WE sent — Pinata's own count may differ."""
+        meta = sum(_outcomes_between(start["outcomes"], end["outcomes"]).get(1, {}).values())
+        image = sum(_outcomes_between(start["image"], end["image"]).get(1, {}).values())
+        return (f" · gateway dedicado: {meta + image} pedido(s) nesta corrida "
+                f"(metadata {meta}, imagem {image})")
 
     def _meta_snapshot(self) -> dict | None:
         """What the larder's metadata reader has counted so far — copied, so
@@ -391,7 +408,8 @@ class TargetWiring:
         for pos in sorted({p for _, moved in stages for p in moved}):
             parts = [f"{name}: {_outcomes_line(moved[pos])}"
                      for name, moved in stages if pos in moved]
-            text += f" · gateway {pos} — " + "; ".join(parts)
+            name = "dedicado" if self.dedicated_gateway and pos == 1 else f"gateway {pos}"
+            text += f" · {name} — " + "; ".join(parts)
         return text
 
     def gate_now(self) -> StratumGateReport | None:
@@ -766,8 +784,22 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # where it was missing. A pin is dead only when EVERY gateway agrees it
     # is; if they all merely fail to answer, that is OUR outage and the
     # caller keeps the candidate.
-    probe_gateways = [g for g in ([s.target_ipfs_gateway]
-                                  + list(s.target_ipfs_gateway_list)) if g]
+    #
+    # THE DEDICATED GATEWAY FIRST (30/09, Pedro) — only when BOTH its values
+    # are in Doppler; otherwise the list is exactly what it was. Its key goes
+    # to its own host and nowhere else: `gateway_headers` attaches it to that
+    # gateway only, and main's opener drops it on any redirect off the host.
+    # The public gateway stays behind it — the Free plan's 10k requests a
+    # month are the practical ceiling, and a dedicated gateway that fails
+    # must not stop the larder. Larder paths only: /harvest, /fill, /prepare,
+    # all refused during a hunt. The live check, the live hash and the reveal
+    # never see it.
+    dedicated = s.target_ipfs_dedicated
+    probe_gateways = list(dict.fromkeys(
+        g for g in ([dedicated[0]] if dedicated else [])
+        + [s.target_ipfs_gateway] + list(s.target_ipfs_gateway_list) if g))
+    gateway_headers = ({dedicated[0]: {GATEWAY_KEY_HEADER: dedicated[1]}}
+                       if dedicated else {})
 
     # THE SAME ROTATION FOR THE METADATA (29/09) — /harvest, /fill, the
     # deposit and the /prepare re-read. The 29/09 /harvest lost 116 reads to
@@ -776,12 +808,13 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # live hash, reveal) keeps `keyed_meta`; the live check is untouched.
     larder_meta = FailoverMetadata(rpcs=rpcs, gateways=probe_gateways,
                                    http_get=http_get,
-                                   fallback_get=http_get_fallback)
+                                   fallback_get=http_get_fallback,
+                                   gateway_headers=gateway_headers)
     larder_image = GatewayTally()
 
     def ask_every_gateway(uri: str, fetch, head_of):
         """Every gateway, in order, until one serves a still image — what
-        `fetch(url)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
+        `fetch(url, headers)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
         the metadata's rule: the candidate is blamed only when a gateway
         answers about the content itself.
 
@@ -791,14 +824,19 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
 
         Until 29/09 one HTML page among timeouts made a dead pin (and /prepare
         spent the target), while a 404 on every gateway kept it."""
-        urls = list(dict.fromkeys(u for u in (gateway_url(uri, g)
-                                              for g in probe_gateways) if u))
+        pairs, seen = [], set()
+        for g in probe_gateways:
+            u = gateway_url(uri, g)
+            if u and u not in seen:
+                seen.add(u)
+                pairs.append((g, u))
+        urls = [u for _, u in pairs]
         gone, unusable = 0, []
-        # every request counted by gateway and outcome (30/09) — the 29/09
+        # every request counted by gateway and outcome (30/09) — the 30/09
         # /harvest lost 13 Base candidates here with no cause to show
-        for pos, url in enumerate(urls, 1):
+        for pos, (gw, url) in enumerate(pairs, 1):
             try:
-                got = fetch(url)
+                got = fetch(url, gateway_headers.get(gw, {}))
             except Exception as e:  # noqa: BLE001 — this host; try the next
                 larder_image.note(pos, _failure_kind(e))
                 if _http_status(e) in (404, 410):
@@ -831,7 +869,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             return probe_inline_image(uri, max_bytes=MAX_IMAGE_BYTES,
                                       probe_bytes=PROBE_BYTES)
         got = ask_every_gateway(
-            uri, lambda url: ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}"}),
+            uri, lambda url, extra: ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}",
+                                                 **extra}),
             lambda g: g[0] if isinstance(g, tuple) else g)
         return got if isinstance(got, tuple) else (got, 0)
 
@@ -878,7 +917,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         # went through `get_art` (10 s, 5 MB cap), so an artwork over 5 MB
         # arrived cut short and would not open. The larder's reads up to
         # MAX_IMAGE_BYTES + 1, which makes the size check below reachable.
-        data = ask_every_gateway(uri, lambda url: larder_art(url, {}), lambda d: d)
+        data = ask_every_gateway(uri, lambda url, extra: larder_art(url, dict(extra)),
+                                 lambda d: d)
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageUnusable("tamanho")
         shrunk = shrink_for_vision(data)
@@ -961,6 +1001,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         deposit_chains=deposit_chains,
                         larder_meta=larder_meta,
                         larder_image=larder_image,
+                        dedicated_gateway=dedicated is not None,
                         prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,
