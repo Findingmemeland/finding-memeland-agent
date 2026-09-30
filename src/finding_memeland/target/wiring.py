@@ -320,7 +320,7 @@ class TargetWiring:
                         "Doppler dev, com tantos URLs como "
                         "TARGET_PUBLIC_RPCS_ETHEREUM)")
                     continue
-                rescued_before = self._rescued()
+                seen_before = self._meta_snapshot()
                 try:
                     refs, hrep = harvester.harvest(n_blocks, notify=self.notify)
                 except HarvestBlind as e:
@@ -335,17 +335,13 @@ class TargetWiring:
                                  f"({type(e).__name__}); nada foi concluído "
                                  "sobre esta cadeia")
                     continue
-                after_harvest = self._rescued()
+                seen_harvest = self._meta_snapshot()
                 dep = self.finder.deposit(
                     larder, refs, chain_ok=lambda c: c in self.deposit_chains)
                 line = f"{chain}: {hrep.render()} → depósito: {dep.render()}"
-                if after_harvest is not None:
-                    # Leituras que o 1.º gateway perdeu e outro serviu: NOSSAS,
-                    # medidas (29/09). Mostra-se também o zero — é informação.
-                    in_harvest = after_harvest - rescued_before
-                    in_deposit = self._rescued() - after_harvest
-                    line += (f" · rotação de gateways salvou {in_harvest} na "
-                             f"colheita e {in_deposit} no depósito")
+                if seen_before is not None:
+                    line += self._gateway_report(seen_before, seen_harvest,
+                                                 self._meta_snapshot())
                 lines.append(line)
                 # Gravar a cada cadeia, não só no fim (29/09): a primeira
                 # corrida real teve de ser morta ao fim de uma hora, e tudo
@@ -357,9 +353,34 @@ class TargetWiring:
         return ("harvest:\n" + "\n".join(lines)
                 + f"\ndespensa {before} → {larder.size()} (+{added})")
 
-    def _rescued(self) -> int | None:
+    def _meta_snapshot(self) -> dict | None:
+        """What the larder's metadata reader has counted so far — copied, so
+        the difference between two moments is this chain's, this stage's."""
         stats = getattr(self.larder_meta, "stats", None)
-        return stats.get("rescued", 0) if isinstance(stats, dict) else None
+        if not isinstance(stats, dict):
+            return None
+        return {"rescued": stats.get("rescued", 0),
+                "outcomes": {p: dict(k) for p, k in stats.get("outcomes", {}).items()}}
+
+    def _gateway_report(self, before: dict, mid: dict, after: dict) -> str:
+        """The metadata gateways, for one chain: what the rotation rescued, and
+        (30/09) every request by gateway and by outcome, harvest and deposit
+        apart. Codes and words only — never a gateway URL (it may carry a key).
+
+        Leituras que o 1.º gateway perdeu e outro serviu: NOSSAS, medidas
+        (29/09). Mostra-se também o zero — é informação."""
+        n = getattr(self.larder_meta, "gateway_count", None)
+        avail = (f" ({n} gateway disponível)" if n == 1
+                 else f" ({n} gateways disponíveis)" if n else "")
+        text = (f" · rotação de gateways salvou {mid['rescued'] - before['rescued']} "
+                f"na colheita e {after['rescued'] - mid['rescued']} no depósito{avail}")
+        stages = (("colheita", _outcomes_between(before["outcomes"], mid["outcomes"])),
+                  ("depósito", _outcomes_between(mid["outcomes"], after["outcomes"])))
+        for pos in sorted({p for _, moved in stages for p in moved}):
+            parts = [f"{name}: {_outcomes_line(moved[pos])}"
+                     for name, moved in stages if pos in moved]
+            text += f" · gateway {pos} — " + "; ".join(parts)
+        return text
 
     def gate_now(self) -> StratumGateReport | None:
         """The gate over the STORED snapshot, right now — what /launch will
@@ -394,6 +415,25 @@ class TargetWiring:
 
     def snapshot(self) -> PipelineReport:
         return self.pipeline.refresh(self.epoch)
+
+
+def _outcomes_between(before: dict, after: dict) -> dict:
+    """{gateway position: {outcome: n}} that moved between two snapshots."""
+    moved = {}
+    for pos, kinds in after.items():
+        was = before.get(pos, {})
+        diff = {k: n - was.get(k, 0) for k, n in kinds.items() if n > was.get(k, 0)}
+        if diff:
+            moved[pos] = diff
+    return moved
+
+
+def _outcomes_line(kinds: dict) -> str:
+    """"serviu" first, then the failures, biggest first."""
+    rest = sorted(((k, n) for k, n in kinds.items() if k != "serviu"),
+                  key=lambda kv: (-kv[1], kv[0]))
+    served = [f"serviu {kinds['serviu']}"] if kinds.get("serviu") else []
+    return ", ".join(served + [f"{k} {n}" for k, n in rest])
 
 
 def _media_kind(data: bytes) -> str:

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import http.client
 import itertools
 import json
 import re
@@ -547,6 +548,23 @@ def _http_status(e: BaseException) -> int | None:
     return code if isinstance(code, int) and 100 <= code <= 599 else None
 
 
+def _failure_kind(e: BaseException) -> str:
+    """How one gateway request failed, for the operator's report (30/09):
+    the HTTP code ("429", "504", …), "timeout", "ligação" (DNS, refused,
+    reset, TLS, a cut-off body) or "outro". A 429 and a timeout call for
+    different answers — being limited is not being slow."""
+    code = _http_status(e)
+    if code is not None:
+        return str(code)
+    # before OSError: TimeoutError IS an OSError, and urllib wraps a connect
+    # timeout in a URLError whose `reason` is the TimeoutError
+    if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+        return "timeout"
+    if isinstance(e, (OSError, http.client.HTTPException)):
+        return "ligação"
+    return "outro"
+
+
 class FailoverMetadata(Erc721Metadata):
     """The LARDER's reader (29/09): /harvest, /fill, the deposit and the
     /prepare re-read. Our gateway first; when it fails, every other gateway
@@ -573,7 +591,9 @@ class FailoverMetadata(Erc721Metadata):
     `fallback_get` reads the fallbacks — main.py gives it a SHORT timeout, so
     a pin nobody serves costs the primary's wait plus a few seconds per extra
     gateway, not 25 s each. `stats["rescued"]` counts reads the primary lost
-    and a fallback served: OURS, measured, for the /harvest report."""
+    and a fallback served: OURS, measured, for the /harvest report.
+    `stats["outcomes"]` (30/09) counts every request by gateway position
+    (1 = ours) and by outcome — "serviu", "não-json", or `_failure_kind`."""
 
     def __init__(self, *, rpcs: dict[str, ChainRpc], gateways: Sequence[str],
                  http_get: HttpGet, fallback_get: HttpGet | None = None,
@@ -585,7 +605,16 @@ class FailoverMetadata(Erc721Metadata):
                          max_bytes=max_bytes)
         self._gateways = tuple(gws)
         self._fallback_get = fallback_get or http_get
-        self.stats = {"rescued": 0}
+        self.stats = {"rescued": 0, "outcomes": {}}
+
+    @property
+    def gateway_count(self) -> int:
+        """Distinct gateways — 1 means there is nothing to rotate to."""
+        return len(self._gateways)
+
+    def _note(self, position: int, outcome: str) -> None:
+        by = self.stats["outcomes"].setdefault(position, {})
+        by[outcome] = by.get(outcome, 0) + 1
 
     def _resolve(self, uri: str) -> dict:
         if uri.lower().startswith("data:"):
@@ -600,16 +629,20 @@ class FailoverMetadata(Erc721Metadata):
             try:
                 text = get(url, {"Accept": "application/json"})
             except Exception as e:  # noqa: BLE001 — this host; try the next
+                self._note(i + 1, _failure_kind(e))
                 if _http_status(e) in (404, 410):
                     gone += 1
                 continue
             if len(text) > self._max:
+                self._note(i + 1, "serviu")         # the gateway worked; the content is bad
                 raise MetadataInvalid("metadata body too large")
             try:
                 doc = json.loads(text)
             except ValueError:
+                self._note(i + 1, "não-json")
                 not_json += 1                       # a throttle page, maybe
                 continue
+            self._note(i + 1, "serviu")
             if not isinstance(doc, dict):
                 raise MetadataInvalid("metadata is not an object")
             if i:
