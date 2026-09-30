@@ -701,7 +701,7 @@ class TargetFinder:
         return (src, int(tid)) if tid is not None else None
 
     def named_token(self, src: Source, tid: int, tally: Tally, *,
-                    strict: bool = False):
+                    strict: bool = False, known=None):
         """Checks 1 and 2 — metadata resolves, image is content-addressed,
         base name has two real words. Local and cheap; kills first.
 
@@ -709,9 +709,14 @@ class TargetFinder:
         counting as a rejection, so the caller can tell 'this candidate is
         dead' from 'we could not read it right now' and keep the candidate.
         The one exception is a dead pin a gateway NAMED (404/410): that is an
-        answer about the content, and the candidate is dropped (Pedro, 29/09)."""
+        answer about the content, and the candidate is dropped (Pedro, 29/09).
+
+        `known` (30/09): a read made minutes ago by the /harvest, used instead
+        of asking the gateway again. Only the deposit passes it; /prepare
+        always re-reads."""
         try:
-            read = self._read_token(src.chain, src.contract, tid)
+            read = (known if known is not None
+                    else self._read_token(src.chain, src.contract, tid))
         except Exception as e:  # noqa: BLE001 — this draw, not the run
             if strict and not isinstance(e, MetadataPinGone):
                 raise ReadUnavailable(type(e).__name__) from None
@@ -836,6 +841,7 @@ class TargetFinder:
     def deposit(self, larder: Larder, refs: Sequence[str], *,
                 chain_ok: Callable[[str], bool] | None = None,
                 notify: Callable[[str], None] | None = None,
+                known_reads: dict | None = None,
                 ) -> DepositReport:
         """Alvos NOMEADOS entram na despensa, sem passarem pelo sorteio.
 
@@ -862,9 +868,18 @@ class TargetFinder:
         pista publicada e jogadores a responder. É o mesmo modo de falha que
         as guardas do wiring existem para impedir, e o depósito é uma porta
         nova para ele. Sem `chain_ok` injectado só passa o que o `SOURCES`
-        já lê hoje, que é o valor seguro."""
+        já lê hoje, que é o valor seguro.
+
+        `known_reads` (30/09): {ref: TokenRead} que a colheita ACABOU de ler.
+        Esses não se relêem. A metadata é endereçada por conteúdo (a colheita
+        só guarda essas), portanto a segunda leitura trazia os mesmos bytes e
+        não verificava nada — só custava um pedido ao gateway, e em 29/09
+        custou 14 candidatos de Base que ele falhou a servir pela segunda
+        vez. As outras quatro verificações correm iguais; o /prepare relê
+        antes de selar."""
         note = notify or (lambda _t: None)
         ok = chain_ok or (lambda c: c in {s.chain for s in self._sources})
+        known = {parse_ref(k): v for k, v in (known_reads or {}).items()}
         rep = DepositReport()
         for raw in refs:
             rep.asked += 1
@@ -884,7 +899,8 @@ class TargetFinder:
                 continue
             src = Source("deposit", chain, contract)
             rep.rejected.draws += 1
-            named = self.named_token(src, tid, rep.rejected)
+            named = self.named_token(src, tid, rep.rejected,
+                                     known=known.get((chain, contract, tid)))
             if named is None:
                 continue
             read, base = named

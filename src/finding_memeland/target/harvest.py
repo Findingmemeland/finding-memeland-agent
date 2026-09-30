@@ -248,6 +248,11 @@ class HarvestReport:
     uri_not_ca: dict = field(default_factory=dict)    # tokenURI fora de IPFS
     image_not_ca: dict = field(default_factory=dict)  # imagem fora de IPFS
     contracts: set = field(default_factory=set)
+    # A leitura de cada ref que FICOU (30/09), para o depósito não a pedir
+    # outra vez: nas colheitas de 29/09, 14 candidatos de Base caíram na
+    # releitura de metadata que o mesmo gateway tinha servido minutos antes.
+    # Tem nomes — NUNCA se mostra (repr=False, fora do render).
+    reads: dict = field(default_factory=dict, repr=False)
 
     @staticmethod
     def _kinds(d: dict) -> str:
@@ -446,6 +451,8 @@ class MintHarvester:
                 seen[contract] = seen.get(contract, 0) + 1
                 rep.contracts.add(contract)
                 rep.kept += 1
-                refs.append(f"{self._chain}:{contract}:{tid}")
+                ref = f"{self._chain}:{contract}:{tid}"
+                refs.append(ref)
+                rep.reads[ref] = read
         note(f"harvest: {rep.render()}")
         return refs, rep

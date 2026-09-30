@@ -336,8 +336,11 @@ class TargetWiring:
                                  "sobre esta cadeia")
                     continue
                 seen_harvest = self._meta_snapshot()
+                # a leitura da colheita segue para o depósito (30/09): não se
+                # pede outra vez ao gateway o que ele acabou de servir
                 dep = self.finder.deposit(
-                    larder, refs, chain_ok=lambda c: c in self.deposit_chains)
+                    larder, refs, chain_ok=lambda c: c in self.deposit_chains,
+                    known_reads=hrep.reads)
                 line = f"{chain}: {hrep.render()} → depósito: {dep.render()}"
                 if seen_before is not None:
                     line += self._gateway_report(seen_before, seen_harvest,
