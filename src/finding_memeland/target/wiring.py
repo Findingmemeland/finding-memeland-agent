@@ -28,7 +28,9 @@ from .adapters import (
     AnthropicVision,
     Erc721Metadata,
     FailoverMetadata,
+    GatewayTally,
     GenericMetadata,
+    _failure_kind,
     _http_status,
     JsonRpc,
     MarketplaceLinkResolver,
@@ -197,6 +199,8 @@ class TargetWiring:
     # o leitor de metadata da despensa (29/09) — só para o /harvest contar
     # quantas leituras a rotação de gateways salvou
     larder_meta: object = None
+    # o contador do teste da imagem (30/09), pela mesma razão
+    larder_image: object = None
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -362,13 +366,16 @@ class TargetWiring:
         stats = getattr(self.larder_meta, "stats", None)
         if not isinstance(stats, dict):
             return None
+        image = getattr(self.larder_image, "stats", None) or {}
         return {"rescued": stats.get("rescued", 0),
-                "outcomes": {p: dict(k) for p, k in stats.get("outcomes", {}).items()}}
+                "outcomes": {p: dict(k) for p, k in stats.get("outcomes", {}).items()},
+                "image": {p: dict(k) for p, k in image.get("outcomes", {}).items()}}
 
     def _gateway_report(self, before: dict, mid: dict, after: dict) -> str:
-        """The metadata gateways, for one chain: what the rotation rescued, and
-        (30/09) every request by gateway and by outcome, harvest and deposit
-        apart. Codes and words only — never a gateway URL (it may carry a key).
+        """The larder's gateways, for one chain: what the rotation rescued, and
+        (30/09) every request by gateway and by outcome — metadata in the
+        harvest and in the deposit, and the deposit's image test apart.
+        Codes and words only — never a gateway URL (it may carry a key).
 
         Leituras que o 1.º gateway perdeu e outro serviu: NOSSAS, medidas
         (29/09). Mostra-se também o zero — é informação."""
@@ -378,7 +385,9 @@ class TargetWiring:
         text = (f" · rotação de gateways salvou {mid['rescued'] - before['rescued']} "
                 f"na colheita e {after['rescued'] - mid['rescued']} no depósito{avail}")
         stages = (("colheita", _outcomes_between(before["outcomes"], mid["outcomes"])),
-                  ("depósito", _outcomes_between(mid["outcomes"], after["outcomes"])))
+                  ("depósito", _outcomes_between(mid["outcomes"], after["outcomes"])),
+                  # the image test runs in the deposit (30/09)
+                  ("depósito (imagem)", _outcomes_between(mid["image"], after["image"])))
         for pos in sorted({p for _, moved in stages for p in moved}):
             parts = [f"{name}: {_outcomes_line(moved[pos])}"
                      for name, moved in stages if pos in moved]
@@ -768,6 +777,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     larder_meta = FailoverMetadata(rpcs=rpcs, gateways=probe_gateways,
                                    http_get=http_get,
                                    fallback_get=http_get_fallback)
+    larder_image = GatewayTally()
 
     def ask_every_gateway(uri: str, fetch, head_of):
         """Every gateway, in order, until one serves a still image — what
@@ -784,17 +794,22 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         urls = list(dict.fromkeys(u for u in (gateway_url(uri, g)
                                               for g in probe_gateways) if u))
         gone, unusable = 0, []
-        for url in urls:
+        # every request counted by gateway and outcome (30/09) — the 29/09
+        # /harvest lost 13 Base candidates here with no cause to show
+        for pos, url in enumerate(urls, 1):
             try:
                 got = fetch(url)
             except Exception as e:  # noqa: BLE001 — this host; try the next
+                larder_image.note(pos, _failure_kind(e))
                 if _http_status(e) in (404, 410):
                     gone += 1
                 continue
             head = head_of(got)
             if head and sniff_media_type(head) is not None:
+                larder_image.note(pos, "serviu")
                 return got
             kind = _not_a_still_image(head)
+            larder_image.note(pos, kind or (_media_kind(head) if head else "vazio"))
             if kind:
                 unusable.append(kind)
         if unusable:
@@ -945,6 +960,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,
                         larder_meta=larder_meta,
+                        larder_image=larder_image,
                         prepared_store=prepared_store,
                         larder_preparer=larder_preparer,
                         pool_key=s.target_pool_key,

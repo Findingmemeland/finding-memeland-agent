@@ -565,6 +565,19 @@ def _failure_kind(e: BaseException) -> str:
     return "outro"
 
 
+class GatewayTally:
+    """Requests to the larder's gateways by position (1 = the first tried)
+    and outcome — the image test's counter (30/09), the same shape as
+    FailoverMetadata's `stats["outcomes"]`, for the /harvest report."""
+
+    def __init__(self):
+        self.stats = {"outcomes": {}}
+
+    def note(self, position: int, outcome: str) -> None:
+        by = self.stats["outcomes"].setdefault(position, {})
+        by[outcome] = by.get(outcome, 0) + 1
+
+
 class FailoverMetadata(Erc721Metadata):
     """The LARDER's reader (29/09): /harvest, /fill, the deposit and the
     /prepare re-read. Our gateway first; when it fails, every other gateway
