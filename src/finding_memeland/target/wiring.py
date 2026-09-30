@@ -297,7 +297,7 @@ class TargetWiring:
             self.larder_store.save(larder)      # keep whatever was found
         return f"fill: {tally.render()} · despensa {larder.size()}"
 
-    def harvest(self, n_blocks: int) -> str:
+    def harvest(self, n_blocks: int, *, only: str | None = None) -> str:
         """Colher alvos da cadeia e depositá-los na despensa.
 
         POR CADEIA, e cada uma responde por si: uma cadeia sem canário ou
@@ -310,17 +310,27 @@ class TargetWiring:
 
         Nada do que sai daqui tem nome, contrato ou tokenId — só contagens
         e causas. A despensa são as próximas respostas; o relatório vai para
-        o Telegram e fica no histórico."""
+        o Telegram e fica no histórico.
+
+        `only` (30/09): só essa cadeia — a corrida e a quota do gateway
+        gastam-se ali. None = todas, como antes."""
         if self.finder is None or self.larder_store is None:
             return "despensa não configurada"
         if not self.harvesters:
             return "colheita não configurada"
+        if only is not None and only not in self.harvesters:
+            # R8: pediu-se uma cadeia que este processo não sabe colher (sem
+            # RPC com chave). Dizer isso — nunca correr as outras no lugar dela.
+            return (f"harvest: {only} não configurada — sem RPC com chave para "
+                    f"ela; nada foi varrido")
         larder: Larder = self.larder_store.load()
         before = larder.size()
         lines: list[str] = []
         run_start = self._meta_snapshot()
         try:
             for chain, harvester in self.harvesters.items():
+                if only is not None and chain != only:
+                    continue
                 if chain not in self.deposit_chains:
                     # Saltar ANTES de varrer: colher alvos que o depósito vai
                     # recusar é gastar chamadas para nada.
@@ -366,7 +376,8 @@ class TargetWiring:
         tail = f"\ndespensa {before} → {larder.size()} (+{added})"
         if self.dedicated_gateway and run_start is not None:
             tail += self._dedicated_spend(run_start, self._meta_snapshot())
-        return "harvest:\n" + "\n".join(lines) + tail
+        head = "harvest:" if only is None else f"harvest (só {only}):"
+        return head + "\n" + "\n".join(lines) + tail
 
     @staticmethod
     def _dedicated_spend(start: dict, end: dict) -> str:

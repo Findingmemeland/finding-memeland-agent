@@ -75,6 +75,32 @@ HARVEST_SAFE_DEPTH = 1_000
 HARVEST_CHAINS = ("ethereum", "base")
 
 
+HARVEST_USAGE = ("usage: /harvest [1..2000] [cadeia] — cadeias: "
+                 + ", ".join(HARVEST_CHAINS) + " (sem cadeia: todas)")
+
+
+def parse_harvest_args(arg: str, *, default_blocks: int) -> tuple[int, str | None]:
+    """"/harvest [blocos] [cadeia]", em qualquer ordem → (blocos, cadeia ou
+    None = todas). ValueError com o uso em tudo o resto.
+
+    A cadeia (30/09, Pedro): encher a despensa de Base sem gastar a corrida
+    nem a quota do gateway em Ethereum, que já tem alvos que cheguem. Uma
+    cadeia que o jogo não conhece é recusada — nunca ignorada em silêncio,
+    que era correr as duas quando se pediu uma."""
+    n, chain = None, None
+    for tok in (arg or "").split():
+        if tok.isdigit() and n is None:
+            n = int(tok)
+        elif tok.lower() in HARVEST_CHAINS and chain is None:
+            chain = tok.lower()
+        else:
+            raise ValueError(HARVEST_USAGE)
+    n = int(default_blocks) if n is None else n
+    if not 1 <= n <= 2000:
+        raise ValueError(HARVEST_USAGE)
+    return n, chain
+
+
 def parse_canary(spec: str) -> tuple[int, int]:
     """"bloco:mints" → (bloco, mints). (0, 0) se vazio ou torto.
 

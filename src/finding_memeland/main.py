@@ -1421,8 +1421,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
         return _target_job("fill", lambda: target_wiring.fill(want))
 
     def _harvest(arg: str = "") -> str:
-        """Colher alvos da cadeia — Ethereum e Base — e depositá-los na
-        despensa (28/09, decisões do Pedro: só manual, 200 blocos).
+        """Colher alvos da cadeia — Ethereum e Base, ou só uma (30/09:
+        `/harvest 200 base`) — e depositá-los na despensa (28/09, decisões
+        do Pedro: só manual, 200 blocos).
 
         Um bloco ao calhas não tem opinião: sem marketplace, sem ordenação,
         o alvo pode ser qualquer NFT alguma vez mintado — incluindo um
@@ -1433,13 +1434,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
         (a verificação de unicidade gasta a MESMA quota do OpenSea que a
         guarda das pistas) e partilha a flag com /fill e /prepare, que
         gravariam a despensa por cima uns dos outros."""
+        from .target.harvest import parse_harvest_args
         try:
-            n = int(arg.strip()) if arg.strip() else int(s.harvest_blocks)
-        except ValueError:
-            return "usage: /harvest [blocos por cadeia]"
-        if n < 1 or n > 2000:
-            return "usage: /harvest [1..2000]"
-        return _target_job("harvest", lambda: target_wiring.harvest(n))
+            n, chain = parse_harvest_args(arg, default_blocks=int(s.harvest_blocks))
+        except ValueError as e:
+            return str(e)
+        return _target_job("harvest", lambda: target_wiring.harvest(n, only=chain))
 
     def _prepare(arg: str = "") -> str:
         """Take one target out of the larder, re-verify it live, write Clue 1
