@@ -400,9 +400,23 @@ class LarderStore:
 # ORDER MATTERS: the first counter that moved wins, and `crowded_same` is a
 # sub-count of `crowded` (both move together), so it must come first.
 _UNIQUE_REASONS = {"not_unique": "não-único", "crowded_same": "cheio-com-igual",
-                   "crowded": "cheio-sem-igual", "blind": "índice-cego",
+                   "crowded": "cheio-sem-igual",
+                   # 30/09: the blind canary split by asking for the item
+                   "blind_unindexed": "índice-cego:não-indexada",
+                   "blind_flagged": "índice-cego:indexada-marcada",
+                   "blind_clean": "índice-cego:indexada-sem-marca",
+                   "blind_unknown": "índice-cego:sem-veredicto",
+                   "blind": "índice-cego",
                    "transport": "rede-NOSSO"}
-_OWNER_REASONS = {"contract": "contrato", "unverifiable": "sem-veredicto"}
+_OWNER_REASONS = {
+    # 30/09: how a contract owner answered ERC-1271 (sources._erc1271_answer)
+    "contract_1271": "contrato:responde-1271",
+    "contract_reason": "contrato:reverte-com-motivo",
+    "contract_mute": "contrato:reverte-mudo",
+    "contract_empty": "contrato:vazio",
+    "contract_other": "contrato:outro",
+    "contract_noanswer": "contrato:sem-resposta",
+    "contract": "contrato", "unverifiable": "sem-veredicto"}
 
 
 def _snapshot(guard) -> dict | None:

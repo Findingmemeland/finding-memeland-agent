@@ -113,10 +113,15 @@ class RpcError(RuntimeError):
     a burn, either would void an honest hunt. So callers map revert →
     None and any other RpcError → ChainUnavailable."""
 
-    def __init__(self, code: int, message: str, *, revert: bool):
+    def __init__(self, code: int, message: str, *, revert: bool,
+                 data: str | None = None):
         super().__init__(f"rpc error {code}: {message[:120]}")
         self.code = code
         self.revert = revert
+        # the revert's own bytes (30/09): a reason or a custom error, or
+        # nothing — what tells a wallet refusing a signature from a contract
+        # without the function (sources._erc1271_answer)
+        self.data = data if isinstance(data, str) else None
 
 
 _REVERT_SELECTORS = ("0x08c379a0", "0x4e487b71")   # Error(string), Panic(uint)
@@ -165,7 +170,8 @@ class JsonRpc:
             if code in (429, -32005, -32016, -32029) or "rate" in low \
                     or "capacity" in low or "too many requests" in low:
                 raise ChainUnavailable(f"{self.label}: throttled")
-            raise RpcError(code, msg, revert=_is_revert(code, msg, err.get("data")))
+            raise RpcError(code, msg, revert=_is_revert(code, msg, err.get("data")),
+                           data=err.get("data"))
         if "result" not in doc:
             raise ChainUnavailable(f"{self.label}: no result field")
         return doc["result"]
@@ -924,6 +930,33 @@ class OpenSeaChainProbe:
                     and str(nft.get("identifier", "")) == str(int(token_id))):
                 hits.append(chain)
         return hits[0] if len(hits) == 1 else None
+
+    def item_status(self, chain: str, contract: str, token_id: int) -> str | None:
+        """ONE item on ONE chain (30/09) — measurement for the uniqueness
+        guard's blind canary: "missing" (a 404: OpenSea does not know it),
+        "flagged" (it knows it and marks it is_suspicious / is_disabled /
+        is_nsfw — fields measured in opensea_item_ethereum.json), "clean",
+        or None for any other answer. Only these words leave here."""
+        slug = self._slugs.get(chain)
+        if slug is None:
+            return None
+        want_c = contract.lower()
+        url = f"{self._base}/chain/{slug}/contract/{want_c}/nfts/{int(token_id)}"
+        try:
+            text = self._get(url, {"X-API-KEY": self._key, "Accept": "application/json"})
+        except Exception as e:  # noqa: BLE001
+            return "missing" if _is_not_found(e) else None
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            return None
+        nft = doc.get("nft") if isinstance(doc, dict) else None
+        if not (isinstance(nft, dict)
+                and str(nft.get("contract", "")).lower() == want_c
+                and str(nft.get("identifier", "")) == str(int(token_id))):
+            return None
+        flagged = any(nft.get(k) is True for k in ("is_suspicious", "is_disabled", "is_nsfw"))
+        return "flagged" if flagged else "clean"
 
 
 def _is_not_found(e: Exception) -> bool:

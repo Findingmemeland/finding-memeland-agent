@@ -649,7 +649,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         chain_probe = RaribleChainProbe(http_get=http_get,
                                         api_key=s.rarible_api_key)
     search_guard = ClueSearchGuard(search=market)
-    uniqueness = MarketNameUniqueness(search=market, page_size=page)
+    uniqueness = MarketNameUniqueness(
+        search=market, page_size=page,
+        # 30/09: the blind canary split by asking for the item (OpenSea only)
+        item_status=getattr(chain_probe, "item_status", None))
     resolver = MarketplaceLinkResolver(
         chain_probe=chain_probe,
         page_resolvers={},          # Foundation/SuperRare: after their capture

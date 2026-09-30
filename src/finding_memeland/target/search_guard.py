@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -462,8 +463,15 @@ class MarketNameUniqueness:
     `stats` is counts only (never names) — safe for the operator log."""
 
     def __init__(self, *, search: NameSearch, page_size: int,
-                 retries: int = 2, sleep_s: float = 2.0):
+                 retries: int = 2, sleep_s: float = 2.0,
+                 item_status: Callable[[str, str, int], str | None] | None = None):
         self._search = search
+        # "blind" split by ASKING the marketplace for the item itself (30/09,
+        # measurement only — the answer stays None): does it not know the
+        # piece, or know it and keep it out of the search (flagged or not)?
+        # The first means players cannot find it there either; the second
+        # may mean the guard is refusing playable targets.
+        self._item_status = item_status
         self._page = page_size
         self._retries = retries
         self._sleep = sleep_s
@@ -474,7 +482,9 @@ class MarketNameUniqueness:
         # piece OpenSea merely ranked below 50 look-alikes. Measurement only:
         # the answer stays None either way.
         self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
-                      "crowded": 0, "crowded_same": 0, "transport": 0}
+                      "crowded": 0, "crowded_same": 0, "transport": 0,
+                      "blind_unindexed": 0, "blind_flagged": 0,
+                      "blind_clean": 0, "blind_unknown": 0}
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
@@ -500,11 +510,23 @@ class MarketNameUniqueness:
                     self.stats["crowded_same"] += 1
             else:
                 self.stats["blind"] += 1
+                self._split_blind(chain, contract, token_id)
             return None
         others = [i for i, n in ids.items()
                   if i != want and normalize_name(n or "").casefold() == key]
         self.stats["not_unique" if others else "unique"] += 1
         return not others
+
+
+    def _split_blind(self, chain: str, contract: str, token_id: int) -> None:
+        if self._item_status is None:
+            return
+        try:
+            got = self._item_status(chain, contract, token_id)
+        except Exception:  # noqa: BLE001 — a measurement never breaks a verdict
+            got = None
+        self.stats[{"missing": "blind_unindexed", "flagged": "blind_flagged",
+                    "clean": "blind_clean"}.get(got, "blind_unknown")] += 1
 
 
 class FakeSearch:

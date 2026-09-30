@@ -41,6 +41,7 @@ from __future__ import annotations
 import random
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Iterator
 
@@ -573,10 +574,19 @@ class ChainEoaCheck:
         # tell (ours, or a burned token). Same pattern as the uniqueness
         # guard's `stats`.
         self.stats = {"eoa": 0, "contract": 0, "unverifiable": 0}
+        # "contract" again, by how the owner answered ERC-1271 (30/09) —
+        # MEASUREMENT ONLY: the verdict stays False either way. See
+        # _erc1271_answer for what each one means and does not mean.
+        for k in _ERC1271_KINDS:
+            self.stats[f"contract_{k}"] = 0
+        self._contract_kind: str | None = None
 
     def __call__(self, chain: str, contract: str, token_id: int) -> bool | None:
+        self._contract_kind = None
         got = self._check(chain, contract, token_id)
         self.stats[{True: "eoa", False: "contract"}.get(got, "unverifiable")] += 1
+        if got is False and self._contract_kind:
+            self.stats[f"contract_{self._contract_kind}"] += 1
         return got
 
     def _check(self, chain: str, contract: str, token_id: int) -> bool | None:
@@ -591,9 +601,74 @@ class ChainEoaCheck:
             owner = _address_from_word(data)
             if owner is None:
                 return None
-            return rpc.is_eoa(owner)
+            eoa = rpc.is_eoa(owner)
+            if not eoa:
+                self._contract_kind = _erc1271_answer(rpc, owner)
+            return eoa
         except Exception:  # noqa: BLE001 — revert or transport: unverifiable
             return None
+
+
+# --------------------------------------------------------------------------- #
+# ERC-1271: does the contract that owns the piece answer like a wallet?       #
+# --------------------------------------------------------------------------- #
+#
+# 30/09, Pedro: "se respondem como carteira de pessoa (ERC-1271) ou se são
+# cofres" — the owner-contract wall kept 8 candidates out on 30/09, and no
+# Base target has ever entered the larder. MEASUREMENT ONLY.
+#
+# The question is isValidSignature(bytes32 hash, bytes signature) with a hash
+# of zeros and a signature SHAPED like (uint256, bytes) — the shape smart-
+# account wallets such as Coinbase Smart Wallet decode (expected, not measured
+# on-chain: an empty signature would make such a wallet revert as mutely as a
+# contract without the function). What the report counts is only what each
+# contract DID — the reading of it is the operator's:
+#   responde-1271       a 32-byte answer (the magic value or 0xffffffff): it
+#                       implements ERC-1271 — a smart-account wallet
+#   reverte-com-motivo  a revert that says something (a reason, a custom
+#                       error): what a wallet refusing a bad signature does —
+#                       or anything else that checks its input
+#   reverte-mudo        a revert with nothing: what a contract without the
+#                       function does — a vault, an escrow, a marketplace
+#   vazio / outro       no bytes / not a word: a fallback that swallows calls
+#   sem-resposta        the call failed on our side: nothing concluded
+
+SEL_IS_VALID_SIGNATURE = "0x1626ba7e"
+_ERC1271_KINDS = ("1271", "reason", "mute", "empty", "other", "noanswer")
+
+
+def _word(n: int) -> str:
+    return f"{n:064x}"
+
+
+def _erc1271_probe_calldata() -> str:
+    # signature = abi.encode((uint256 0, bytes 65 × 0x00)): tuple offset,
+    # the uint, the bytes' offset in the tuple, its length, 65 bytes padded
+    sig = _word(0x20) + _word(0) + _word(0x40) + _word(65) + "00" * 96
+    return (SEL_IS_VALID_SIGNATURE + _word(0) + _word(0x40)
+            + _word(len(sig) // 2) + sig)
+
+
+_ERC1271_CALL = _erc1271_probe_calldata()
+_REASON_IN_MESSAGE = re.compile(r"revert(?:ed)?\s*:\s*\S", re.I)
+
+
+def _erc1271_answer(rpc: ChainRpc, owner: str) -> str:
+    """One of _ERC1271_KINDS. Never raises: a measurement cannot change a
+    verdict, least of all by blowing up inside it."""
+    try:
+        data = rpc.eth_call(owner, _ERC1271_CALL)
+    except Exception as e:  # noqa: BLE001
+        if getattr(e, "revert", False):
+            raw = getattr(e, "data", None) or ""
+            said = (isinstance(raw, str) and len(raw.strip()) > 2) \
+                or bool(_REASON_IN_MESSAGE.search(str(e)))
+            return "reason" if said else "mute"
+        return "noanswer"
+    body = (data or "").strip().lower()
+    if body in ("", "0x"):
+        return "empty"
+    return "1271" if len(body) >= 66 else "other"
 
 
 def _address_from_word(data: str | None) -> str | None:
