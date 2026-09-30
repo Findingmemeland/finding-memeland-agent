@@ -19,6 +19,7 @@ Doctrine carried here, not in main.py:
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Callable
@@ -47,6 +48,7 @@ from .adapters import (
     inline_artwork,
     mint_fetcher,
     probe_inline_image,
+    rasterize_svg,
     shrink_for_vision,
     sniff_media_type,
 )
@@ -499,15 +501,31 @@ def _media_kind(data: bytes) -> str:
 _NOT_STILL = frozenset({"video/mp4", "video/webm", "pdf", "svg"})
 
 
+_XML_PREAMBLE = re.compile(rb"\s*(?:<\?xml[^>]*\?>|<!--.*?-->|<!DOCTYPE[^>\[]*>)",
+                           re.S | re.I)
+
+
+def _svg_document(data: bytes) -> bool:
+    """The document's ROOT element is <svg> — after an XML prolog, comments,
+    a DOCTYPE. Not merely an <svg> somewhere: an HTML error page can carry
+    an inline SVG logo, and since 30/09 an SVG is drawn and judged — a
+    gateway's page taken for the artwork would blame the candidate."""
+    head = data[:8192].lstrip(b"\xef\xbb\xbf")
+    pos = 0
+    while (m := _XML_PREAMBLE.match(head, pos)) and m.end() > pos:
+        pos = m.end()
+    return head[pos:].lstrip()[:4].lower() == b"<svg"
+
+
 def _not_a_still_image(data: bytes) -> str | None:
     """The media kind when the bytes are clearly some OTHER content; None when
     they could be a gateway's own page — empty, HTML, unknown. Those are ours."""
     if not data:
         return None
+    if _svg_document(data):
+        return "svg"
     kind = _media_kind(data)
-    if kind == "svg" and b"<svg" not in data[:8192].lower():
-        return None            # `<?xml` alone could be an XML error page
-    return kind if kind in _NOT_STILL else None
+    return kind if kind in _NOT_STILL - {"svg"} else None
 
 
 def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
@@ -823,7 +841,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                    gateway_headers=gateway_headers)
     larder_image = GatewayTally()
 
-    def ask_every_gateway(uri: str, fetch, head_of):
+    def ask_every_gateway(uri: str, fetch, head_of, svg_to_png=None):
         """Every gateway, in order, until one serves a still image — what
         `fetch(url, headers)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
         the metadata's rule: the candidate is blamed only when a gateway
@@ -834,7 +852,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
           · timeouts, 5xx, empty, HTML, anything else  → ImageGatewaysDown (OURS)
 
         Until 29/09 one HTML page among timeouts made a dead pin (and /prepare
-        spent the target), while a 404 on every gateway kept it."""
+        spent the target), while a 404 on every gateway kept it.
+
+        SVG (30/09, Pedro): `svg_to_png(url, headers, got, pos)` draws it, as
+        the on-chain SVG has been drawn since 29/09 — a result passes; False
+        means the SVG itself will not draw (theirs, "svg"); None means OUR
+        read of it failed, and the next gateway is asked."""
         pairs, seen = [], set()
         for g in probe_gateways:
             u = gateway_url(uri, g)
@@ -859,6 +882,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                 return got
             kind = _not_a_still_image(head)
             larder_image.note(pos, kind or (_media_kind(head) if head else "vazio"))
+            if kind == "svg" and svg_to_png is not None:
+                drawn = svg_to_png(url, gateway_headers.get(gw, {}), got, pos)
+                if drawn:
+                    return drawn
+                if drawn is None:
+                    continue                    # our read failed: not theirs
             if kind:
                 unusable.append(kind)
         if unusable:
@@ -882,8 +911,24 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         got = ask_every_gateway(
             uri, lambda url, extra: ranged(url, {"Range": f"bytes=0-{PROBE_BYTES - 1}",
                                                  **extra}),
-            lambda g: g[0] if isinstance(g, tuple) else g)
+            lambda g: g[0] if isinstance(g, tuple) else g,
+            svg_to_png=probe_svg)
         return got if isinstance(got, tuple) else (got, 0)
+
+    def probe_svg(url: str, headers: dict, _got, pos: int):
+        """An SVG in IPFS (30/09): the ranged read holds only its first KB,
+        and an SVG draws only whole — so ONE more read, the whole file, on
+        the same gateway (counted: it spends quota), then drawn like the
+        on-chain SVG. PNG → (head, size); won't draw → False; read failed →
+        None (ours)."""
+        try:
+            data = larder_art(url, dict(headers))
+        except Exception as e:  # noqa: BLE001 — ours; the next gateway is asked
+            larder_image.note(pos, _failure_kind(e))
+            return None
+        png = rasterize_svg(data) if data else None
+        larder_image.note(pos, "svg→png" if png else "svg-não-desenha")
+        return (png[:PROBE_BYTES], len(png)) if png else False
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
     # called enumerable_sources() here and made boot depend on an RPC round
@@ -929,7 +974,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         # arrived cut short and would not open. The larder's reads up to
         # MAX_IMAGE_BYTES + 1, which makes the size check below reachable.
         data = ask_every_gateway(uri, lambda url, extra: larder_art(url, dict(extra)),
-                                 lambda d: d)
+                                 lambda d: d,
+                                 # the whole SVG is already here: draw it
+                                 svg_to_png=lambda _u, _h, got, _p: rasterize_svg(got) or False)
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageUnusable("tamanho")
         shrunk = shrink_for_vision(data)
