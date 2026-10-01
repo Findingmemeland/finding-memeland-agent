@@ -937,6 +937,14 @@ class OpenSeaChainProbe:
         "flagged" (it knows it and marks it is_suspicious / is_disabled /
         is_nsfw — fields measured in opensea_item_ethereum.json), "clean",
         or None for any other answer. Only these words leave here."""
+        seen = self.item_seen(chain, contract, token_id)
+        return seen[0] if seen else None
+
+    def item_seen(self, chain: str, contract: str,
+                  token_id: int) -> tuple[str, str | None] | None:
+        """`item_status` plus the NAME OpenSea holds for the item (01/10): the
+        guard compares it with the name it searched — in memory, and only a
+        count of same / different / none leaves the guard. Same request."""
         slug = self._slugs.get(chain)
         if slug is None:
             return None
@@ -945,7 +953,7 @@ class OpenSeaChainProbe:
         try:
             text = self._get(url, {"X-API-KEY": self._key, "Accept": "application/json"})
         except Exception as e:  # noqa: BLE001
-            return "missing" if _is_not_found(e) else None
+            return ("missing", None) if _is_not_found(e) else None
         try:
             doc = json.loads(text)
         except ValueError:
@@ -956,7 +964,9 @@ class OpenSeaChainProbe:
                 and str(nft.get("identifier", "")) == str(int(token_id))):
             return None
         flagged = any(nft.get(k) is True for k in ("is_suspicious", "is_disabled", "is_nsfw"))
-        return "flagged" if flagged else "clean"
+        name = nft.get("name")
+        return ("flagged" if flagged else "clean",
+                name if isinstance(name, str) and name.strip() else None)
 
 
 def _is_not_found(e: Exception) -> bool:

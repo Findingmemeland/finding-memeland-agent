@@ -651,8 +651,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     search_guard = ClueSearchGuard(search=market)
     uniqueness = MarketNameUniqueness(
         search=market, page_size=page,
-        # 30/09: the blind canary split by asking for the item (OpenSea only)
-        item_status=getattr(chain_probe, "item_status", None))
+        # 30/09: the blind canary split by asking for the item (OpenSea
+        # only); 01/10: with the name OpenSea holds, compared in the guard
+        item_status=getattr(chain_probe, "item_seen", None))
     resolver = MarketplaceLinkResolver(
         chain_probe=chain_probe,
         page_resolvers={},          # Foundation/SuperRare: after their capture

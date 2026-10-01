@@ -464,13 +464,20 @@ class MarketNameUniqueness:
 
     def __init__(self, *, search: NameSearch, page_size: int,
                  retries: int = 2, sleep_s: float = 2.0,
-                 item_status: Callable[[str, str, int], str | None] | None = None):
+                 item_status: Callable[[str, str, int], object] | None = None):
         self._search = search
         # "blind" split by ASKING the marketplace for the item itself (30/09,
         # measurement only — the answer stays None): does it not know the
         # piece, or know it and keep it out of the search (flagged or not)?
         # The first means players cannot find it there either; the second
         # may mean the guard is refusing playable targets.
+        #
+        # 01/10: on 30/09 all 5 blind Base candidates were "clean" — known
+        # to OpenSea, unflagged, and still absent from its search. So the
+        # lookup may also return (status, name), and the clean ones are split
+        # again: does OpenSea hold the SAME name we searched, another one, or
+        # none? "Another" or "none" would be our query; "the same" is the
+        # search itself. The name never leaves this method — counts do.
         self._item_status = item_status
         self._page = page_size
         self._retries = retries
@@ -484,7 +491,9 @@ class MarketNameUniqueness:
         self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
                       "crowded": 0, "crowded_same": 0, "transport": 0,
                       "blind_unindexed": 0, "blind_flagged": 0,
-                      "blind_clean": 0, "blind_unknown": 0}
+                      "blind_clean": 0, "blind_unknown": 0,
+                      "blind_clean_same": 0, "blind_clean_other": 0,
+                      "blind_clean_noname": 0}
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
@@ -510,7 +519,7 @@ class MarketNameUniqueness:
                     self.stats["crowded_same"] += 1
             else:
                 self.stats["blind"] += 1
-                self._split_blind(chain, contract, token_id)
+                self._split_blind(base, chain, contract, token_id)
             return None
         others = [i for i, n in ids.items()
                   if i != want and normalize_name(n or "").casefold() == key]
@@ -518,15 +527,26 @@ class MarketNameUniqueness:
         return not others
 
 
-    def _split_blind(self, chain: str, contract: str, token_id: int) -> None:
+    def _split_blind(self, base: str, chain: str, contract: str,
+                     token_id: int) -> None:
         if self._item_status is None:
             return
+        from .selector import normalize_name
         try:
             got = self._item_status(chain, contract, token_id)
         except Exception:  # noqa: BLE001 — a measurement never breaks a verdict
             got = None
+        status, name = got if isinstance(got, tuple) else (got, None)
         self.stats[{"missing": "blind_unindexed", "flagged": "blind_flagged",
-                    "clean": "blind_clean"}.get(got, "blind_unknown")] += 1
+                    "clean": "blind_clean"}.get(status, "blind_unknown")] += 1
+        if status == "clean" and isinstance(got, tuple):
+            # the same comparison the verdict uses for namesakes
+            if not name:
+                self.stats["blind_clean_noname"] += 1
+            elif normalize_name(name).casefold() == base.casefold():
+                self.stats["blind_clean_same"] += 1
+            else:
+                self.stats["blind_clean_other"] += 1
 
 
 class FakeSearch:

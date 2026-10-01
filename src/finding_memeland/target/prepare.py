@@ -404,6 +404,10 @@ _UNIQUE_REASONS = {"not_unique": "não-único", "crowded_same": "cheio-com-igual
                    # 30/09: the blind canary split by asking for the item
                    "blind_unindexed": "índice-cego:não-indexada",
                    "blind_flagged": "índice-cego:indexada-marcada",
+                   # 01/10: …and the name OpenSea holds vs the one searched
+                   "blind_clean_same": "índice-cego:indexada-sem-marca:mesmo-nome",
+                   "blind_clean_other": "índice-cego:indexada-sem-marca:nome-diferente",
+                   "blind_clean_noname": "índice-cego:indexada-sem-marca:sem-nome",
                    "blind_clean": "índice-cego:indexada-sem-marca",
                    "blind_unknown": "índice-cego:sem-veredicto",
                    "blind": "índice-cego",
