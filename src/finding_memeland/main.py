@@ -1441,6 +1441,22 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return str(e)
         return _target_job("harvest", lambda: target_wiring.harvest(n, only=chain))
 
+    def _probe(arg: str = "") -> str:
+        """Medir uma fonte antes de a adoptar (06/10): `/probe manifold [n]`
+        sorteia contratos de criador da Manifold em Base, uma peça em cada
+        um, e passa-a pelas cinco verificações — em duas colunas, como hoje
+        e se o Arweave fosse aceite. NÃO guarda nada.
+
+        Pelo `_target_job`, como o /harvest: recusado durante uma hunt (gasta
+        a mesma quota do OpenSea que a guarda das pistas) e nunca ao mesmo
+        tempo que /fill, /harvest ou /prepare."""
+        from .target.probe import parse_probe_args
+        try:
+            source, n = parse_probe_args(arg)
+        except ValueError as e:
+            return str(e)
+        return _target_job("probe", lambda: target_wiring.probe(source, n))
+
     def _prepare(arg: str = "") -> str:
         """Take one target out of the larder, re-verify it live, write Clue 1
         through every guard, and seal the lot to the database.
@@ -1462,6 +1478,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         "snapshot": _snapshot,
         "fill": _fill,
         "harvest": _harvest,
+        "probe": _probe,
         "prepare": _prepare,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,

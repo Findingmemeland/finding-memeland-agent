@@ -650,9 +650,16 @@ class TargetFinder:
                  read_token, probe_image, owner_is_eoa, name_is_unique,
                  min_words: int = 2, max_image_bytes: int = 24 * 1024 * 1024,
                  rng: random.Random | None = None,
-                 now_iso: Callable[[], str] | None = None):
+                 now_iso: Callable[[], str] | None = None,
+                 accepts_uri: Callable[[str], bool] | None = None):
         if not sources:
             raise ValueError("TargetFinder needs at least one source")
+        # What counts as a content-addressed image. The default is THE rule
+        # (ipfs / data / a bare CID / a gateway path) and the production
+        # finder never passes anything else. Only the /probe's finder widens
+        # it, to measure "if Arweave were accepted" (06/10) — a decision that
+        # is Pedro's and not taken.
+        self._accepts = accepts_uri or uri_is_content_addressed
         self._sources = tuple(sources)
         self._total_supply = total_supply
         self._token_by_index = token_by_index
@@ -748,7 +755,7 @@ class TargetFinder:
             return None
         meta = read.metadata
         image = str(meta.get("image") or "")
-        if not uri_is_content_addressed(image):
+        if not self._accepts(image):
             kind = uri_kind(image)
             tally.not_ca[kind] = tally.not_ca.get(kind, 0) + 1
             return None

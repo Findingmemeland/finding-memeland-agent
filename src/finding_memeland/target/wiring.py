@@ -29,6 +29,7 @@ from .adapters import (
     AnthropicVision,
     Erc721Metadata,
     GATEWAY_KEY_HEADER,
+    ArweaveGateway,
     FailoverMetadata,
     GatewayTally,
     GenericMetadata,
@@ -44,6 +45,7 @@ from .adapters import (
     code_bytes,
     creator_credit,
     abi_uint,
+    arweave_url,
     gateway_url,
     inline_artwork,
     mint_fetcher,
@@ -86,6 +88,13 @@ from .prepare import (
     TargetPreparer as LarderPreparer, used_hmac,
 )
 from .pipeline import PipelineReport, SnapshotPipeline
+from .probe import (
+    MANIFOLD_BASE_DEPLOYER,
+    ContractProbe,
+    DeployerSampler,
+    ProbeBlind,
+)
+from .refresh import uri_is_content_addressed
 from .search_guard import (
     ClueSearchGuard,
     MarketNameUniqueness,
@@ -208,6 +217,12 @@ class TargetWiring:
     # "dedicado" e diz quantos pedidos cada corrida lhe gastou — a quota do
     # plano Free são 10 mil por mês
     dedicated_gateway: bool = False
+    # /probe (06/10): medir uma fonte antes de a adoptar. Não guarda nada. Os
+    # dois contadores do Arweave são só para o relatório — pedidos a
+    # arweave.net, que não gastam a quota do gateway dedicado.
+    probes: dict = field(default_factory=dict)
+    arweave_meta: object = None
+    arweave_image: object = None
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -298,6 +313,45 @@ class TargetWiring:
         finally:
             self.larder_store.save(larder)      # keep whatever was found
         return f"fill: {tally.render()} · despensa {larder.size()}"
+
+    def probe(self, source: str, n: int) -> str:
+        """Medir quanto rende uma fonte — uma amostra ao calhas pelas cinco
+        verificações, em duas colunas (como hoje / se o Arweave fosse aceite).
+
+        NÃO TOCA NA DESPENSA: não a lê, não a grava, não guarda listas. E o
+        que devolve são contagens e causas — nunca um contrato, um tokenId
+        ou um nome."""
+        probe = self.probes.get(source)
+        if probe is None:
+            return f"probe: fonte {source} não configurada — nada foi medido"
+        start = self._meta_snapshot()
+        ar_start = self._arweave_snapshot()
+        try:
+            rep = probe.run(n, notify=self.notify)
+        except ProbeBlind as e:
+            return f"probe: ⛔ {e} — nada foi medido"
+        except Exception as e:  # noqa: BLE001 — NOSSO: só o tipo, nunca um URL
+            return (f"probe: NÃO MEDIDO — o RPC falhou ({type(e).__name__}); "
+                    "nada foi concluído sobre a fonte")
+        out = "probe (só medição, nada guardado):\n" + rep.render()
+        ar_end = self._arweave_snapshot()
+        parts = []
+        for label, key in (("metadata", "meta"), ("imagem", "image")):
+            moved = _outcomes_between(ar_start[key], ar_end[key]).get(1)
+            if moved:
+                parts.append(f"{label}: {_outcomes_line(moved)}")
+        if parts:
+            out += "\narweave.net — " + "; ".join(parts)
+        if self.dedicated_gateway and start is not None:
+            out += "\n" + self._dedicated_spend(start, self._meta_snapshot()).lstrip(" ·")
+        return out
+
+    def _arweave_snapshot(self) -> dict:
+        def outcomes(obj):
+            tally = getattr(obj, "tally", obj)
+            stats = getattr(tally, "stats", None) or {}
+            return {p: dict(k) for p, k in stats.get("outcomes", {}).items()}
+        return {"meta": outcomes(self.arweave_meta), "image": outcomes(self.arweave_image)}
 
     def harvest(self, n_blocks: int, *, only: str | None = None) -> str:
         """Colher alvos da cadeia e depositá-los na despensa.
@@ -845,8 +899,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                    gateway_headers=gateway_headers)
     larder_image = GatewayTally()
 
-    def ask_every_gateway(uri: str, fetch, head_of, svg_to_png=None):
-        """Every gateway, in order, until one serves a still image — what
+    def ask_urls(pairs, fetch, head_of, svg_to_png=None, tally=None):
+        """Every (url, headers) in order, until one serves a still image — what
         `fetch(url, headers)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
         the metadata's rule: the candidate is blamed only when a gateway
         answers about the content itself.
@@ -858,36 +912,34 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         Until 29/09 one HTML page among timeouts made a dead pin (and /prepare
         spent the target), while a 404 on every gateway kept it.
 
-        SVG (30/09, Pedro): `svg_to_png(url, headers, got, pos)` draws it, as
-        the on-chain SVG has been drawn since 29/09 — a result passes; False
-        means the SVG itself will not draw (theirs, "svg"); None means OUR
-        read of it failed, and the next gateway is asked."""
-        pairs, seen = [], set()
-        for g in probe_gateways:
-            u = gateway_url(uri, g)
-            if u and u not in seen:
-                seen.add(u)
-                pairs.append((g, u))
-        urls = [u for _, u in pairs]
+        SVG (30/09, Pedro): `svg_to_png(url, headers, got, pos, tally)` draws
+        it, as the on-chain SVG has been drawn since 29/09 — a result passes;
+        False means the SVG itself will not draw (theirs, "svg"); None means
+        OUR read of it failed, and the next gateway is asked.
+
+        `tally` (06/10): where the requests are counted — the larder's image
+        counter by default. The /probe's Arweave reads count apart: they are
+        not requests to the dedicated gateway and must not look like quota."""
+        tally = larder_image if tally is None else tally
         gone, unusable = 0, []
         # every request counted by gateway and outcome (30/09) — the 30/09
         # /harvest lost 13 Base candidates here with no cause to show
-        for pos, (gw, url) in enumerate(pairs, 1):
+        for pos, (url, headers) in enumerate(pairs, 1):
             try:
-                got = fetch(url, gateway_headers.get(gw, {}))
+                got = fetch(url, headers)
             except Exception as e:  # noqa: BLE001 — this host; try the next
-                larder_image.note(pos, _failure_kind(e))
+                tally.note(pos, _failure_kind(e))
                 if _http_status(e) in (404, 410):
                     gone += 1
                 continue
             head = head_of(got)
             if head and sniff_media_type(head) is not None:
-                larder_image.note(pos, "serviu")
+                tally.note(pos, "serviu")
                 return got
             kind = _not_a_still_image(head)
-            larder_image.note(pos, kind or (_media_kind(head) if head else "vazio"))
+            tally.note(pos, kind or (_media_kind(head) if head else "vazio"))
             if kind == "svg" and svg_to_png is not None:
-                drawn = svg_to_png(url, gateway_headers.get(gw, {}), got, pos)
+                drawn = svg_to_png(url, headers, got, pos, tally)
                 if drawn:
                     return drawn
                 if drawn is None:
@@ -897,8 +949,19 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         if unusable:
             raise ImageUnusable(unusable[0])
         if gone:
-            raise ImagePinGone(f"{gone} of {len(urls)} gateway(s) said 404/410")
-        raise ImageGatewaysDown(f"no gateway served an image ({len(urls)} tried)")
+            raise ImagePinGone(f"{gone} of {len(pairs)} gateway(s) said 404/410")
+        raise ImageGatewaysDown(f"no gateway served an image ({len(pairs)} tried)")
+
+    def ask_every_gateway(uri: str, fetch, head_of, svg_to_png=None):
+        """`ask_urls` over the larder's gateways: the dedicated one first
+        (with its key), then the public ones."""
+        pairs, seen = [], set()
+        for g in probe_gateways:
+            u = gateway_url(uri, g)
+            if u and u not in seen:
+                seen.add(u)
+                pairs.append((u, gateway_headers.get(g, {})))
+        return ask_urls(pairs, fetch, head_of, svg_to_png)
 
     def probe_image(uri: str):
         """RANGED read: the first few KB plus the size. Proves the bytes are
@@ -919,7 +982,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             svg_to_png=probe_svg)
         return got if isinstance(got, tuple) else (got, 0)
 
-    def probe_svg(url: str, headers: dict, _got, pos: int):
+    def probe_svg(url: str, headers: dict, _got, pos: int, tally):
         """An SVG in IPFS (30/09): the ranged read holds only its first KB,
         and an SVG draws only whole — so ONE more read, the whole file, on
         the same gateway (counted: it spends quota), then drawn like the
@@ -928,10 +991,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         try:
             data = larder_art(url, dict(headers))
         except Exception as e:  # noqa: BLE001 — ours; the next gateway is asked
-            larder_image.note(pos, _failure_kind(e))
+            tally.note(pos, _failure_kind(e))
             return None
         png = rasterize_svg(data) if data else None
-        larder_image.note(pos, "svg→png" if png else "svg-não-desenha")
+        tally.note(pos, "svg→png" if png else "svg-não-desenha")
         return (png[:PROBE_BYTES], len(png)) if png else False
 
     # NOTE (17/09): composing must not touch the network. An earlier draft
@@ -980,7 +1043,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         data = ask_every_gateway(uri, lambda url, extra: larder_art(url, dict(extra)),
                                  lambda d: d,
                                  # the whole SVG is already here: draw it
-                                 svg_to_png=lambda _u, _h, got, _p: rasterize_svg(got) or False)
+                                 svg_to_png=lambda _u, _h, got, _p, _t: rasterize_svg(got) or False)
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageUnusable("tamanho")
         shrunk = shrink_for_vision(data)
@@ -1057,7 +1120,57 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             read_meta=_meta, canary_block=block, canary_mints=mints,
             span_start=HARVEST_SPAN_START.get(chain, 1), rng=rng)
 
+    # -- /probe (06/10): medir uma fonte antes de a adoptar ---------------- #
+    #
+    # A coluna "se o Arweave fosse aceite" precisa de um finder que leia
+    # Arweave — as MESMAS cinco verificações, com outra noção de "endereçado
+    # por conteúdo". Só o /probe o usa: `finder`, lá em cima, é o da despensa
+    # e continua a recusar Arweave. Aceitar a sério é decisão do Pedro, e não
+    # está tomada.
+    arweave = ArweaveGateway(http_get=http_get)
+    arweave_image = GatewayTally()
+
+    def probe_image_measuring(uri: str):
+        """A imagem, para a medição: em Arweave lê-se de arweave.net com os
+        veredictos do teste da despensa (imagem fixa passa, SVG desenha-se,
+        vídeo/PDF são deles, 404 é pin morto, o resto é nosso) e o mesmo
+        tecto de tamanho; tudo o resto vai ao teste da despensa tal e qual."""
+        url = arweave_url(uri)
+        if url is None:
+            return probe_image(uri)
+        got = ask_urls(
+            [(url, {})],
+            lambda u, extra: ranged(u, {"Range": f"bytes=0-{PROBE_BYTES - 1}", **extra}),
+            lambda g: g[0] if isinstance(g, tuple) else g,
+            svg_to_png=probe_svg, tally=arweave_image)
+        return got if isinstance(got, tuple) else (got, 0)
+
+    probe_finder = TargetFinder(
+        sources=SOURCES,
+        total_supply=lambda c, k: int(rpcs[c].eth_call(k, SEL_TOTAL), 16),
+        token_by_index=lambda c, k, i: int(
+            rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
+        read_token=larder_meta.read, probe_image=probe_image_measuring,
+        owner_is_eoa=eoa_check, name_is_unique=uniqueness,
+        accepts_uri=lambda u: uri_is_content_addressed(u) or arweave_url(u) is not None,
+        rng=rng, now_iso=_now_iso)
+
+    probes: dict[str, ContractProbe] = {}
+    if s.base_rpc_url and "base" in rpcs:
+        # um nó próprio pela mesma razão do colector: eth_getTransactionCount
+        # em blocos antigos, blocos e recibos, que o ChainRpc não expõe
+        probe_node = JsonRpc(url=s.base_rpc_url, http_post=http_post, label="probe:base")
+        probes["manifold"] = ContractProbe(
+            source="manifold", chain="base",
+            sampler=DeployerSampler(call=probe_node.call, deployer=MANIFOLD_BASE_DEPLOYER),
+            eth_call=rpcs["base"].eth_call,
+            token_uri=lambda c, t: larder_meta.token_uri("base", c, t),
+            read_token=lambda c, t: larder_meta.read("base", c, t),
+            arweave_json=arweave.metadata, finder=probe_finder, rng=rng)
+
     return TargetWiring(finder=finder, larder_store=larder_store,
+                        probes=probes, arweave_meta=arweave,
+                        arweave_image=arweave_image,
                         notify=say,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,

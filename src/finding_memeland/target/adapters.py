@@ -690,6 +690,70 @@ class FailoverMetadata(Erc721Metadata):
 
 
 # --------------------------------------------------------------------------- #
+# Arweave — MEASUREMENT ONLY (/probe, 06/10)                                   #
+# --------------------------------------------------------------------------- #
+#
+# The 06/10 census of Manifold creator contracts on Base: of 57 with a token,
+# 56 keep their tokenURI on Arweave and none on IPFS. Whether the larder
+# should accept Arweave is Pedro's decision and NOT taken — so nothing here is
+# wired into the deposit, the live check or the vision path. It exists for
+# one question: "what would this source yield IF Arweave were accepted?"
+
+ARWEAVE_GATEWAY = "https://arweave.net/"
+_ARWEAVE_RE = re.compile(
+    r"^(?:ar://|https?://(?:www\.)?arweave\.net/)([A-Za-z0-9_-]{43})(/[^?#\s]*)?(?:[?#]\S*)?$")
+
+
+def arweave_url(uri: str | None) -> str | None:
+    """`ar://<id>[/path]` or `https://arweave.net/<id>[/path]` → the ONE URL it
+    is read from: https://arweave.net/<id>[/path]. None for anything else.
+
+    The host is fixed, never taken from the token: a tokenURI is written by
+    whoever minted it, and a reader that follows the host it names is the
+    SSRF the hostile Base contracts of 22/09 were probing for."""
+    m = _ARWEAVE_RE.match((uri or "").strip())
+    if not m:
+        return None
+    return ARWEAVE_GATEWAY + m.group(1) + (m.group(2) or "")
+
+
+class ArweaveGateway:
+    """Metadata JSON from arweave.net, with the same verdicts as the larder's
+    IPFS read: a 404/410 is the content's answer (MetadataPinGone, theirs);
+    a timeout, a 5xx, anything else is ours; a body that is not a JSON
+    object is theirs or ambiguous exactly as in Erc721Metadata._resolve.
+    Every request is counted in `tally` (position 1 = arweave.net)."""
+
+    def __init__(self, *, http_get: HttpGet, max_bytes: int = 2_000_000):
+        self._get = http_get
+        self._max = max_bytes
+        self.tally = GatewayTally()
+
+    def metadata(self, url: str) -> dict:
+        if not url.startswith(ARWEAVE_GATEWAY):
+            raise MetadataInvalid("not an arweave.net URL")       # never another host
+        try:
+            text = self._get(url, {"Accept": "application/json"})
+        except Exception as e:  # noqa: BLE001
+            self.tally.note(1, _failure_kind(e))
+            if _http_status(e) in (404, 410):
+                raise MetadataPinGone("arweave.net said 404/410") from e
+            raise GatewayUnavailable(f"arweave: {type(e).__name__}") from e
+        if len(text) > self._max:
+            self.tally.note(1, "serviu")
+            raise MetadataInvalid("metadata body too large")
+        try:
+            doc = json.loads(text)
+        except ValueError as e:
+            self.tally.note(1, "não-json")
+            raise GatewayNotJson("arweave answered non-JSON") from e
+        self.tally.note(1, "serviu")
+        if not isinstance(doc, dict):
+            raise MetadataInvalid("metadata is not an object")
+        return doc
+
+
+# --------------------------------------------------------------------------- #
 # GENERIC family — per-batch rotation                                          #
 # --------------------------------------------------------------------------- #
 
