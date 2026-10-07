@@ -484,6 +484,15 @@ def parse_target_clue(text: str):
 
 _ARTIST_KEYS = ARTIST_KEYS      # one reading (R9): banned here, credited at the reveal
 
+# Function words are not the answer (07/10). The never-write list is matched
+# as a SUBSTRING (guardrails 1b), so a function word in a name refused every
+# clue that merely contained it inside another word — "there", "often",
+# "into", "water" — and a clue that may not contain those can hardly be
+# written. Exactly these eight leave the list. The matching itself (the
+# substring, the roots) is untouched: a distinctive word is still refused as
+# a word and as a root.
+_FUNCTION_WORDS = frozenset({"the", "an", "of", "and", "in", "on", "to", "at"})
+
 
 @dataclass
 class TargetClueContext(RelicClueContext):
@@ -502,11 +511,15 @@ class TargetClueContext(RelicClueContext):
         caller has it) contributes the artist/creator name to the never-write
         list — a creator name is a search box too."""
         words = [w for w in re.findall(r"[A-Za-zÀ-ÿ]{2,}", target.name)]
-        terms = [w.lower() for w in words]
+        named = [w.lower() for w in words]
+        # a name made ONLY of function words keeps them all: an empty list
+        # would let a clue write the whole answer
+        terms = [t for t in named if t not in _FUNCTION_WORDS] or named
         for k in _ARTIST_KEYS:
             v = (metadata or {}).get(k)
             if isinstance(v, str) and v.strip() and not v.startswith("0x"):
-                terms.extend(t.lower() for t in re.findall(r"[A-Za-zÀ-ÿ]{3,}", v))
+                terms.extend(t.lower() for t in re.findall(r"[A-Za-zÀ-ÿ]{3,}", v)
+                             if t.lower() not in _FUNCTION_WORDS)
         return cls(
             display_name=target.name,
             image_description=image_description,
