@@ -154,7 +154,8 @@ class DeployerSampler:
 # A ordem em que as causas aparecem: a do funil (colheita → depósito).
 _GROUPS = ("queimados", "indisponível-NOSSO", "defeito-DELES",
            "tokenURI fora de IPFS", "imagem fora de IPFS", "sem nome",
-           "numerados", "nome recusado", "metadata", "nome", "imagem",
+           "numerados", "nome recusado", "metadata", "nome", "nome-longo",
+           "sem-identidade", "exposto", "imagem",
            "tamanho", "dono", "único", "outro")
 
 
@@ -174,7 +175,13 @@ class ProbeColumn:
 
     def render(self) -> str:
         parts = []
-        for group in _GROUPS:
+        # A CAUSE THAT IS COUNTED IS A CAUSE THAT IS SHOWN (10/10). The order
+        # is the funnel's; a group this list does not know goes at the end —
+        # never out. Three causes added on 09/10 (nome-longo, sem-identidade,
+        # exposto) were counted and silently left out of the line, so the
+        # numbers stopped adding up to the pieces tested.
+        extra = sorted({g for g, _k in self.causes} - set(_GROUPS))
+        for group in (*_GROUPS, *extra):
             kinds = {k: n for (g, k), n in self.causes.items() if g == group}
             if not kinds:
                 continue
@@ -244,6 +251,8 @@ def cause_of(tally: Tally) -> tuple[str, str | None]:
         return "nome-longo", None
     if tally.no_identity:
         return "sem-identidade", None
+    if tally.exposed:
+        return "exposto", None
     if tally.image:
         return "imagem", _first(tally.image_kinds)
     if tally.too_big:

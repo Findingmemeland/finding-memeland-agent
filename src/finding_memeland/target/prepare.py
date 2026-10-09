@@ -292,6 +292,15 @@ class Larder:
         if cid not in self.used:
             self.used.append(cid)
 
+    def retire(self, cid: str) -> None:
+        """Take a candidate out for good WITHOUT making it "the last one
+        used": `last_contract` reads the end of `used` to keep the next hunt
+        off the previous hunt's contract, and a candidate that leaves for a
+        reason of ours (it was exposed, 09/10) is not the previous hunt."""
+        self.candidates = [c for c in self.candidates if c.id() != cid]
+        if cid not in self.used:
+            self.used.insert(0, cid)
+
     def spread(self) -> dict:
         """A COMPOSIÇÃO da despensa, em contagens — nunca em nomes.
 
@@ -470,6 +479,7 @@ class Tally:
     name: int = 0            # base name has fewer than two real words
     long_name: int = 0       # more words than the clue plan holds (09/10)
     no_identity: int = 0     # the tokenURI has no content id to seal (09/10)
+    exposed: int = 0         # named in a public file of the repository (09/10)
     image: int = 0           # the gateway ANSWERED without bytes (dead pin)
     too_big: int = 0         # bigger than vision can use (171 MB, measured)
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
@@ -530,6 +540,7 @@ class Tally:
             ("metadata", self.metadata), ("nome", self.name),
             ("nome-longo", self.long_name),
             ("sem-identidade", self.no_identity),
+            ("exposto", self.exposed),
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
@@ -674,9 +685,16 @@ class TargetFinder:
                  min_words: int = 2, max_image_bytes: int = 24 * 1024 * 1024,
                  rng: random.Random | None = None,
                  now_iso: Callable[[], str] | None = None,
-                 accepts_uri: Callable[[str], bool] | None = None):
+                 accepts_uri: Callable[[str], bool] | None = None,
+                 is_exposed: Callable[[str, int], bool] | None = None):
         if not sources:
             raise ValueError("TargetFinder needs at least one source")
+        # THE EXPOSED LIST (09/10, Pedro's "lista de queimados"): a token ever
+        # named in a versioned file of the public repository is never
+        # deposited and never drawn. `is_exposed(contract, token_id)` raises
+        # when the list cannot vouch for a "no" (exposed.ExposedListBlind) —
+        # and then nothing goes in. None = no list (tests and simulations).
+        self._is_exposed = is_exposed
         # What counts as a content-addressed image. The default is THE rule
         # (ipfs / data / a bare CID / a gateway path). The wiring widens it
         # to Arweave when — and only when — the Arweave gateways are
@@ -748,6 +766,11 @@ class TargetFinder:
             return None
         return (src, int(tid)) if tid is not None else None
 
+    def is_exposed(self, contract: str, token_id: int) -> bool:
+        """Was this token ever named in a public file of the repository?
+        False when no list is wired; RAISES when the list is blind."""
+        return bool(self._is_exposed and self._is_exposed(contract, token_id))
+
     def named_token(self, src: Source, tid: int, tally: Tally, *,
                     strict: bool = False, known=None):
         """Checks 1 and 2 — metadata resolves, image is content-addressed,
@@ -762,6 +785,18 @@ class TargetFinder:
         `known` (30/09): a read made minutes ago by the /harvest, used instead
         of asking the gateway again. Only the deposit passes it; /prepare
         always re-reads."""
+        # BEFORE ANY READ: an exposed token costs nothing to refuse, and
+        # there is no version of it that passes. A list that cannot answer
+        # is OURS — nothing goes in on a "probably not" (fail-closed).
+        try:
+            if self.is_exposed(src.contract, tid):
+                tally.exposed += 1
+                return None
+        except Exception:  # noqa: BLE001 — the list is blind
+            if strict:
+                raise ReadUnavailable("lista-de-expostos") from None
+            tally.note_ours("lista-de-expostos")
+            return None
         try:
             read = (known if known is not None
                     else self._read_token(src.chain, src.contract, tid))
@@ -1207,6 +1242,28 @@ class TargetPreparer:
             if larder.size() == 0:
                 raise PrepareRefused(
                     "todos os alvos da despensa já foram usados — corre /fill")
+        # EXPOSED targets leave before the draw (09/10): a token that was
+        # ever named in a public file of the repository can never be one,
+        # and leaving it in would cost an attempt every time it came out.
+        # A list that cannot answer stops the prepare with the larder whole.
+        try:
+            exposed = [c.id() for c in larder.candidates
+                       if self._finder.is_exposed(c.contract, c.token_id)]
+        except Exception as e:  # noqa: BLE001 — never a pair, only the type
+            raise PrepareRefused(
+                f"a lista de expostos não se consegue ler ({type(e).__name__}) — "
+                "despensa INTACTA, nada foi sorteado. É um ficheiro do "
+                "repositório: confirma o deploy.") from None
+        for cid in exposed:
+            larder.retire(cid)
+        if exposed:
+            self._notify(f"prepare: {len(exposed)} alvo(s) da despensa constam de "
+                         "ficheiros públicos do repositório — retirados (nunca "
+                         "podem ser alvo)")
+            if larder.size() == 0:
+                raise PrepareRefused(
+                    "todos os alvos da despensa estavam expostos em ficheiros "
+                    "públicos do repositório — corre /harvest")
         tally = Tally()
         # OUR outages are counted apart and NEVER consume a candidate (R8).
         # Enough of them in a row and the honest answer is "we are down",

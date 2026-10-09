@@ -88,6 +88,7 @@ from .prepare import (
     TargetPreparer as LarderPreparer, used_hmac,
 )
 from .pipeline import PipelineReport, SnapshotPipeline
+from .exposed import ExposedList
 from .probe import (
     MANIFOLD_BASE_DEPLOYER,
     ContractProbe,
@@ -226,6 +227,10 @@ class TargetWiring:
     # Quantos gateways de Arweave a despensa tem (09/10). 0 = não aceita
     # Arweave, e os contadores acima são só os da medição do /probe.
     arweave_gateways: int = 0
+    # A lista de queimados (09/10): peças alguma vez escritas num ficheiro
+    # versionado do repositório público — nunca depositadas, sorteadas nem
+    # lançadas. Aqui só para o /status dizer QUANTAS (exposed.ExposedList).
+    exposed: object = None
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -297,6 +302,25 @@ class TargetWiring:
         if self.larder_store is None:
             return 0
         return self.larder_store.load().size()
+
+    def exposed_line(self) -> str:
+        """Para o /status: quantos pares a lista de queimados tem e quantos
+        alvos da despensa ela vai retirar no próximo /prepare. CONTAGENS —
+        nunca um par, nunca um nome."""
+        if self.exposed is None:
+            return "lista de queimados: não ligada"
+        if not self.exposed.sees:
+            return f"lista de queimados: {self.exposed.state()}"
+        line = f"lista de queimados: {self.exposed.state()}"
+        if self.larder_store is None:
+            return line
+        try:
+            n = sum(1 for c in self.larder_store.load().candidates
+                    if self.exposed.has(c.contract, c.token_id))
+        except Exception as e:  # noqa: BLE001 — a despensa é que não se leu
+            return f"{line} · na despensa: ilegível ({type(e).__name__})"
+        return line + (f" · {n} na despensa (saem no próximo /prepare)" if n
+                       else " · nenhum na despensa")
 
     def larder_spread(self) -> dict:
         """A forma da despensa, em contagens (ver Larder.spread)."""
@@ -651,6 +675,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
 
     cipher = FernetPoolCipher(s.target_pool_key)
     rng = rng or random.SystemRandom()
+    # The exposed list ships with the code (exposed.txt). Loading never
+    # raises: a list that cannot be read is BLIND, and refuses when asked —
+    # at the deposit, the draw, /prepare and /launch — instead of at boot.
+    exposed = ExposedList.load()
     epoch = CurationEpoch(epoch_id=s.target_epoch_id,
                           min_age_days=int(s.target_min_age_days),
                           max_snapshot_age_days=int(s.target_max_snapshot_age_days))
@@ -880,6 +908,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         # composing must stay in one place. The closure resolves when
         # /launch calls it, which is the only moment it matters.
         take_prepared=lambda: prepared_store.load(),
+        is_exposed=exposed.has,
         clear_prepared=lambda: prepared_store.clear(),
         # The guard about the WORLD, run again at launch over the sealed
         # Clue 1 (Fable, 17/09). The judge and the solver are about the
@@ -1082,7 +1111,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
         read_token=larder_meta.read, probe_image=probe_image,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
-        accepts_uri=accepts, rng=rng, now_iso=_now_iso)
+        accepts_uri=accepts, is_exposed=exposed.has, rng=rng, now_iso=_now_iso)
 
     larder_store = LarderStore(**store(BLOB_LARDER))
     prepared_store = PreparedStore(**store(BLOB_PREPARED))
@@ -1225,7 +1254,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         read_token=larder_meta.read, probe_image=probe_image_measuring,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
         accepts_uri=lambda u: uri_is_content_addressed(u) or arweave_url(u) is not None,
-        rng=rng, now_iso=_now_iso)
+        is_exposed=exposed.has, rng=rng, now_iso=_now_iso)
 
     probes: dict[str, ContractProbe] = {}
     if s.base_rpc_url and "base" in rpcs:
@@ -1247,6 +1276,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                       else arweave),
                         arweave_image=arweave_image,
                         arweave_gateways=len(arweave_gateways),
+                        exposed=exposed,
                         notify=say,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,

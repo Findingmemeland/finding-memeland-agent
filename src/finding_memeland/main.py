@@ -1182,6 +1182,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 # The Arweave gateways (09/10): on, off, or why not — counts
                 # only. On takes two valid ones (the first and its reserve).
                 lines.append(f"arweave: {s.target_arweave_state}")
+                # The exposed list (09/10): how many pairs it holds and how
+                # many larder targets it retires — counts, never a pair.
+                try:
+                    lines.append(target_wiring.exposed_line())
+                except Exception as e:  # noqa: BLE001
+                    lines.append(f"lista de queimados: ilegível ({type(e).__name__})")
                 # What /launch will actually publish. COUNTS AND CLOCKS ONLY.
                 try:
                     lines.append(target_wiring.prepared_line())

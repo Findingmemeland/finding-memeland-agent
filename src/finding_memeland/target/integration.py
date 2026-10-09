@@ -109,6 +109,11 @@ class TargetPorts:
     # died doing all of that with an audience watching a prompt that had
     # promised "seconds".
     take_prepared: Callable[[], object] | None = None    # -> prepare.Prepared | None
+    # THE EXPOSED LIST at launch (09/10): a preparation sealed before the
+    # list existed may hold a token named in a public file of the repository.
+    # `is_exposed(contract, token_id)` → bool, raising when the list cannot
+    # vouch for a "no"; either way such a preparation is never launched.
+    is_exposed: Callable[[str, int], bool] | None = None
     clear_prepared: Callable[[], None] | None = None
     # THE ONE GUARD THAT MUST RUN AGAIN AT LAUNCH (Fable, 17/09): a clue
     # written yesterday can have become a search TODAY — the piece gets
@@ -205,6 +210,23 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
     clue_text = getattr(draft, "text", None) or ""
     if not clue_text.strip():
         raise LaunchRefused("a preparação não traz Clue 1 — corre /prepare outra vez")
+
+    # A token that was ever named in a versioned file of the public
+    # repository is never a target (09/10). /prepare already keeps them out;
+    # this is for a preparation sealed before the list existed. COUNTS AND
+    # CAUSES ONLY in what is said — never the pair.
+    if ports.is_exposed is not None:
+        try:
+            exposed = ports.is_exposed(target.contract, target.token_id)
+        except Exception as e:  # noqa: BLE001
+            raise LaunchRefused(
+                f"a lista de expostos não se consegue ler ({type(e).__name__}) — "
+                "nada publicado. É um ficheiro do repositório: confirma o deploy."
+            ) from None
+        if exposed:
+            raise LaunchRefused(
+                "⛔ o alvo preparado consta de um ficheiro público do repositório "
+                "e não pode ser alvo. Corre /prepare outra vez. Nada foi publicado.")
 
     # The one guard that is about the WORLD, not about the clue: re-run it.
     # Unverifiable is a refusal, not a pass — the whole point of the guard

@@ -44,6 +44,17 @@ findability_log.txt
 # vier a ser sorteado, quem tenha lido o repositório fica com uma
 # short-list. Custa zero mantê-las fora e não há nada a ganhar em pô-las cá.
 alvos_*.txt
+# …e as amostras e capturas dos censos (09/10). Estiveram versionadas — o
+# .gitignore só protege o que ainda não está no repositório — e saíram com
+# `git rm --cached`; o histórico fica como estava. Tudo o que lá esteve
+# está na lista de queimados (src/finding_memeland/target/exposed.txt) e
+# nunca pode ser alvo. Os scripts que as escrevem continuam a escrevê-las
+# aqui, na raiz, e é aqui que ficam.
+candidatos_*.json
+escrevibilidade_resultados.json
+familias_eth.json
+metadata_eth_raw.json
+opensea_search_raw.json
 
 # Contexto local do Claude Code (regras e estado do projecto) — fica só nesta
 # máquina. O repositório é público.
