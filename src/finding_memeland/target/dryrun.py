@@ -28,7 +28,8 @@ dry-run — "exercised, not assumed"):
   6. stale_prepare     — the piece became searchable between /prepare and
                          /launch: refused, nothing posted, preparation kept
   7. resume            — crash-resume from the sealed row; the hold seconds
-                         survive and the operator hears the detector reset
+                         survive and the anti-spray detector comes back from
+                         the log, not from zero
 
 Every check that a scenario asserts is listed in its report, so a red line
 names what failed. Nothing here touches the network.
@@ -56,7 +57,7 @@ from .hunt import (
     SprayParams,
     TargetHuntPreparer,
 )
-from .integration import TargetPorts
+from .integration import TargetPorts, rebuild_spray
 from .prepare import Prepared, PreparedStore
 from .refresh import content_id
 from .selector import CurationEpoch, metadata_hash
@@ -628,14 +629,22 @@ def scenario_stale_prepare(world: TargetWorld) -> ScenarioReport:
 
 
 def scenario_resume(world: TargetWorld) -> ScenarioReport:
-    """Crash during a hold; the resumed hunt keeps its held seconds and the
-    operator hears the anti-spray detector restarted (known limit, visible)."""
-    rep = ScenarioReport("resume — crash mid-hold, sealed row rebuilt, detector reset announced")
+    """Crash during a hold, with wrong guesses already in the thread; the
+    resumed hunt keeps its held seconds and the anti-spray detector comes
+    back from the log — until 09/10 it restarted from zero."""
+    rep = ScenarioReport(
+        "resume — crash mid-hold, sealed row rebuilt, anti-spray rebuilt from the log")
     hunt = world.launch()
+    t0 = hunt.live_at
     world.orch._hunt_timeout_h = None
     world.orch._clue_due_fn = lambda now: now
     world.orch._max_rounds = 5
     world.down = True
+    # three accounts, three different pieces, all wrong, before the crash
+    world.src.schedule[1] = lambda: [
+        post(2000 + n, str(70 + n), f"ethereum:0x{'9' * 40}:{n}",
+             t0 + timedelta(minutes=n), hunt.reshare_post_id)
+        for n in (1, 2, 3)]
     try:
         world.orch._claim_loop(hunt)
     except RuntimeError:
@@ -647,8 +656,14 @@ def scenario_resume(world: TargetWorld) -> ScenarioReport:
     rep.check("sealed target rebuilt identically", rebuilt.target == hunt.target)
     rep.check("held seconds survived the crash", row["target_hold_s"] > 0
               and rebuilt.target_hold.held_seconds(now) >= row["target_hold_s"])
-    rep.check("operator told the anti-spray detector restarted from zero",
-              any("anti-spray detector restarted from zero" in m for m in world.notices()[before:]))
+    spray_log, spray_state = rebuild_spray(world.orch, rebuilt)
+    rep.check("anti-spray detector rebuilt from the log: 3 wrong guesses, not zero",
+              len(spray_log) == 3 and len({a for a, _ in spray_log}) == 3
+              and not spray_state.get("fired"))
+    rep.check("operator told what was rebuilt, in counts",
+              any("anti-spray detector rebuilt from the log" in m
+                  and "3 wrong guess(es), 3 account(s), 3 distinct target(s)" in m
+                  for m in world.notices()[before:]))
     rep.check("persona x_user_id never the target id", rebuilt.persona.x_user_id == "")
     _secrecy(rep, world, hunt.target.target.name_onchain)
     rep.notices = world.notices()

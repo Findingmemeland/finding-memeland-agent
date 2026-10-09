@@ -345,3 +345,18 @@ create table if not exists target_blobs (
 alter table hunts add column if not exists target_used_hmac text;
 create index if not exists hunts_target_used_hmac_idx
     on hunts (target_used_hmac) where target_used_hmac is not null;
+
+-- Migration 2026-10-09 — as respostas de formato ficam no registo (hunt #17).
+-- Um post que parecia um claim mas não se conseguia ler como token (contrato
+-- sem tokenId, sem cadeia, link de colecção, link ilegível) recebia a
+-- resposta de formato e não deixava linha nenhuma. Depois de um reinício o
+-- agente já não sabia que o tinha tratado nem que tinha respondido ao autor,
+-- tentou responder outra vez e o X recusou (403, duplicate content). Passa a
+-- ficar uma linha por post, com este outcome; `submitted_claim_code` leva o
+-- TIPO da regra (no_chain, no_token_id, collection_link, unreadable_link) —
+-- nunca o texto do post. Não conta como palpite.
+--
+-- ⚠️ ALTER TYPE ... ADD VALUE corre FORA de uma transacção (editor SQL do
+-- Supabase: esta linha sozinha) e ANTES de o código novo estar no ar — sem
+-- ela, cada resposta de formato deixa um aviso "format post … not logged".
+alter type submission_outcome add value if not exists 'format';

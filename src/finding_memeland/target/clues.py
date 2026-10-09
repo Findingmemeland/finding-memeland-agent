@@ -53,7 +53,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from ..content.clue_engine import HARD_CLUE_FLOOR
+from ..content.clue_engine import HARD_CLUE_FLOOR, MalformedAnswer
 from ..content.relic_clues import (
     PUZZLE_ANGLES,
     PUZZLE_CLUES,
@@ -456,22 +456,50 @@ def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
     return errs
 
 
+# What the writer is told after an answer that could not be read. ONE object:
+# two of them is as unreadable as none (hunt #17).
+ONE_OBJECT_REMINDER = (
+    "Your previous answer could not be read. Check your claims SILENTLY and "
+    "respond with exactly ONE JSON object — nothing before it and nothing "
+    "after it.")
+
+
+def _first_json_object(text: str) -> dict:
+    """The FIRST complete JSON object in the writer's answer.
+
+    Hunt #17, clue 4: the writer answered with TWO objects. Reading from the
+    first "{" to the last "}" handed both to the parser as one ("Extra data:
+    line 3 column 1") and the round died on an answer whose first object was
+    whole. `raw_decode` stops where the first object ends; what follows is
+    ignored. A "{" that opens nothing readable (prose, an object cut short)
+    is skipped and the next one is tried."""
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, start)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
+            return obj
+        start = text.find("{", start + 1)
+    # NEVER the text: the writer's reasoning names the answer, and this
+    # message reaches the operator channel (audit 10/09: the 4th
+    # real-clues run printed 'Looking at "Ancient"…' to the notifier)
+    raise ValueError(f"no JSON object in clue response ({len(text)} chars)")
+
+
 def parse_target_clue(text: str):
     """The target writer's JSON → ClueDraft with the declared data. Missing
     fields are None/[] (and then fail the declaration check with a reason)."""
-    from ..content.clue_engine import ClueDraft, _strip_leading_meta
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        # NEVER the text: the writer's reasoning names the answer, and this
-        # message reaches the operator channel (audit 10/09: the 4th
-        # real-clues run printed 'Looking at "Ancient"…' to the notifier)
-        raise ValueError(f"no JSON object in clue response ({len(text)} chars)")
-    data = json.loads(text[start:end + 1])
-    clue = _strip_leading_meta(str(data.get("clue", "")).strip())
+    from ..content.clue_engine import ClueDraft, _json_text, _strip_leading_meta
+    data = _first_json_object(text or "")
+    # `null` is an empty field, never the word "None" (`_json_text`)
+    clue = _strip_leading_meta(_json_text(data.get("clue")))
     if not clue:
         raise ValueError("empty clue text")
     claims = data.get("claims") or []
-    return ClueDraft(text=clue, taunt=str(data.get("taunt", "")).strip() or None,
+    return ClueDraft(text=clue, taunt=_json_text(data.get("taunt")) or None,
                      angle=(str(data["angle"]).strip() if data.get("angle") else None),
                      image_aspect=(str(data["image_aspect"]).strip().lower()
                                    if data.get("image_aspect") else None),
@@ -1000,6 +1028,8 @@ class TargetClueEngine(RelicClueEngine):
             None if search_guard is False else search_guard)
         self._truth_judge = None if truth_judge is False else truth_judge
         self._forbidden_hits: dict[str, int] = {}
+        self._attempts = 0
+        self._rejections: dict[str, int] = {}
 
     CLUE_ONE_ATTEMPTS = 10     # a refusal at clue 1 costs a draw; try harder there
 
@@ -1058,9 +1088,14 @@ class TargetClueEngine(RelicClueEngine):
         try:
             draft = super().next_clue(persona, clue_index, prior_clues,
                                       max_attempts=max_attempts)
-        except Exception:
-            log.warning("clue #%s: NOT produced after %s attempts — %s",
-                        clue_index, self._attempts, self._tally())
+        except Exception as e:
+            # Every REFUSED attempt is in the tally. One that a guard of ours
+            # could not judge (or the API dropped) was not refused: it is
+            # named apart, by its type, so the numbers always add up.
+            cut = ("" if sum(self._rejections.values()) >= self._attempts
+                   else f"; attempt {self._attempts} cut short ({type(e).__name__})")
+            log.warning("clue #%s: NOT produced after %s attempts — %s%s",
+                        clue_index, self._attempts, self._tally(), cut)
             raise
         if self._attempts > 1:
             log.warning("clue #%s: published after %s attempts — %s",
@@ -1068,16 +1103,36 @@ class TargetClueEngine(RelicClueEngine):
         self.last_attempt_report = (self._attempts, dict(self._rejections))
         return draft
 
+    # Tally labels for what is counted outside `_post_guardrail_reasons`.
+    TALLY_ANSWER_TERM = "answer term (1b)"
+    TALLY_TEXT_RULES = "text rules"
+    TALLY_MALFORMED = "malformed answer"
+
     def _tally(self) -> str:
-        text_rules = self._attempts - 1 - sum(self._rejections.values())
-        parts = dict(self._rejections)
-        if text_rules > 0:
-            parts["text rules"] = text_rules
-        return ", ".join(f"{k} ×{v}" for k, v in parts.items()) or "no rejections"
+        """Every refused attempt, by the guard that refused it — COUNTED where
+        it happens. Until 09/10 the text rules were worked out by subtraction
+        ("attempts − 1 − the rest"), which is right when the last attempt was
+        published and one short when the whole round failed: hunt #17 logged
+        six attempts whose counts added up to five."""
+        return (", ".join(f"{k} ×{v}" for k, v in self._rejections.items())
+                or "no rejections")
+
+    def _count(self, guard: str) -> None:
+        self._rejections[guard] = self._rejections.get(guard, 0) + 1
 
     def _reject(self, guard: str, reasons: list[str]) -> list[str]:
-        self._rejections[guard] = self._rejections.get(guard, 0) + 1
+        self._count(guard)
         return reasons
+
+    def _note_text_rejection(self, result) -> None:
+        """A draft the text rules refused. Rule 1b — a term of the ANSWER
+        written in the clue — gets its own counter (hunt #17: five rounds
+        failed under "text rules" and the log could not say whether it was
+        this rule). The number only; the term names the answer. One refused
+        attempt, one count: a draft that broke 1b and something else is
+        counted as 1b."""
+        self._count(self.TALLY_ANSWER_TERM if getattr(result, "answer_terms", 0)
+                    else self.TALLY_TEXT_RULES)
 
     def _post_guardrail_reasons(self, draft, persona, clue_index, prior_clues):
         # 1. the address of the answer, mechanically, every phase
@@ -1086,13 +1141,16 @@ class TargetClueEngine(RelicClueEngine):
             # Opus (06/09, Q3): a ramp fighting the same term attempt after
             # attempt ("the base of the…") must be visible in the log, not
             # discovered by accident when the generator exhausts its tries.
+            # THE WORD ITSELF NEVER (09/10): the chain and the platform are
+            # part of the answer, and this line used to print it. The count
+            # says the same thing.
             for w in words:
                 self._forbidden_hits[w] = self._forbidden_hits.get(w, 0) + 1
-                if self._forbidden_hits[w] >= 2:
-                    logging.getLogger(__name__).warning(
-                        "clue #%s: generator hit forbidden address word %r "
-                        "%s times in this clue's attempts", clue_index, w,
-                        self._forbidden_hits[w])
+            repeated = max(self._forbidden_hits[w] for w in words)
+            if repeated >= 2:
+                logging.getLogger(__name__).warning(
+                    "clue #%s: generator hit the same forbidden address word "
+                    "%s times in this clue's attempts", clue_index, repeated)
             return self._reject("address words", ["the clue names a blockchain or a platform (" +
                     ", ".join(words) + ") — the chain and the platform are part "
                     "of the ANSWER; remove every such word and any allusion to "
@@ -1174,24 +1232,27 @@ class TargetClueEngine(RelicClueEngine):
         # reasoned out loud ("Let me verify facts about…"), spent the 512
         # tokens and never reached the JSON — a ValueError escaped the
         # regeneration loop and the ROUND was skipped. Budget doubled, and a
-        # malformed answer is one more attempt with a pointed reminder, not
-        # a lost round.
-        self._attempts = getattr(self, "_attempts", 0) + 1
-        for attempt in range(2):
-            resp = self._client.messages.create(
-                model=self._model, max_tokens=1024, system=system,
-                messages=[{"role": "user", "content": user}],
-            )
-            text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-            try:
-                return parse_target_clue(text)
-            except ValueError as e:
-                if attempt == 1:
-                    raise
-                logging.getLogger(__name__).warning(
-                    "clue #%s: writer answered without a JSON object (%s) — asking once more",
-                    clue_index, type(e).__name__)
-                user += ("\n\nYour previous answer contained no JSON object (you reasoned "
-                         "out loud and ran out of room). Check your claims SILENTLY and "
-                         "respond with ONLY the JSON object, nothing before it.")
-        raise AssertionError("unreachable")
+        # malformed answer got ONE pointed retry in here.
+        #
+        # Hunt #17, clue 4: the retry's answer could not be read either
+        # ("Extra data": two objects) and the ValueError still killed the
+        # round, with attempts left. An answer that cannot be read is now ONE
+        # ATTEMPT of the round like any other refusal: it is counted, the
+        # next attempt carries the reminder, and only a round with no attempt
+        # left ends.
+        self._attempts += 1
+        resp = self._client.messages.create(
+            model=self._model, max_tokens=1024, system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        try:
+            return parse_target_clue(text)
+        except ValueError as e:
+            logging.getLogger(__name__).warning(
+                "clue #%s: the writer's answer could not be read (%s) — one "
+                "attempt spent", clue_index, type(e).__name__)
+            self._count(self.TALLY_MALFORMED)
+            # `from None`: a JSON error carries the whole answer in `.doc`
+            raise MalformedAnswer(f"unreadable answer ({len(text)} chars)",
+                                  reminder=ONE_OBJECT_REMINDER) from None

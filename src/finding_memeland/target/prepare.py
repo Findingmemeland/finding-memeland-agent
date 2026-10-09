@@ -423,6 +423,19 @@ _OWNER_REASONS = {
     "contract": "contrato", "unverifiable": "sem-veredicto"}
 
 
+def _name_fits_plan(base: str) -> bool:
+    """Can the clue engine plan a hunt on this name at all? The puzzle plan
+    gives every word of the name its own pieces and holds only so many words
+    (`relic_clues.MAX_NAME_WORDS`). A longer name used to be accepted here
+    and then die inside the plan — at /prepare, after the paid uniqueness
+    call and the vision call — as "sem-pista (IndexError)".
+
+    Imported lazily: prepare.py must not drag the clue engine into every
+    import of the larder."""
+    from ..content.relic_clues import name_fits_plan
+    return name_fits_plan(base)
+
+
 def _snapshot(guard) -> dict | None:
     stats = getattr(guard, "stats", None)
     return dict(stats) if isinstance(stats, dict) else None
@@ -449,6 +462,7 @@ class Tally:
     draws: int = 0
     metadata: int = 0        # tokenURI reverts, or metadata came back empty
     name: int = 0            # base name has fewer than two real words
+    long_name: int = 0       # more words than the clue plan holds (09/10)
     image: int = 0           # the gateway ANSWERED without bytes (dead pin)
     too_big: int = 0         # bigger than vision can use (171 MB, measured)
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
@@ -507,6 +521,7 @@ class Tally:
     def render(self) -> str:
         causes = ", ".join(f"{k} {v}" for k, v in (
             ("metadata", self.metadata), ("nome", self.name),
+            ("nome-longo", self.long_name),
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
@@ -762,6 +777,12 @@ class TargetFinder:
         base = normalize_name(str(meta.get("name") or "").strip())
         if not name_qualifies(base, min_words=self._min_words):
             tally.name += 1
+            return None
+        if not _name_fits_plan(base):
+            # its own cause, never folded into 'nome': a name that is fine
+            # and that we cannot plan yet is OUR limit, and the day the plan
+            # grows this number says what it was costing
+            tally.long_name += 1
             return None
         return read, base
 
@@ -1197,9 +1218,15 @@ class TargetPreparer:
 
             # things age: re-read and re-check before committing to it
             try:
+                long_before = tally.long_name
                 named = self._finder.named_token(src, cand.token_id, tally,
                                                  strict=True)
                 if named is None:
+                    if tally.long_name > long_before:
+                        # a target deposited before 09/10: say why it goes
+                        self._notify("prepare: o nome tem mais palavras do que "
+                                     "o plano de pistas aguenta — candidato "
+                                     "descartado, tento outro")
                     larder.consume(cand.id())
                     continue
                 read, base = named

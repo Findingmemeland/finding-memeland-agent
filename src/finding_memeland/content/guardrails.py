@@ -17,6 +17,9 @@ from dataclasses import dataclass
 class GuardrailResult:
     ok: bool
     reasons: list[str]
+    # How many solution terms the clue wrote (rule 1b). A COUNT, so a caller
+    # can tally that rule apart without reading — or logging — the terms.
+    answer_terms: int = 0
 
 
 # Common words that are NOT identity leaks even if they appear in a name.
@@ -234,4 +237,5 @@ def check_clue(
     if clue_index <= 3 and re.search(r"@\w+", clue_text):
         reasons.append("clues 1-3 must not reference an @handle (obliqueness rule)")
 
-    return GuardrailResult(ok=not reasons, reasons=reasons)
+    return GuardrailResult(ok=not reasons, reasons=reasons,
+                           answer_terms=len(answer_leaks))

@@ -222,7 +222,12 @@ def hunt_status_line(repo, *, local_active: bool) -> str:
             line += " ⚠️ local hunt thread running with NO active DB row — investigate"
         return line
     r = rows[0]
-    line = f"hunt: #{r.get('id')} {str(r.get('state', '?')).upper()}"
+    # The PUBLIC number — the one in the posts — with the DB id beside it.
+    # Until 09/10 this printed the id alone, and hunt #17 read "#19" here.
+    # A row from before the numbering has no public number: the id stands in.
+    number = r.get("hunt_number")
+    which = f"#{number} (db {r.get('id')})" if number else f"#{r.get('id')}"
+    line = f"hunt: {which} {str(r.get('state', '?')).upper()}"
     if r.get("paused"):
         line += " | ⏸ PAUSED (/resume to continue)"
     if len(rows) > 1:

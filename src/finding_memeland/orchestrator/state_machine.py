@@ -1398,6 +1398,10 @@ class Orchestrator:
             kind = {
                 "no_reshare": "missing_repost", "wrong_door": "wrong_door",
                 "early": "early", "late": "late",
+                # 09/10 (hunt #17): the format reply too. Both rows got it —
+                # a multi-token post ('malformed') and any other post we
+                # could not turn into a token ('format').
+                "format": "format", "malformed": "format",
             }.get(outcome)
             if kind:
                 sys_sent.setdefault(kind, set()).add(author)
@@ -1541,11 +1545,13 @@ class Orchestrator:
         banned = self._banned_reply_terms(hunt)
         # What a claim IS for this hunt (code vs target identity) lives in the
         # matcher; the loop stays shape-agnostic (claims/matcher.py).
-        from ..target.integration import claim_matcher_for, spray_check
+        from ..target.integration import claim_matcher_for, rebuild_spray, spray_check
         matcher = claim_matcher_for(self, hunt)
         is_target = getattr(hunt, "target", None) is not None
-        spray_log: list[tuple[str, str]] = []  # (author, label) of wrong guesses, puzzle phase
-        spray_state: dict = {}
+        # (author, canonical id) of wrong guesses, and whether the detector
+        # already fired — rebuilt from the log like the counters above, so a
+        # restart no longer sends it back to zero (09/10, hunt #17).
+        spray_log, spray_state = rebuild_spray(self, hunt) if is_target else ([], {})
         # Malformed (>1 token) posts per author — logged as 'malformed', no
         # guess spent, ONE format reply per profile (sys_sent), and the
         # operator hears about a shotgun account once it insists (P1-1).
@@ -1799,6 +1805,27 @@ class Orchestrator:
                                     "multi-token replies so far (no guess spent, one "
                                     "format reply sent; every one logged as 'malformed')"
                                 )
+                        else:
+                            # EVERY other format post leaves a row too (09/10).
+                            # Nothing was logged here, so a restart forgot
+                            # both the post ('processed') and that its author
+                            # had been answered ('sys_sent'): hunt #17 came
+                            # back from a restart, tried to send the same
+                            # replies again, and X refused them (403,
+                            # duplicate content). The label is OUR name for
+                            # the rule it fell under, never the post's text.
+                            kind_of = getattr(matcher, "format_kind", None)
+                            try:
+                                self._repo.log_submission(
+                                    hunt_id=hunt.id, dm_id=post.tweet_id,
+                                    sender_x_id=post.author_id, wallet=None,
+                                    sender_handle=post.author_handle,
+                                    submitted_claim_code=(
+                                        kind_of(post.text) if kind_of else None),
+                                    outcome="format", x_created_at=post.created_at,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                self._notify(f"format post {post.tweet_id} not logged: {e!r}")
                         self._sys_reply("format", post, hint, sys_sent)
                         _done(post)
                         continue
@@ -2541,11 +2568,20 @@ class Orchestrator:
         if getattr(hunt, "target", None) is None:
             self._persona_source.mark_retired(hunt.persona.id)
         log = self._repo.submissions_for_hunt(hunt.id)
+        # A format reply is not a submission (Pedro, 09/10): its row exists so
+        # a restart knows the post was handled, and it never spent a guess.
+        # The public count keeps meaning what it meant before those rows
+        # existed; the operator hears how many there were, apart.
+        format_rows = sum(1 for s in log if s.get("outcome") == "format")
         self._publisher.post(
-            f"Hunt #{hunt.number} closed. {len(log)} submissions logged for public audit."
+            f"Hunt #{hunt.number} closed. {len(log) - format_rows} "
+            "submissions logged for public audit."
         )
         self._transition(hunt, HuntState.DONE)
-        self._notify(f"hunt #{hunt.number} done; persona {hunt.persona.handle} retired")
+        self._notify(
+            f"hunt #{hunt.number} done; persona {hunt.persona.handle} retired"
+            + (f" · {format_rows} format reply row(s) logged apart (not in the "
+               "public count)" if format_rows else ""))
 
     # ------------------------------------------------------------------
     # Crash recovery — called once at boot (main.py). Finds hunts the previous

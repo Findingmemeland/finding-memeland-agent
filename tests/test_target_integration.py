@@ -143,7 +143,10 @@ def test_format_hint_wrong_id_and_right_id_wins():
     assert winner.wallet == WALLET_A
     assert replies_to(w.rig, 1001) == [POST_REPLY_FORMAT]
     outcomes = {s["dm_id"]: s["outcome"] for s in w.rig.repo.submissions}
-    assert "1001" not in outcomes                       # formato não é palpite
+    # formato não é palpite — mas fica no registo (09/10), com o tipo
+    assert outcomes["1001"] == "format"
+    fmt = next(s for s in w.rig.repo.submissions if s["dm_id"] == "1001")
+    assert fmt["submitted_claim_code"] == "no_chain"
     assert outcomes["1002"] == "bad_code"
     assert outcomes["1003"] == "won"
     assert w.rig.repo.submissions[-1]["submitted_claim_code"] == target.id()
@@ -404,9 +407,9 @@ def test_resume_rebuilds_the_target_from_the_sealed_row():
     assert rebuilt.ctx.image_description == "a lighthouse on a black rock"
     assert rebuilt.persona.x_user_id == ""
     assert rebuilt.target_hold is not None
-    # o detector recomeçou do zero — o operador ouve-o (limite conhecido, visível)
-    assert any("anti-spray detector restarted from zero" in m
-               for m in w.rig.notifier.messages)
+    # o detector já não recomeça do zero (09/10): o ciclo de claims
+    # reconstrói-o a partir do registo (tests/test_after_hunt_17.py)
+    assert not any("restarted from zero" in m for m in w.rig.notifier.messages)
     assert all("Whispering" not in m for m in w.rig.notifier.messages)
 
 

@@ -16,6 +16,8 @@ marketplace link — so the loop now asks a matcher and stays shape-agnostic:
                               nobody could resolve) — replied, NOT counted
                               as a guess: a format slip must not burn one of
                               the five attempts
+  · format_kind(text)       — which format rule that was (our label, for the
+                              'format' row in the log), or None
   · spray_key(text)         — the CANONICAL identity of the guessed target
                               for the anti-spray detector, or None. Only a
                               parsed TargetRef qualifies (Opus, 06/09): the
@@ -43,6 +45,7 @@ class ClaimMatcher(Protocol):
     def submitted_label(self, text: str) -> str | None: ...
     def skip_judge(self, text: str) -> bool: ...
     def format_hint(self, text: str) -> str | None: ...
+    def format_kind(self, text: str) -> str | None: ...
     def spray_key(self, text: str) -> str | None: ...
     # is_malformed(text) — the post is a REFUSED claim attempt (>1 token), to
     # be LOGGED (outcome 'malformed') even though it spends no guess (Opus
@@ -78,6 +81,9 @@ class CodeClaimMatcher:
     def format_hint(self, text: str) -> str | None:
         return None
 
+    def format_kind(self, text: str) -> str | None:
+        return None
+
     def spray_key(self, text: str) -> str | None:
         return None                      # the code game has no spray detector
 
@@ -101,6 +107,7 @@ class TargetClaimMatcher:
         # Opcional: sem ele, o caminho antigo ("não consigo ler") mantém-se.
         self._collection_reply = collection_reply
         self._readable_memo: dict[str, bool] = {}
+        self._format_last: tuple[str, tuple[str, str] | None] | None = None
 
     def _extract(self, text: str):
         from ..target.claim import extract_target_refs
@@ -183,10 +190,34 @@ class TargetClaimMatcher:
         player they are wrong when they might be right. Everything here is
         a post we could not turn into a token — and not being able to read
         it is OUR limit. The player hears what to send instead."""
+        case = self._format_case(text)
+        return case[1] if case else None
+
+    def format_kind(self, text: str) -> str | None:
+        """WHICH format rule the post fell under — OUR label for it, logged
+        with the 'format' row (09/10) so the replies can be counted by type.
+        Never the post's own text. Asked right after `format_hint` for the
+        same post, it costs nothing: an unreadable link is a resolver call,
+        and the answer just given is kept (that one answer only — a later
+        post with the same text is read again, as before)."""
+        key = text or ""
+        if self._format_last is not None and self._format_last[0] == key:
+            case = self._format_last[1]
+        else:
+            case = self._format_case(key)
+        return case[0] if case else None
+
+    def _format_case(self, text: str) -> tuple[str, str] | None:
+        """(kind, reply) for a post we could not turn into a token, or None."""
+        case = self._classify_format(text or "")
+        self._format_last = (text or "", case)
+        return case
+
+    def _classify_format(self, text: str) -> tuple[str, str] | None:
         from ..target.claim import claim_shaped
         ext = self._extract(text)
         if self._malformed(ext):
-            return self._one_token_reply
+            return ("one_token", self._one_token_reply)
         if ext.refs:
             return None
         if ext.unresolved_links:
@@ -199,15 +230,15 @@ class TargetClaimMatcher:
                 from ..target.claim import collection_link
                 if (self._collection_reply
                         and all(collection_link(u) for u in ext.unresolved_links)):
-                    return self._collection_reply
-                return self._unresolved_reply
+                    return ("collection_link", self._collection_reply)
+                return ("unreadable_link", self._unresolved_reply)
             return None
         if claim_shaped(text):                     # contract:tokenId, no chain
-            return self._format_reply
+            return ("no_chain", self._format_reply)
         if contract_paste_like(text):
             # A bare contract with no tokenId: someone naming a COLLECTION
             # and believing they claimed a token. Hunt #11 jeered at three
             # of these ("mechanical engagement"), and one of them had the
             # right piece. They are claiming — teach them.
-            return self._format_reply
+            return ("no_token_id", self._format_reply)
         return None

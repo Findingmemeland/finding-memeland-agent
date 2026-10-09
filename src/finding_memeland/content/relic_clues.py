@@ -74,6 +74,11 @@ REVEAL_IMAGE_SLOT = 3          # 3rd reveal clue = the plain art description
 # Every name word keeps at least this many puzzle pieces. A player needs BOTH
 # words to search the relic, so a word with one clue is a dead hunt.
 MIN_PIECES_PER_WORD = 2
+# ...so the plan holds this many words and no more: a longer name cannot get
+# its minimum out of PUZZLE_CLUES pieces. Until 09/10 nothing said so, and a
+# four-word name died inside `relic_ramp_plan` with an IndexError — after the
+# target had been through every paid check on the way to Clue 1.
+MAX_NAME_WORDS = PUZZLE_CLUES // MIN_PIECES_PER_WORD
 REVEAL_START = 0.4             # first easy clue after the puzzle phase
 REVEAL_FLOOR = 0.05
 _REVEAL_STEP = 0.05
@@ -199,6 +204,13 @@ def enumerable_words_in(name: str) -> tuple[str, ...]:
     )
 
 
+def name_fits_plan(name: str) -> bool:
+    """Does the puzzle plan have room for every word of this name? Counted
+    exactly as the plan counts them (`_name_facets`: one word per run of
+    non-space characters)."""
+    return len(_name_facets(name)) <= MAX_NAME_WORDS
+
+
 def relic_ramp_plan(name: str) -> list:
     """The PUZZLE PHASE: `PUZZLE_CLUES` hard pieces, as (facet, obliqueness).
 
@@ -214,6 +226,10 @@ def relic_ramp_plan(name: str) -> list:
     SEEDED by the name (auditoria 2026-08-26, P1-4): the plan is rebuilt on a
     crash-resume, so it must come out identical before and after."""
     words = _name_facets(name)
+    if len(words) > MAX_NAME_WORDS:
+        # COUNTS ONLY: this reaches the operator, and the name is the answer
+        raise ValueError(f"no puzzle plan for a name of {len(words)} words "
+                         f"(the plan holds {MAX_NAME_WORDS})")
     rng = random.Random(name)
     n_art = max(0, min(PUZZLE_IMAGE_PIECES, PUZZLE_CLUES - MIN_PIECES_PER_WORD * len(words)))
     n_name = PUZZLE_CLUES - n_art

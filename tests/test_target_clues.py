@@ -665,8 +665,11 @@ def test_judge_recovers_on_the_second_try():
 
 def test_writer_reasoning_out_loud_costs_one_attempt_not_the_round():
     """4th --real-clues: 'Looking at "Ancient" — I need a checkable structural
-    claim…' — no JSON, ValueError out of the loop, round skipped. Now: one
-    pointed retry inside generate(); a second failure still raises."""
+    claim…' — no JSON, ValueError out of the loop, round skipped. An answer
+    that cannot be read is one attempt of the round, with a pointed reminder.
+
+    09/10 (hunt #17): a SECOND unreadable answer used to raise and end the
+    round; it is one more attempt now (tests/test_after_hunt_17.py)."""
     e = engine([(RAW, 'Looking at "Ancient" — let me verify facts about its letters: A-'),
                 "patience is a coin nobody spends"])
     d = e.next_clue(ctx(), 5, ["x"] * 4)
@@ -674,9 +677,10 @@ def test_writer_reasoning_out_loud_costs_one_attempt_not_the_round():
     assert len(e._client.calls) == 2
     assert "SILENTLY" in e._client.calls[1]["messages"][0]["content"]
     assert e._client.calls[0]["max_tokens"] == 1024
-    e = engine([(RAW, "no json"), (RAW, "still no json")])
-    with pytest.raises(ValueError):
-        e.next_clue(ctx(), 5, ["x"] * 4)
+    e = engine([(RAW, "no json"), (RAW, "still no json"),
+                "patience is a coin nobody spends"])
+    assert e.next_clue(ctx(), 5, ["x"] * 4).text == "patience is a coin nobody spends"
+    assert len(e._client.calls) == 3
 
 
 def test_guard_pressure_is_tallied_per_clue_and_clue_one_gets_ten_attempts(caplog):

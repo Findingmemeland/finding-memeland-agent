@@ -31,7 +31,7 @@ from typing import Callable
 
 from ..content.relic_clues import PUZZLE_CLUES
 from ..orchestrator.ports import ReadyPersona
-from .claim import ClaimJudge
+from .claim import ClaimJudge, parse_explicit
 from .clues import TargetClueContext
 from .hunt import (
     ACT_CONTINUE,
@@ -589,12 +589,65 @@ def void_target(orch, hunt, *, cause: str, live: LiveVerdict | None,
 # --------------------------------------------------------------------------- #
 
 
-# KNOWN LIMIT (Opus audit 09/09, resume note): the spray log and state live
-# in memory. After a crash-resume the detector restarts from zero for that
-# hunt and may not fire again. Consequence-free for the prize (spray never
-# voids, only pauses for review) and low impact, so the log is not
-# persisted — the detector covers hunts without a crash. If that ever
-# matters, persist the (author, ref.id) pairs on the row.
+# The spray log and state live in memory DURING a run; after a restart they
+# are rebuilt from the submissions log (`rebuild_spray`, 09/10). Until then
+# this was a known limit (Opus audit 09/09): a crash-resume sent the detector
+# back to zero for that hunt.
+def _spray_key_of(label: str) -> str | None:
+    """A logged wrong guess is a detector key only when its label IS a
+    canonical id (chain:0x…:tokenId) — which is what `matcher.spray_key`
+    returned for that post. A link the resolver had to read is logged by its
+    URL and never fed the detector; it does not feed it here either."""
+    refs = parse_explicit(label)
+    return label if len(refs) == 1 and refs[0].id() == label else None
+
+
+def rebuild_spray(orch, hunt) -> tuple[list[tuple[str, str]], dict]:
+    """The anti-spray detector's memory after a restart: (log, state).
+
+    Every wrong guess is already a `bad_code` row carrying the id the
+    detector is keyed by, in arrival order — the same source the guess caps
+    and the once-per-profile replies are rebuilt from.
+
+    `fired` is REPLAYED, not stored. The detector is asked after every wrong
+    guess, so it has fired iff some prefix of the log trips it; a hunt the
+    operator already reviewed and resumed is not paused a second time by the
+    same guesses. The operator is told what was rebuilt — COUNTS ONLY, never
+    an id and never the thresholds (they are reserved)."""
+    ports: TargetPorts = orch._target
+    if ports.spray is None:
+        return [], {}
+    try:
+        rows = orch._repo.submissions_for_hunt(hunt.id)
+    except Exception as e:  # noqa: BLE001 — a defence degraded, never a dead hunt
+        orch._notify(f"hunt #{hunt.number}: the anti-spray detector could not be "
+                     f"rebuilt from the log ({type(e).__name__}) — it starts from "
+                     "zero. Watch the claim thread by hand for the rest of this hunt.")
+        return [], {}
+    log: list[tuple[str, str]] = []
+    for row in rows:
+        if row.get("outcome") != "bad_code":
+            continue
+        author = str(row.get("sender_x_id") or "")
+        key = _spray_key_of(str(row.get("submitted_claim_code") or ""))
+        if author and key:
+            log.append((author, key))
+    if not log:
+        return [], {}
+    state: dict = {}
+    if any(ports.spray.evaluate(log[:n]).triggered for n in range(1, len(log) + 1)):
+        state["fired"] = True
+    v = ports.spray.evaluate(log)
+    orch._notify(
+        f"hunt #{hunt.number}: anti-spray detector rebuilt from the log — "
+        f"{v.total_guesses} wrong guess(es), {v.accounts} account(s), "
+        f"{v.distinct_targets} distinct target(s)"
+        + (" · these guesses already tripped it: it will NOT pause this hunt "
+           "again. If you never saw that pause, review the claim thread now."
+           if state.get("fired") else "."))
+    return log, state
+
+
 def spray_check(orch, hunt, clue_index: int, log: list[tuple[str, str]],
                 state: dict) -> None:
     """Puzzle phase only. `log` is the (author, label) list of wrong guesses
@@ -741,7 +794,9 @@ def resume_target_hunt(orch, row: dict, hunt):
             doc = json.loads(ports.cipher._cipher.decrypt(str(blob)))  # noqa: SLF001
             image_description = str(doc.get("image_description") or "")
         except Exception:  # noqa: BLE001 — clues degrade (no art pieces), hunt survives
-            orch._notify(f"hunt #{row.get('id')}: artwork description could not "
+            # the PUBLIC number, like every other notice (09/10) — this one
+            # used the DB id, the same slip the /status headline had
+            orch._notify(f"hunt #{hunt.number}: artwork description could not "
                          "be unsealed — art clues unavailable until fixed.")
     hunt.target = sealed
     hunt.ctx = TargetClueContext.from_target(sealed.target,
@@ -751,13 +806,7 @@ def resume_target_hunt(orch, row: dict, hunt):
         x_user_id="", access_token="", access_secret="",
     )
     hunt.target_hold = HoldLedger(held=float(row.get("target_hold_s") or 0))
-    # R8 applied to a defence (Opus, 09/09): the spray detector's log lives in
-    # memory and restarts from zero on resume — say so, so the degradation is
-    # visible to the operator instead of known only to whoever read the audit.
-    if ports.spray is not None:
-        orch._notify(
-            f"hunt #{hunt.number}: resumed — the anti-spray detector restarted "
-            "from zero (its log is in-memory); duplication before the crash is "
-            "not counted. Watch the claim thread by hand for the rest of this hunt."
-        )
+    # The spray detector no longer restarts from zero here (09/10): the claim
+    # loop rebuilds its log from the submissions when it starts
+    # (`rebuild_spray`) and tells the operator what it found.
     return hunt

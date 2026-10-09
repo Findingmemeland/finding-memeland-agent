@@ -52,7 +52,8 @@ def _finder(*, read=None, image=(True, 10), eoa=True, unique=True,
     def read_token(chain, contract, tid):
         calls["read"].append((chain, contract, tid))
         return read if read is not None else TokenRead(
-            token_uri=IPFS, metadata=_meta(f"Name {tid} Of Two"))
+            # três palavras: o plano de pistas não aguenta mais (09/10)
+            token_uri=IPFS, metadata=_meta(f"Name {tid} Two"))
 
     def probe_image(uri):
         calls["image"].append(uri)
@@ -94,7 +95,7 @@ def test_a_deposited_target_runs_every_check_a_drawn_one_runs():
     assert rep.added == 1 and lar.size() == 1
     assert calls["read"] == [("base", B, 42)]
     assert calls["image"] and calls["eoa"] == [("base", B, 42)]
-    assert calls["uniq"] == ["Name 42 Of Two"]
+    assert calls["uniq"] == ["Name 42 Two"]
 
 
 def test_metadata_that_is_not_content_addressed_is_refused():

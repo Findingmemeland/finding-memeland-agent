@@ -481,16 +481,39 @@ def _strip_leading_meta(clue: str) -> str:
     return out.strip() or clue
 
 
+def _json_text(value) -> str:
+    """A JSON field as TEXT: only a string is text. Until 09/10 the readers
+    did `str(field)`, so a `null` came out as the word "None" — a clue or a
+    taunt that could be published as written. Anything that is not a string
+    is an EMPTY field: an empty clue is an unreadable answer, an empty taunt
+    is no taunt."""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _parse_clue(text: str) -> ClueDraft:
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1 or end < start:
         raise ValueError(f"no JSON object in clue response: {text[:200]!r}")
     data = json.loads(text[start : end + 1])
-    clue = _strip_leading_meta(str(data.get("clue", "")).strip())
-    taunt = str(data.get("taunt", "")).strip()
+    clue = _strip_leading_meta(_json_text(data.get("clue")))
+    taunt = _json_text(data.get("taunt"))
     if not clue:
         raise ValueError("empty clue text")
     return ClueDraft(text=clue, taunt=taunt or None)
+
+
+class MalformedAnswer(ValueError):
+    """The writer's answer could not be read as a clue. It spends ONE attempt
+    of the round and never ends it (hunt #17, clue 4: two unreadable answers
+    in a row killed the round). `reminder` is what the next attempt is told.
+    COUNTS ONLY in the message — the answer's own text may name the solution.
+
+    Only an engine that raises it gets the behaviour: the persona and relic
+    writers still raise a plain ValueError, as before."""
+
+    def __init__(self, message: str, *, reminder: str):
+        super().__init__(message)
+        self.reminder = reminder
 
 
 class ClueEngine:
@@ -543,6 +566,10 @@ class ClueEngine:
         (blind solver, Hunt #7 post-mortem)."""
         return []
 
+    def _note_text_rejection(self, result) -> None:
+        """A draft the TEXT rules refused (`result` is the GuardrailResult).
+        Nothing to do here; the target engine tallies it per guard."""
+
     def next_clue(
         self,
         persona: PersonaContext,
@@ -559,7 +586,16 @@ class ClueEngine:
         last_reasons: list[str] = []
         feedback: str | None = None
         for _ in range(max_attempts):
-            draft = self.generate(persona, clue_index, prior_clues, feedback=feedback)
+            try:
+                draft = self.generate(persona, clue_index, prior_clues, feedback=feedback)
+            except MalformedAnswer as e:
+                # One attempt spent, the round goes on. Whatever the guards
+                # said before still holds, so the reminder is ADDED to it
+                # (once), not put in its place.
+                last_reasons = [str(e)]
+                if e.reminder not in (feedback or ""):
+                    feedback = f"{feedback}\n\n{e.reminder}" if feedback else e.reminder
+                continue
             result = check_clue(
                 draft.text,
                 clue_index=clue_index,
@@ -574,7 +610,9 @@ class ClueEngine:
                 **self._guardrail_kwargs(persona, clue_index),
             )
             reasons = list(result.reasons)
-            if not reasons:
+            if reasons:
+                self._note_text_rejection(result)
+            else:
                 # Text-level checks passed; a subclass may still reject on
                 # what the clue DOES (the relic engine runs a blind solver).
                 reasons = self._post_guardrail_reasons(
@@ -603,15 +641,19 @@ class ClueEngine:
                 "clue #%s failed guardrails after %s attempts: %s",
                 clue_index, max_attempts, last_reasons,
             )
+            where = "estão nos logs"
         else:   # target engine: the reasons name the target — count only (Opus P1-3)
             logging.getLogger(__name__).error(
                 "clue #%s failed guardrails after %s attempts (%d reasons, withheld)",
                 clue_index, max_attempts, len(last_reasons),
             )
+            # ...so the operator must not be sent to the logs for reasons
+            # that are not there (hunt #17): what IS there is the tally.
+            where = "a contagem por guarda está nos logs"
         raise RuntimeError(
             f"clue #{clue_index} failed guardrails after {max_attempts} attempts "
             f"({len(last_reasons)} razões — omitidas aqui porque nomeiam a "
-            "resposta; estão nos logs)"
+            f"resposta; {where})"
         )
 
     def generate_taunt(self) -> str:

@@ -240,6 +240,8 @@ def cause_of(tally: Tally) -> tuple[str, str | None]:
         return "metadata", None
     if tally.name:
         return "nome", None
+    if tally.long_name:
+        return "nome-longo", None
     if tally.image:
         return "imagem", _first(tally.image_kinds)
     if tally.too_big:
