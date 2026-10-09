@@ -61,10 +61,16 @@ from .clues import (
     describe_image_batched,
 )
 from .discovery import DiscoveryStateStore, EraDiscovery
+from .creator_harvest import (
+    MANIFOLD_BASE_CANARY_CREATION,
+    CallCounter,
+    CreatorHarvester,
+)
 from .harvest import (
     HARVEST_CHAINS,
     HARVEST_SAFE_DEPTH,
     HARVEST_SPAN_START,
+    MAX_TARGETS_PER_CONTRACT,
     TRANSFER_TOPIC,
     ZERO_TOPIC,
     HarvestBlind,
@@ -209,6 +215,10 @@ class TargetWiring:
     # gasta chamadas para produzir alvos que o depósito vai recusar.
     harvesters: dict = field(default_factory=dict)
     deposit_chains: frozenset = frozenset()
+    # /harvest <fonte> (10/10): um colector por FONTE — contratos de criador
+    # de uma plataforma, sorteados pelo número da criação (o sorteio da
+    # sonda), a depositar pelo caminho de sempre.
+    creator_harvesters: dict = field(default_factory=dict)
     # o leitor de metadata da despensa (29/09) — só para o /harvest contar
     # quantas leituras a rotação de gateways salvou
     larder_meta: object = None
@@ -485,6 +495,73 @@ class TargetWiring:
             tail += self._dedicated_spend(run_start, self._meta_snapshot())
         head = "harvest:" if only is None else f"harvest (só {only}):"
         return head + "\n" + "\n".join(lines) + tail
+
+    def harvest_source(self, source: str, n: int) -> str:
+        """Colher de uma FONTE — `/harvest manifold [n]` (10/10): `n`
+        contratos de criador ao calhas, uma peça em cada um, depositada
+        pelas mesmas verificações de qualquer alvo.
+
+        RECUSA À PARTIDA, sem varrer nada, o que já se sabe que não dá:
+        Arweave desligado (57 das 58 peças das sondas guardam o tokenURI em
+        Arweave), a cadeia sem provedor público para o live check, o sorteio
+        cego. "0 alvos" tem de querer dizer que não havia.
+
+        Nada do que sai daqui tem nome, contrato ou tokenId."""
+        if self.finder is None or self.larder_store is None:
+            return "despensa não configurada"
+        harvester = self.creator_harvesters.get(source)
+        if harvester is None:
+            return (f"harvest {source}: fonte não configurada — sem RPC de Base "
+                    "com chave; nada foi varrido")
+        chain = harvester.chain
+        if not self.arweave_gateways:
+            return (f"harvest {source}: ⛔ o Arweave está desligado, e é em Arweave "
+                    "que esta fonte guarda quase tudo — nada foi varrido. Liga "
+                    "TARGET_ARWEAVE_GATEWAYS no Doppler dev (o /status diz o "
+                    "estado) e volta a correr.")
+        if chain not in self.deposit_chains:
+            return (f"harvest {source}: saltada — nem todos os provedores públicos "
+                    f"lêem {chain} (TARGET_PUBLIC_RPCS_{chain.upper()} no Doppler "
+                    "dev, com tantos URLs como TARGET_PUBLIC_RPCS_ETHEREUM); "
+                    "nada foi varrido")
+        larder: Larder = self.larder_store.load()
+        before = larder.size()
+        run_start = self._meta_snapshot()
+        ar_start = self._arweave_snapshot()
+        try:
+            refs, rep = harvester.harvest(
+                n, notify=self.notify,
+                # no máximo dois alvos por contrato NA DESPENSA (regra de 28/09)
+                full=lambda contract: (larder.count_of(chain, contract)
+                                       >= MAX_TARGETS_PER_CONTRACT))
+        except HarvestBlind as e:
+            return f"harvest {source}: ⛔ {e} — nada foi varrido"
+        except Exception as e:  # noqa: BLE001 — NOSSO: só o tipo, nunca um URL
+            return (f"harvest {source}: NÃO MEDIDA — o RPC falhou "
+                    f"({type(e).__name__}); nada foi concluído sobre a fonte")
+        seen_harvest = self._meta_snapshot()
+        ar_harvest = self._arweave_snapshot()
+        try:
+            dep = self.finder.deposit(
+                larder, refs, chain_ok=lambda c: c in self.deposit_chains,
+                known_reads=rep.reads)
+        finally:
+            self.larder_store.save(larder)          # o que entrou, fica
+        line = f"{rep.render()} → depósito: {dep.render()}"
+        if run_start is not None:
+            line += self._gateway_report(run_start, seen_harvest, self._meta_snapshot())
+        ar_after = self._arweave_snapshot()
+        line += self._arweave_report(
+            (("colheita", "meta", ar_start, ar_harvest),
+             ("depósito", "meta", ar_harvest, ar_after),
+             ("depósito (imagem)", "image", ar_harvest, ar_after)),
+            ar_start, ar_after, sep=" · ")
+        # medido, não estimado: é o que diz se o sorteio está caro
+        line += f" · RPC do sorteio: {rep.rpc_calls} chamada(s)"
+        tail = f"\ndespensa {before} → {larder.size()} (+{larder.size() - before})"
+        if self.dedicated_gateway and run_start is not None:
+            tail += self._dedicated_spend(run_start, self._meta_snapshot())
+        return f"harvest {source}:\n{line}{tail}"
 
     @staticmethod
     def _dedicated_spend(start: dict, end: dict) -> str:
@@ -1270,8 +1347,30 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             arweave_json=arweave.metadata, finder=probe_finder, rng=rng,
             accepts_today=accepts)
 
+    # -- /harvest <fonte> (10/10): a sonda, a guardar ----------------------- #
+    #
+    # O MESMO sorteio (o número da criação no deployer), com um sampler
+    # próprio — a memória dele é a desta fonte — e as três portas do sorteio
+    # contadas, para o relatório dizer quanto RPC custou. A leitura e o
+    # depósito são os da despensa: `larder_meta` e `finder`, sem nada de novo.
+    creator_harvesters: dict[str, CreatorHarvester] = {}
+    if s.base_rpc_url and "base" in rpcs:
+        draw_node = CallCounter(JsonRpc(url=s.base_rpc_url, http_post=http_post,
+                                        label="harvest:manifold").call)
+        draw_call = CallCounter(rpcs["base"].eth_call)
+        draw_uri = CallCounter(lambda c, t: larder_meta.token_uri("base", c, t))
+        creator_harvesters["manifold"] = CreatorHarvester(
+            source="manifold", chain="base",
+            sampler=DeployerSampler(call=draw_node, deployer=MANIFOLD_BASE_DEPLOYER),
+            eth_call=draw_call, token_uri=draw_uri,
+            read_meta=lambda c, t: larder_meta.read("base", c, t),
+            accepts_image=accepts,
+            canary_creation=MANIFOLD_BASE_CANARY_CREATION,
+            counters=(draw_node, draw_call, draw_uri), rng=rng)
+
     return TargetWiring(finder=finder, larder_store=larder_store,
                         probes=probes,
+                        creator_harvesters=creator_harvesters,
                         arweave_meta=(larder_meta.arweave if arweave_gateways
                                       else arweave),
                         arweave_image=arweave_image,

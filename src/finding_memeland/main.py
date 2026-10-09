@@ -1482,7 +1482,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
     def _harvest(arg: str = "") -> str:
         """Colher alvos da cadeia — Ethereum e Base, ou só uma (30/09:
         `/harvest 200 base`) — e depositá-los na despensa (28/09, decisões
-        do Pedro: só manual, 200 blocos).
+        do Pedro: só manual, 200 blocos). Ou de uma FONTE (10/10):
+        `/harvest manifold [n]` sorteia `n` contratos de criador da Manifold
+        em Base — o sorteio da sonda — e deposita uma peça de cada um.
 
         Um bloco ao calhas não tem opinião: sem marketplace, sem ordenação,
         o alvo pode ser qualquer NFT alguma vez mintado — incluindo um
@@ -1493,11 +1495,18 @@ def build_agent(settings: Settings | None = None) -> Agent:
         (a verificação de unicidade gasta a MESMA quota do OpenSea que a
         guarda das pistas) e partilha a flag com /fill e /prepare, que
         gravariam a despensa por cima uns dos outros."""
-        from .target.harvest import parse_harvest_args
+        from .target.harvest import parse_harvest_command
         try:
-            n, chain = parse_harvest_args(arg, default_blocks=int(s.harvest_blocks))
+            source, n, chain = parse_harvest_command(
+                arg, default_blocks=int(s.harvest_blocks))
         except ValueError as e:
             return str(e)
+        if source is not None:
+            # `/harvest manifold [n]` (10/10): contratos de criador de uma
+            # plataforma, pelo sorteio da sonda — a mesma flag, as mesmas
+            # recusas durante uma hunt.
+            return _target_job(
+                "harvest", lambda: target_wiring.harvest_source(source, n))
         return _target_job("harvest", lambda: target_wiring.harvest(n, only=chain))
 
     def _probe(arg: str = "") -> str:

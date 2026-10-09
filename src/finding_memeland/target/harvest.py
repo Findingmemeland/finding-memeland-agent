@@ -75,8 +75,24 @@ HARVEST_SAFE_DEPTH = 1_000
 HARVEST_CHAINS = ("ethereum", "base")
 
 
+# FONTES (10/10, passo B do Arweave): em vez de blocos ao calhas, contratos
+# de criador de uma plataforma, sorteados pelo número da criação — o sorteio
+# da sonda, a guardar. Um NOME, nunca um endereço: um contrato no Telegram
+# fica no histórico.
+HARVEST_SOURCES = ("manifold",)
+HARVEST_SOURCE_DEFAULT = 60        # contratos por corrida, como a sonda
+HARVEST_SOURCE_MAX = 300
+
+# No máximo isto por contrato (Pedro, 28/09): na colheita por blocos, por
+# CORRIDA (`MintHarvester.harvest(max_per_contract=…)`); na colheita de uma
+# fonte, NA DESPENSA — um contrato de criador que já lá tem dois alvos não
+# dá um terceiro (10/10).
+MAX_TARGETS_PER_CONTRACT = 2
+
 HARVEST_USAGE = ("usage: /harvest [1..2000] [cadeia] — cadeias: "
-                 + ", ".join(HARVEST_CHAINS) + " (sem cadeia: todas)")
+                 + ", ".join(HARVEST_CHAINS) + " (sem cadeia: todas) · ou "
+                 f"/harvest <fonte> [1..{HARVEST_SOURCE_MAX}] — fontes: "
+                 + ", ".join(HARVEST_SOURCES) + " (contratos de criador, em Base)")
 
 
 def parse_harvest_args(arg: str, *, default_blocks: int) -> tuple[int, str | None]:
@@ -99,6 +115,27 @@ def parse_harvest_args(arg: str, *, default_blocks: int) -> tuple[int, str | Non
     if not 1 <= n <= 2000:
         raise ValueError(HARVEST_USAGE)
     return n, chain
+
+
+def parse_harvest_command(arg: str, *, default_blocks: int
+                          ) -> tuple[str | None, int, str | None]:
+    """"/harvest …" → (fonte, n, cadeia). Com uma fonte ("manifold") `n` são
+    CONTRATOS a sortear e a cadeia é a da fonte (None aqui); sem fonte é a
+    colheita por blocos de sempre, lida por `parse_harvest_args`. ValueError
+    com o uso em tudo o resto — uma fonte e uma cadeia juntas incluídas: a
+    fonte já diz onde, e um pedido ambíguo não se adivinha."""
+    tokens = (arg or "").split()
+    sources = [t.lower() for t in tokens if t.lower() in HARVEST_SOURCES]
+    if not sources:
+        n, chain = parse_harvest_args(arg, default_blocks=default_blocks)
+        return None, n, chain
+    rest = [t for t in tokens if t.lower() not in HARVEST_SOURCES]
+    if len(sources) > 1 or len(rest) > 1 or (rest and not rest[0].isdigit()):
+        raise ValueError(HARVEST_USAGE)
+    n = int(rest[0]) if rest else HARVEST_SOURCE_DEFAULT
+    if not 1 <= n <= HARVEST_SOURCE_MAX:
+        raise ValueError(HARVEST_USAGE)
+    return sources[0], n, None
 
 
 def parse_canary(spec: str) -> tuple[int, int]:
@@ -287,6 +324,13 @@ class HarvestReport:
     def render(self) -> str:
         parts = [f"{self.kept} alvo(s) de {len(self.contracts)} contrato(s)",
                  f"{self.blocks} bloco(s), {self.mints} mint(s)"]
+        return " · ".join(parts + self.causes())
+
+    def causes(self) -> list[str]:
+        """De que morreram as peças lidas, por causa — o que vem depois da
+        cabeça da linha. A colheita de uma fonte (10/10) tem outra cabeça
+        (contratos sorteados, não blocos) e as MESMAS causas."""
+        parts: list[str] = []
         for label, n in (("nome recusado", self.rejected_name),
                          ("numerados", self.series),
                          ("drops", self.drops),
@@ -308,7 +352,64 @@ class HarvestReport:
             parts.append(f"tokenURI fora de IPFS ({self._kinds(self.uri_not_ca)})")
         if self.image_not_ca:
             parts.append(f"imagem fora de IPFS ({self._kinds(self.image_not_ca)})")
-        return " · ".join(parts)
+        return parts
+
+
+def sift(rep: HarvestReport, *, chain: str, contract: str, tid: int, read_meta,
+         accepts_image, min_words: int = 2) -> str | None:
+    """UMA peça pelos filtros da colheita. Devolve a referência
+    `cadeia:contrato:tokenId` quando a peça FICA (e guarda a leitura em
+    `rep.reads`, para o depósito não a pedir outra vez); None quando cai,
+    com a causa contada em `rep`.
+
+    Tirado do ciclo do `MintHarvester` a 10/10 para a colheita de uma fonte
+    usar exactamente o mesmo: uma colheita com filtros diferentes dos do
+    vizinho colhe o que o depósito recusa, ou deita fora o que ele aceitava."""
+    try:
+        read = read_meta(contract, tid)
+    except Exception as e:  # noqa: BLE001 — NOSSO, salvo se disser que não
+        kind = getattr(e, "kind", None) or "outro"
+        if getattr(e, "theirs", False):
+            rep.bad_meta[kind] = rep.bad_meta.get(kind, 0) + 1
+        else:
+            rep.unavailable += 1
+            rep.unavailable_kinds[kind] = rep.unavailable_kinds.get(kind, 0) + 1
+        return None
+    if read is None:
+        rep.gone += 1
+        return None
+    meta = read.metadata
+    if not isinstance(meta, dict):
+        # O leitor só resolve URIs endereçados por conteúdo;
+        # os outros voltam com metadata None. Conta-se o tipo.
+        k = uri_kind(read.token_uri)
+        rep.uri_not_ca[k] = rep.uri_not_ca.get(k, 0) + 1
+        return None
+    # A IMAGEM também tem de estar em IPFS (29/09). O depósito
+    # exige-o, e sem esta verificação aqui a primeira corrida
+    # passou-lhe 143 candidatos que ele recusou todos — cada um
+    # com leituras gastas dos dois lados. Não custa rede: é só
+    # olhar para a string que já temos.
+    image = str(meta.get("image") or "")
+    if not accepts_image(image):
+        k = uri_kind(image)
+        rep.image_not_ca[k] = rep.image_not_ca.get(k, 0) + 1
+        return None
+    name = meta.get("name")
+    if not name:
+        rep.no_name += 1
+        return None
+    name = str(name)
+    rep.named += 1
+    if looks_serial(name):
+        rep.series += 1
+        return None
+    if not name_is_cluable(name, min_words=min_words):
+        rep.rejected_name += 1
+        return None
+    ref = f"{chain}:{contract}:{tid}"
+    rep.reads[ref] = read
+    return ref
 
 
 class MintHarvester:
@@ -363,7 +464,7 @@ class MintHarvester:
         return len(mints_in_logs(logs)) == self._canary_mints
 
     def harvest(self, n_blocks: int, *, span: tuple[int, int] | None = None,
-                max_per_contract: int = 2,
+                max_per_contract: int = MAX_TARGETS_PER_CONTRACT,
                 max_reads_per_contract: int = 3,
                 max_mints_per_block: int = 40,
                 drop_threshold: int = 5,
@@ -438,53 +539,15 @@ class MintHarvester:
                 if tried.get(contract, 0) >= max_reads_per_contract:
                     continue
                 tried[contract] = tried.get(contract, 0) + 1
-                try:
-                    read = self._read_meta(contract, tid)
-                except Exception as e:  # noqa: BLE001 — NOSSO, salvo se disser que não
-                    kind = getattr(e, "kind", None) or "outro"
-                    if getattr(e, "theirs", False):
-                        rep.bad_meta[kind] = rep.bad_meta.get(kind, 0) + 1
-                    else:
-                        rep.unavailable += 1
-                        rep.unavailable_kinds[kind] = rep.unavailable_kinds.get(kind, 0) + 1
-                    continue
-                if read is None:
-                    rep.gone += 1
-                    continue
-                meta = read.metadata
-                if not isinstance(meta, dict):
-                    # O leitor só resolve URIs endereçados por conteúdo;
-                    # os outros voltam com metadata None. Conta-se o tipo.
-                    k = uri_kind(read.token_uri)
-                    rep.uri_not_ca[k] = rep.uri_not_ca.get(k, 0) + 1
-                    continue
-                # A IMAGEM também tem de estar em IPFS (29/09). O depósito
-                # exige-o, e sem esta verificação aqui a primeira corrida
-                # passou-lhe 143 candidatos que ele recusou todos — cada um
-                # com leituras gastas dos dois lados. Não custa rede: é só
-                # olhar para a string que já temos.
-                image = str(meta.get("image") or "")
-                if not self._accepts_image(image):
-                    k = uri_kind(image)
-                    rep.image_not_ca[k] = rep.image_not_ca.get(k, 0) + 1
-                    continue
-                name = meta.get("name")
-                if not name:
-                    rep.no_name += 1
-                    continue
-                name = str(name)
-                rep.named += 1
-                if looks_serial(name):
-                    rep.series += 1
-                    continue
-                if not name_is_cluable(name, min_words=self._min_words):
-                    rep.rejected_name += 1
+                ref = sift(rep, chain=self._chain, contract=contract, tid=tid,
+                           read_meta=self._read_meta,
+                           accepts_image=self._accepts_image,
+                           min_words=self._min_words)
+                if ref is None:
                     continue
                 seen[contract] = seen.get(contract, 0) + 1
                 rep.contracts.add(contract)
                 rep.kept += 1
-                ref = f"{self._chain}:{contract}:{tid}"
                 refs.append(ref)
-                rep.reads[ref] = read
         note(f"harvest: {rep.render()}")
         return refs, rep

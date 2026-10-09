@@ -235,6 +235,14 @@ class Larder:
     def has(self, cid: str) -> bool:
         return cid in self.used or any(c.id() == cid for c in self.candidates)
 
+    def count_of(self, chain: str, contract: str) -> int:
+        """How many targets WAITING here come from this contract — for the
+        "at most two per contract" rule (28/09) when a source harvest is
+        about to read one more piece of it (10/10)."""
+        key = (chain, contract.lower())
+        return sum(1 for c in self.candidates
+                   if (c.chain, c.contract.lower()) == key)
+
     def add(self, c: Candidate) -> bool:
         if self.has(c.id()):
             return False
