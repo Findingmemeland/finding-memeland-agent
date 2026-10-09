@@ -50,7 +50,9 @@ class World:
         return idx + 1
 
     def read_token(self, chain, contract, token_id):
-        return TokenRead(token_uri=f"ipfs://Qm{token_id}",
+        # a CID-shaped tokenURI: a token without a content id is refused
+        # (09/10), and no real reader resolves metadata for anything else
+        return TokenRead(token_uri="ipfs://bafy" + "a" * 40 + str(token_id),
                          metadata={"name": self.names.get(token_id, self.default_name),
                                    "image": f"ipfs://img{token_id}",
                                    "description": "d"})

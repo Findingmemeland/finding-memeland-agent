@@ -242,6 +242,8 @@ def cause_of(tally: Tally) -> tuple[str, str | None]:
         return "nome", None
     if tally.long_name:
         return "nome-longo", None
+    if tally.no_identity:
+        return "sem-identidade", None
     if tally.image:
         return "imagem", _first(tally.image_kinds)
     if tally.too_big:
@@ -291,11 +293,18 @@ class ContractProbe:
       finder                        um TargetFinder que ACEITA imagens em
                                     Arweave — o mesmo código das cinco
                                     verificações, e só este comando o usa
+      accepts_today(uri)            -> bool   o que a DESPENSA aceita hoje
+                                    como imagem endereçada por conteúdo. Por
+                                    omissão IPFS / data / CID; com os
+                                    gateways de Arweave configurados (09/10)
+                                    é a regra da despensa, e a coluna "como
+                                    hoje" passa a dizer o mesmo que a outra.
     """
 
     def __init__(self, *, source: str, chain: str, sampler: DeployerSampler,
                  eth_call, token_uri, read_token, arweave_json, finder,
-                 rng: random.Random | None = None, min_words: int = 2):
+                 rng: random.Random | None = None, min_words: int = 2,
+                 accepts_today=None):
         self.source = source
         self.chain = chain
         self._sampler = sampler
@@ -303,6 +312,7 @@ class ContractProbe:
         self._token_uri = token_uri
         self._read = read_token
         self._arweave_json = arweave_json
+        self._accepts_today = accepts_today or uri_is_content_addressed
         self._finder = finder
         self._rng = rng or random.SystemRandom()
         self._min_words = int(min_words)
@@ -404,7 +414,7 @@ class ContractProbe:
                 return
 
         image = str(meta.get("image") or "")
-        if not uri_is_content_addressed(image):
+        if not self._accepts_today(image):
             cause = ("imagem fora de IPFS", uri_kind(image))
             if arweave_url(image) is None:
                 rep.today.add(today or cause)

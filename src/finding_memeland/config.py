@@ -24,6 +24,25 @@ def _dedicated_url_ok(url: str) -> bool:
             and parts.path.rstrip("/") == "/ipfs" and not parts.query)
 
 
+# Arweave is ON with at least this many gateways (Pedro, 09/10): nothing may
+# depend on a single Arweave host, and with one gateway alone "every gateway
+# said 404" would be one host's word.
+ARWEAVE_MIN_GATEWAYS = 2
+
+
+def _arweave_url_ok(url: str) -> bool:
+    """https://<host>/ — a gateway's ROOT, nothing after it. The transaction
+    id is appended to it, so a path or a query here would ask for something
+    else on every read; and plain http would let the answer be rewritten on
+    the way."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return (parts.scheme == "https" and bool(parts.hostname)
+            and parts.path in ("", "/") and not parts.query
+            and not parts.fragment and parts.username is None)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
@@ -255,6 +274,14 @@ class Settings(BaseSettings):
     #     never shows in a repr, a log or a message.
     target_ipfs_dedicated_gateway: str = Field(default="")
     target_ipfs_dedicated_key: SecretStr = Field(default=SecretStr(""))
+    # ARWEAVE GATEWAYS FOR THE LARDER (09/10, Pedro). Comma-separated, in
+    # order: the first is asked first, the rest are the reserve. EMPTY = the
+    # larder does not accept Arweave, exactly as before. It takes TWO valid
+    # ones to switch on (ARWEAVE_MIN_GATEWAYS); /status says which of the
+    # three it is. Gateway ROOTS, https, no path: https://arweave.net/ — no
+    # key, no header of ours ever goes to them. Measured 07/10: arweave.net
+    # served everything asked, ardrive.net nearly everything and slowly.
+    target_arweave_gateways: str = Field(default="")
     # Judge (batched, text) and vision models — Anthropic client.
     target_judge_model: str = Field(default="claude-sonnet-4-6")
     target_vision_model: str = Field(default="claude-sonnet-4-6")
@@ -319,6 +346,34 @@ class Settings(BaseSettings):
             return ("URL inválido — TARGET_IPFS_DEDICATED_GATEWAY tem de ser "
                     "https://…/ipfs/; a despensa usa só o público")
         return "activo"
+
+    def _arweave_valid(self) -> list[str]:
+        good = [u.rstrip("/") + "/" for u in self._csv(self.target_arweave_gateways)
+                if _arweave_url_ok(u)]
+        return list(dict.fromkeys(good))
+
+    @property
+    def target_arweave_gateway_list(self) -> list[str]:
+        """The Arweave gateways the larder reads through, in order — or []
+        when Arweave is OFF: nothing configured, or fewer than two valid."""
+        good = self._arweave_valid()
+        return good if len(good) >= ARWEAVE_MIN_GATEWAYS else []
+
+    @property
+    def target_arweave_state(self) -> str:
+        """For /status — counts and what is wrong, never a URL."""
+        raw = self._csv(self.target_arweave_gateways)
+        if not raw:
+            return "desligado"
+        good = self._arweave_valid()
+        bad = len(raw) - len([u for u in raw if _arweave_url_ok(u)])
+        ignored = (f" ({bad} entrada(s) inválida(s) ignorada(s): têm de ser "
+                   "https://host/ sem caminho)" if bad else "")
+        if len(good) < ARWEAVE_MIN_GATEWAYS:
+            return (f"incompleto — {len(good)} gateway(s) válido(s), são precisos "
+                    f"{ARWEAVE_MIN_GATEWAYS} (principal + reserva); a despensa "
+                    f"não aceita Arweave{ignored}")
+        return f"activo — {len(good)} gateways{ignored}"
 
     @property
     def target_cap_exempt_set(self) -> frozenset[str]:

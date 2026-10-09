@@ -329,9 +329,15 @@ class MintHarvester:
                  canary_block: int = 0, canary_mints: int = 0,
                  span_start: int = 1,
                  rng: random.Random | None = None,
-                 min_words: int = 2):
+                 min_words: int = 2,
+                 accepts_image=None):
         if not chain:
             raise ValueError("MintHarvester precisa da cadeia que varre (R1)")
+        # A regra da imagem é a do DEPÓSITO, a mesma função (09/10): por
+        # omissão IPFS / data / CID, e Arweave só quando a despensa o aceita.
+        # Uma colheita mais larga do que o depósito colhia o que ele recusa;
+        # uma mais estreita deitava fora o que ele aceitaria.
+        self._accepts_image = accepts_image or uri_is_content_addressed
         self._chain = chain
         self._latest = latest_block
         self._get_logs = get_logs
@@ -458,7 +464,7 @@ class MintHarvester:
                 # com leituras gastas dos dois lados. Não custa rede: é só
                 # olhar para a string que já temos.
                 image = str(meta.get("image") or "")
-                if not uri_is_content_addressed(image):
+                if not self._accepts_image(image):
                     k = uri_kind(image)
                     rep.image_not_ca[k] = rep.image_not_ca.get(k, 0) + 1
                     continue

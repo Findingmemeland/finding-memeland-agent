@@ -94,7 +94,7 @@ from .probe import (
     DeployerSampler,
     ProbeBlind,
 )
-from .refresh import uri_is_content_addressed
+from .refresh import arweave_ref, uri_is_content_addressed
 from .search_guard import (
     ClueSearchGuard,
     MarketNameUniqueness,
@@ -218,11 +218,14 @@ class TargetWiring:
     # plano Free são 10 mil por mês
     dedicated_gateway: bool = False
     # /probe (06/10): medir uma fonte antes de a adoptar. Não guarda nada. Os
-    # dois contadores do Arweave são só para o relatório — pedidos a
-    # arweave.net, que não gastam a quota do gateway dedicado.
+    # dois contadores do Arweave são só para o relatório — pedidos aos
+    # gateways de Arweave, que não gastam a quota do gateway dedicado.
     probes: dict = field(default_factory=dict)
     arweave_meta: object = None
     arweave_image: object = None
+    # Quantos gateways de Arweave a despensa tem (09/10). 0 = não aceita
+    # Arweave, e os contadores acima são só os da medição do /probe.
+    arweave_gateways: int = 0
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -334,14 +337,9 @@ class TargetWiring:
             return (f"probe: NÃO MEDIDO — o RPC falhou ({type(e).__name__}); "
                     "nada foi concluído sobre a fonte")
         out = "probe (só medição, nada guardado):\n" + rep.render()
-        ar_end = self._arweave_snapshot()
-        parts = []
-        for label, key in (("metadata", "meta"), ("imagem", "image")):
-            moved = _outcomes_between(ar_start[key], ar_end[key]).get(1)
-            if moved:
-                parts.append(f"{label}: {_outcomes_line(moved)}")
-        if parts:
-            out += "\narweave.net — " + "; ".join(parts)
+        out += self._arweave_report(
+            (("metadata", "meta"), ("imagem", "image")),
+            ar_start, self._arweave_snapshot(), sep="\n")
         if self.dedicated_gateway and start is not None:
             out += "\n" + self._dedicated_spend(start, self._meta_snapshot()).lstrip(" ·")
         return out
@@ -352,6 +350,25 @@ class TargetWiring:
             stats = getattr(tally, "stats", None) or {}
             return {p: dict(k) for p, k in stats.get("outcomes", {}).items()}
         return {"meta": outcomes(self.arweave_meta), "image": outcomes(self.arweave_image)}
+
+    def _arweave_report(self, stages, start: dict, end: dict, *, sep: str) -> str:
+        """The Arweave gateways, by position and by outcome, between two
+        snapshots. `stages`: (label, key[, start, end]) — which counter, and
+        optionally its own pair of snapshots. Position 1 is the first gateway
+        asked, the others are the reserve. Words and codes only."""
+        moved_by_stage = []
+        for stage in stages:
+            label, key = stage[0], stage[1]
+            a, b = (stage[2], stage[3]) if len(stage) == 4 else (start, end)
+            moved_by_stage.append((label, _outcomes_between(a[key], b[key])))
+        text = ""
+        for pos in sorted({p for _, moved in moved_by_stage for p in moved}):
+            parts = [f"{label}: {_outcomes_line(moved[pos])}"
+                     for label, moved in moved_by_stage if pos in moved]
+            # with the switch off there is one host, the probe's: say which
+            name = f"arweave {pos}" if self.arweave_gateways else "arweave.net"
+            text += f"{sep}{name} — " + "; ".join(parts)
+        return text
 
     def harvest(self, n_blocks: int, *, only: str | None = None) -> str:
         """Colher alvos da cadeia e depositá-los na despensa.
@@ -397,6 +414,7 @@ class TargetWiring:
                         "TARGET_PUBLIC_RPCS_ETHEREUM)")
                     continue
                 seen_before = self._meta_snapshot()
+                ar_before = self._arweave_snapshot()
                 try:
                     refs, hrep = harvester.harvest(n_blocks, notify=self.notify)
                 except HarvestBlind as e:
@@ -412,6 +430,7 @@ class TargetWiring:
                                  "sobre esta cadeia")
                     continue
                 seen_harvest = self._meta_snapshot()
+                ar_harvest = self._arweave_snapshot()
                 # a leitura da colheita segue para o depósito (30/09): não se
                 # pede outra vez ao gateway o que ele acabou de servir
                 dep = self.finder.deposit(
@@ -421,6 +440,14 @@ class TargetWiring:
                 if seen_before is not None:
                     line += self._gateway_report(seen_before, seen_harvest,
                                                  self._meta_snapshot())
+                # os gateways de Arweave à parte (09/10): não são o dedicado
+                # e não lhe gastam quota
+                ar_after = self._arweave_snapshot()
+                line += self._arweave_report(
+                    (("colheita", "meta", ar_before, ar_harvest),
+                     ("depósito", "meta", ar_harvest, ar_after),
+                     ("depósito (imagem)", "image", ar_harvest, ar_after)),
+                    ar_before, ar_after, sep=" · ")
                 lines.append(line)
                 # Gravar a cada cadeia, não só no fim (29/09): a primeira
                 # corrida real teve de ser morta ao fim de uma hora, e tudo
@@ -764,7 +791,17 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                                   http_get=http_get, content_addressed_only=False)
         t = sealed.target
         try:
-            meta = any_meta(t.chain, t.contract, t.token_id)
+            # ARWEAVE (09/10): what the chain serves today may be on Arweave —
+            # read it through OUR Arweave gateways, with the reserve, exactly
+            # where an IPFS URI is read through ours. Every gateway failing is
+            # "unavailable", as with IPFS: the post never guesses. With no
+            # Arweave gateway configured this branch does not exist.
+            uri = (any_meta.token_uri(t.chain, t.contract, t.token_id)
+                   if larder_meta.reads_arweave else None)
+            if uri is not None and arweave_ref(uri) is not None:
+                meta = larder_meta.resolve_arweave(uri)
+            else:
+                meta = any_meta(t.chain, t.contract, t.token_id)
         except ChainUnavailable:
             return LiveHash.unavailable()
         if meta is None:
@@ -893,13 +930,35 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # one gateway, and 6 candidates it had just read failed the deposit's
     # re-read through that same gateway. Everything else keyed (refresh,
     # live hash, reveal) keeps `keyed_meta`; the live check is untouched.
+    # ARWEAVE (09/10, Pedro, after the two probes). With its gateways in
+    # Doppler — two at least, the first and its reserve — the larder accepts
+    # a tokenURI and an image on Arweave, end to end: read, image test,
+    # artwork for vision, identity for the live check, hash at void time.
+    # With none, `arweave_gateways` is empty and nothing below changes.
+    #
+    # They are a SECOND LIST, never mixed into `probe_gateways`: an Arweave
+    # id means nothing to an IPFS gateway and — the reason that matters —
+    # `gateway_headers` is keyed by IPFS gateway. No header of ours is ever
+    # built for an Arweave host, so the dedicated gateway's key cannot ride
+    # on a request to one (main's transport refuses it too, as a second lock).
+    arweave_gateways = list(getattr(s, "target_arweave_gateway_list", None) or [])
+
+    def accepts(uri: str) -> bool:
+        """What the larder takes as content-addressed: THE rule, plus Arweave
+        when — and only when — we have gateways to read it through."""
+        return uri_is_content_addressed(uri) or (
+            bool(arweave_gateways) and arweave_ref(uri) is not None)
+
     larder_meta = FailoverMetadata(rpcs=rpcs, gateways=probe_gateways,
                                    http_get=http_get,
                                    fallback_get=http_get_fallback,
-                                   gateway_headers=gateway_headers)
+                                   gateway_headers=gateway_headers,
+                                   arweave_gateways=arweave_gateways)
     larder_image = GatewayTally()
+    arweave_image = GatewayTally()
 
-    def ask_urls(pairs, fetch, head_of, svg_to_png=None, tally=None):
+    def ask_urls(pairs, fetch, head_of, svg_to_png=None, tally=None,
+                 gone_needs_all=False):
         """Every (url, headers) in order, until one serves a still image — what
         `fetch(url, headers)` returned. Otherwise the VERDICT, by Pedro's rule (29/09),
         the metadata's rule: the candidate is blamed only when a gateway
@@ -918,8 +977,13 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         OUR read of it failed, and the next gateway is asked.
 
         `tally` (06/10): where the requests are counted — the larder's image
-        counter by default. The /probe's Arweave reads count apart: they are
-        not requests to the dedicated gateway and must not look like quota."""
+        counter by default. Arweave reads count apart: they are not requests
+        to the dedicated gateway and must not look like quota.
+
+        `gone_needs_all` (09/10, Arweave): a dead pin only when EVERY gateway
+        said 404/410, and at least two did. A partial Arweave gateway answers
+        404 for content that exists (measured 07/10: eight of eight); one 404
+        among timeouts is OURS, and the candidate stays."""
         tally = larder_image if tally is None else tally
         gone, unusable = 0, []
         # every request counted by gateway and outcome (30/09) — the 30/09
@@ -948,13 +1012,21 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                 unusable.append(kind)
         if unusable:
             raise ImageUnusable(unusable[0])
-        if gone:
+        if gone and (not gone_needs_all or gone == len(pairs) >= 2):
             raise ImagePinGone(f"{gone} of {len(pairs)} gateway(s) said 404/410")
         raise ImageGatewaysDown(f"no gateway served an image ({len(pairs)} tried)")
 
     def ask_every_gateway(uri: str, fetch, head_of, svg_to_png=None):
         """`ask_urls` over the larder's gateways: the dedicated one first
-        (with its key), then the public ones."""
+        (with its key), then the public ones.
+
+        An image on ARWEAVE (09/10) goes to the Arweave gateways instead, in
+        order, with EMPTY headers — written here as a literal, not looked up,
+        so there is no table a key could come out of."""
+        if arweave_gateways and arweave_ref(uri) is not None:
+            return ask_urls([(arweave_url(uri, g), {}) for g in arweave_gateways],
+                            fetch, head_of, svg_to_png, tally=arweave_image,
+                            gone_needs_all=True)
         pairs, seen = [], set()
         for g in probe_gateways:
             u = gateway_url(uri, g)
@@ -1010,7 +1082,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
         read_token=larder_meta.read, probe_image=probe_image,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
-        rng=rng, now_iso=_now_iso)
+        accepts_uri=accepts, rng=rng, now_iso=_now_iso)
 
     larder_store = LarderStore(**store(BLOB_LARDER))
     prepared_store = PreparedStore(**store(BLOB_PREPARED))
@@ -1118,17 +1190,17 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         harvesters[chain] = MintHarvester(
             chain=chain, latest_block=_latest, get_logs=_logs,
             read_meta=_meta, canary_block=block, canary_mints=mints,
-            span_start=HARVEST_SPAN_START.get(chain, 1), rng=rng)
+            span_start=HARVEST_SPAN_START.get(chain, 1), rng=rng,
+            accepts_image=accepts)
 
     # -- /probe (06/10): medir uma fonte antes de a adoptar ---------------- #
     #
     # A coluna "se o Arweave fosse aceite" precisa de um finder que leia
     # Arweave — as MESMAS cinco verificações, com outra noção de "endereçado
-    # por conteúdo". Só o /probe o usa: `finder`, lá em cima, é o da despensa
-    # e continua a recusar Arweave. Aceitar a sério é decisão do Pedro, e não
-    # está tomada.
+    # por conteúdo". Enquanto a despensa não tiver gateways de Arweave, só o
+    # /probe o usa, e lê de arweave.net para MEDIR. Com eles (09/10) a
+    # despensa lê Arweave por si, e a sonda mede pelo caminho dela.
     arweave = ArweaveGateway(http_get=http_get)
-    arweave_image = GatewayTally()
 
     def probe_image_measuring(uri: str):
         """A imagem, para a medição: em Arweave lê-se de arweave.net com os
@@ -1136,8 +1208,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         vídeo/PDF são deles, 404 é pin morto, o resto é nosso) e o mesmo
         tecto de tamanho; tudo o resto vai ao teste da despensa tal e qual."""
         url = arweave_url(uri)
-        if url is None:
-            return probe_image(uri)
+        if url is None or arweave_gateways:
+            return probe_image(uri)         # a despensa já sabe ler isto
         got = ask_urls(
             [(url, {})],
             lambda u, extra: ranged(u, {"Range": f"bytes=0-{PROBE_BYTES - 1}", **extra}),
@@ -1166,11 +1238,15 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             eth_call=rpcs["base"].eth_call,
             token_uri=lambda c, t: larder_meta.token_uri("base", c, t),
             read_token=lambda c, t: larder_meta.read("base", c, t),
-            arweave_json=arweave.metadata, finder=probe_finder, rng=rng)
+            arweave_json=arweave.metadata, finder=probe_finder, rng=rng,
+            accepts_today=accepts)
 
     return TargetWiring(finder=finder, larder_store=larder_store,
-                        probes=probes, arweave_meta=arweave,
+                        probes=probes,
+                        arweave_meta=(larder_meta.arweave if arweave_gateways
+                                      else arweave),
                         arweave_image=arweave_image,
+                        arweave_gateways=len(arweave_gateways),
                         notify=say,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,

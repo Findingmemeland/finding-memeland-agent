@@ -74,6 +74,27 @@ def uri_is_content_addressed(uri: str | None) -> bool:
     return bool(_IPFS_GATEWAY_PATH.match(u))
 
 
+# ARWEAVE (09/10). `ar://<id>[/path]` and `https://arweave.net/<id>[/path]`,
+# and nothing else: the id is the 43-character transaction id, which is what
+# makes the content immutable — the same guarantee a CID gives. A host other
+# than arweave.net is not recognised (a tokenURI is written by whoever minted
+# it; a reader that trusted the host it names is the SSRF the hostile Base
+# contracts of 22/09 were probing for), and what we READ from is never the
+# host in the URI either: the id is asked of OUR gateways.
+#
+# Recognising is not accepting. `uri_is_content_addressed` above stays the
+# rule everywhere; the larder accepts Arweave only when its gateways are
+# configured (wiring), and says so through `accepts_uri`.
+_ARWEAVE_RE = re.compile(
+    r"^(?:ar://|https?://(?:www\.)?arweave\.net/)([A-Za-z0-9_-]{43})(/[^?#\s]*)?(?:[?#]\S*)?$")
+
+
+def arweave_ref(uri: str | None) -> tuple[str, str] | None:
+    """(transaction id, path inside it) of an Arweave URI, or None."""
+    m = _ARWEAVE_RE.match((uri or "").strip())
+    return (m.group(1), m.group(2) or "") if m else None
+
+
 def uri_kind(uri: str | None) -> str:
     """Que tipo de URI é um que NÃO passou em `uri_is_content_addressed`.
 
@@ -121,13 +142,22 @@ def content_id(uri: str | None) -> str | None:
     the same CID (what happened to SuperRare's pixura) is NOT a mutation.
     `data:` URIs ARE their content: 'data:' + sha256 of the URI. None for
     anything not content-addressed — which the refresh rejects and the
-    live check reads as MUTATED (the URI stopped being content-addressed)."""
+    live check reads as MUTATED (the URI stopped being content-addressed).
+
+    ARWEAVE (09/10): `ar://<id>/x` and `https://arweave.net/<id>/x` both
+    yield 'ar:<id>/x' — the transaction id is the identity, the transport is
+    not, exactly as with a CID. This is what lets the live check hold an
+    Arweave target: it compares identities read from the chain and never
+    asks a gateway for anything."""
     if not uri:
         return None
     u = uri.strip()
     low = u.lower()
     if low.startswith("data:"):
         return "data:" + hashlib.sha256(u.encode("utf-8")).hexdigest()
+    ar = arweave_ref(u)
+    if ar is not None:
+        return f"ar:{ar[0]}{ar[1].rstrip('/')}"
     if low.startswith("ipfs://"):
         rest = u[7:]
         if rest.lower().startswith("ipfs/"):

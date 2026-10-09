@@ -74,7 +74,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
-from .refresh import content_id, image_uri_kind, uri_is_content_addressed, uri_kind
+from .refresh import (
+    arweave_ref,
+    content_id,
+    image_uri_kind,
+    uri_is_content_addressed,
+    uri_kind,
+)
 from .selector import Target, artist_of, metadata_hash, name_qualifies, normalize_name
 from .sources import ImagePinGone, ImageUnusable, MetadataPinGone
 
@@ -463,6 +469,7 @@ class Tally:
     metadata: int = 0        # tokenURI reverts, or metadata came back empty
     name: int = 0            # base name has fewer than two real words
     long_name: int = 0       # more words than the clue plan holds (09/10)
+    no_identity: int = 0     # the tokenURI has no content id to seal (09/10)
     image: int = 0           # the gateway ANSWERED without bytes (dead pin)
     too_big: int = 0         # bigger than vision can use (171 MB, measured)
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
@@ -522,6 +529,7 @@ class Tally:
         causes = ", ".join(f"{k} {v}" for k, v in (
             ("metadata", self.metadata), ("nome", self.name),
             ("nome-longo", self.long_name),
+            ("sem-identidade", self.no_identity),
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
@@ -670,10 +678,10 @@ class TargetFinder:
         if not sources:
             raise ValueError("TargetFinder needs at least one source")
         # What counts as a content-addressed image. The default is THE rule
-        # (ipfs / data / a bare CID / a gateway path) and the production
-        # finder never passes anything else. Only the /probe's finder widens
-        # it, to measure "if Arweave were accepted" (06/10) — a decision that
-        # is Pedro's and not taken.
+        # (ipfs / data / a bare CID / a gateway path). The wiring widens it
+        # to Arweave when — and only when — the Arweave gateways are
+        # configured (09/10); the /probe's finder widens it regardless, to
+        # measure "if Arweave were accepted".
         self._accepts = accepts_uri or uri_is_content_addressed
         self._sources = tuple(sources)
         self._total_supply = total_supply
@@ -765,6 +773,14 @@ class TargetFinder:
             # the adapter says the metadata itself is broken (29/09).
             tally.count_unavailable(e)
             return None
+        if (strict and read is not None and read.metadata is None
+                and arweave_ref(read.token_uri) is not None):
+            # A target on Arweave, and this reader does not read Arweave: the
+            # gateways were taken out of the configuration after it was
+            # deposited. That is OUR setting, not an answer about the content
+            # — the target stays in the larder (Pedro's rule, 29/09) and
+            # comes back the day the gateways do.
+            raise ReadUnavailable("arweave-desligado")
         if read is None or not isinstance(read.metadata, dict) or not read.metadata:
             tally.metadata += 1
             return None
@@ -783,6 +799,17 @@ class TargetFinder:
             # and that we cannot plan yet is OUR limit, and the day the plan
             # grows this number says what it was costing
             tally.long_name += 1
+            return None
+        if not content_id(read.token_uri):
+            # NO IDENTITY, NO TARGET (09/10). The live check compares content
+            # ids read from the chain. A target sealed without one makes
+            # LiveCheck.check raise on its first read — the hunt goes on hold
+            # with Clue 1 published and never comes back. "ipfs://" in front
+            # of something that is not a CID we can name is enough to get
+            # here; so is the next reader anyone writes. Last of the free
+            # checks, so every other refusal keeps its own cause: this counts
+            # only a token that would otherwise have gone on.
+            tally.no_identity += 1
             return None
         return read, base
 
@@ -1219,6 +1246,7 @@ class TargetPreparer:
             # things age: re-read and re-check before committing to it
             try:
                 long_before = tally.long_name
+                blank_before = tally.no_identity
                 named = self._finder.named_token(src, cand.token_id, tally,
                                                  strict=True)
                 if named is None:
@@ -1227,6 +1255,10 @@ class TargetPreparer:
                         self._notify("prepare: o nome tem mais palavras do que "
                                      "o plano de pistas aguenta — candidato "
                                      "descartado, tento outro")
+                    if tally.no_identity > blank_before:
+                        self._notify("prepare: o tokenURI não tem identidade "
+                                     "que a verificação ao vivo possa comparar "
+                                     "— candidato descartado, tento outro")
                     larder.consume(cand.id())
                     continue
                 read, base = named

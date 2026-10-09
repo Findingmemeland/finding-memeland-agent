@@ -312,16 +312,20 @@ def two_hosts():
     b.shutdown()
 
 
-def test_a_redirect_to_another_host_drops_the_key(two_hosts):
+def test_a_redirect_to_another_host_drops_the_key(two_hosts, monkeypatch):
     pa, pb = two_hosts
+    # the transport only lets the key leave for the dedicated gateway's host
+    # (09/10, tests/test_arweave.py) — here, the first test server
+    monkeypatch.setattr(main, "_KEY_HOME", ("http", f"127.0.0.1:{pa}"))
     _Hop.to = f"http://127.0.0.1:{pb}/landed"
     main._http_get(f"http://127.0.0.1:{pa}/hop", {GATEWAY_KEY_HEADER: KEY})  # noqa: SLF001
     assert (pa, "/hop", KEY) in _Hop.got
     assert (pb, "/landed", None) in _Hop.got           # arrived WITHOUT the key
 
 
-def test_a_redirect_on_the_same_host_keeps_the_key(two_hosts):
+def test_a_redirect_on_the_same_host_keeps_the_key(two_hosts, monkeypatch):
     pa, _ = two_hosts
+    monkeypatch.setattr(main, "_KEY_HOME", ("http", f"127.0.0.1:{pa}"))
     _Hop.to = "/landed"
     main._http_get(f"http://127.0.0.1:{pa}/hop", {GATEWAY_KEY_HEADER: KEY})  # noqa: SLF001
     assert (pa, "/landed", KEY) in _Hop.got

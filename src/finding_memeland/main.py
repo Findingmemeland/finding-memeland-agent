@@ -63,10 +63,52 @@ class _GatewayKeyStaysHome(urllib.request.HTTPRedirectHandler):
 _GATEWAY_OPENER = urllib.request.build_opener(_GatewayKeyStaysHome)
 
 
+# THE SECOND LOCK (09/10). The first is the wiring: only the dedicated IPFS
+# gateway has an entry in `gateway_headers`, and Arweave requests are built
+# with empty headers. That is a property of the CALLERS, and the larder now
+# talks to more hosts than it did (the Arweave gateways). So the transport
+# checks too, on every request, whoever built it: a request that carries the
+# key and is not addressed to the dedicated gateway is NOT SENT. The redirect
+# handler above covers the hop after that.
+class GatewayKeyRefused(RuntimeError):
+    """A request carried the dedicated gateway's key towards another host.
+    It was not sent. The message names no host and no key."""
+
+
+_FROM_SETTINGS = object()
+# (scheme, host[:port]) the key may travel to; None = nowhere. build_agent
+# sets it from the settings it was built with. Until then it is read from the
+# environment's settings, so a script that borrows these transports without
+# build_agent is held to the same rule.
+_KEY_HOME: object = _FROM_SETTINGS
+
+
+def _home_of(dedicated) -> tuple[str, str] | None:
+    if not dedicated:
+        return None
+    parts = urlsplit(str(dedicated[0]))
+    return (parts.scheme, parts.netloc.lower())
+
+
+def _key_stays_home(url: str, headers: dict | None) -> None:
+    from .target.adapters import GATEWAY_KEY_HEADER
+
+    if not any(str(h).lower() == GATEWAY_KEY_HEADER for h in (headers or {})):
+        return
+    home = (_home_of(get_settings().target_ipfs_dedicated)
+            if _KEY_HOME is _FROM_SETTINGS else _KEY_HOME)
+    parts = urlsplit(url)
+    if home is None or (parts.scheme, parts.netloc.lower()) != home:
+        raise GatewayKeyRefused(
+            "a request carrying the dedicated gateway's key was addressed to "
+            "another host — not sent")
+
+
 def _http_get_bytes(url: str, headers: dict | None = None, *,
                     timeout: float = 25) -> bytes:
     import urllib.request
 
+    _key_stays_home(url, headers)
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
     with _GATEWAY_OPENER.open(req, timeout=timeout) as r:
@@ -115,6 +157,7 @@ def _http_get_artwork(url: str, headers: dict | None = None) -> bytes:
     class _Handler(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, hdrs, newurl):
             raise _NoRedirect(f"redirect {code} refused")
+    _key_stays_home(url, headers)
     opener = urllib.request.build_opener(_Handler)
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
@@ -142,6 +185,7 @@ def _http_get_larder_art(url: str, headers: dict | None = None) -> bytes:
     from .target import wiring
 
     cap = wiring.MAX_IMAGE_BYTES + 1
+    _key_stays_home(url, headers)
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
     deadline = time.monotonic() + LARDER_ART_DEADLINE_S
@@ -170,6 +214,7 @@ def _http_get_range(url: str, headers: dict | None = None) -> tuple[bytes, int]:
     that were never going to answer (17/09)."""
     import urllib.request
 
+    _key_stays_home(url, headers)
     req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
                                                **(headers or {})})
     with _GATEWAY_OPENER.open(req, timeout=8) as r:
@@ -186,6 +231,7 @@ def _http_get_range(url: str, headers: dict | None = None) -> tuple[bytes, int]:
 def _http_post(url: str, body: bytes, headers: dict) -> str:
     import urllib.request
 
+    _key_stays_home(url, headers)
     req = urllib.request.Request(url, data=body, headers={
         "User-Agent": _BROWSER_UA, **headers,
     }, method="POST")
@@ -195,7 +241,11 @@ def _http_post(url: str, body: bytes, headers: dict) -> str:
 
 
 def build_agent(settings: Settings | None = None) -> Agent:
+    global _KEY_HOME
     s = settings or get_settings()
+    # where the dedicated gateway's key may travel — these settings', not the
+    # environment's (see _key_stays_home)
+    _KEY_HOME = _home_of(s.target_ipfs_dedicated)
 
     # Heavy clients (imported here so the rest of the codebase stays light).
     from anthropic import Anthropic
@@ -1129,6 +1179,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 # The larder's dedicated gateway (30/09): its STATE only —
                 # never the URL, never the key.
                 lines.append(f"gateway dedicado: {s.target_ipfs_dedicated_state}")
+                # The Arweave gateways (09/10): on, off, or why not — counts
+                # only. On takes two valid ones (the first and its reserve).
+                lines.append(f"arweave: {s.target_arweave_state}")
                 # What /launch will actually publish. COUNTS AND CLOCKS ONLY.
                 try:
                     lines.append(target_wiring.prepared_line())

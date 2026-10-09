@@ -73,7 +73,7 @@ from urllib.parse import quote, urlsplit
 
 from .claim import CHAIN_ALIASES, TargetRef, _ADDR_RE, _ADDR_TID_RE, _QUERY_TID_RE
 from .hunt import JudgeVerdict, LiveRead
-from .refresh import TokenRead, uri_is_content_addressed
+from .refresh import TokenRead, arweave_ref, uri_is_content_addressed
 from .selector import Target
 from .sources import (
     SEL_OWNEROF,
@@ -618,12 +618,28 @@ class FailoverMetadata(Erc721Metadata):
     gateway, not 25 s each. `stats["rescued"]` counts reads the primary lost
     and a fallback served: OURS, measured, for the /harvest report.
     `stats["outcomes"]` (30/09) counts every request by gateway position
-    (1 = ours) and by outcome — "serviu", "não-json", or `_failure_kind`."""
+    (1 = ours) and by outcome — "serviu", "não-json", or `_failure_kind`.
+
+    ARWEAVE (09/10, Pedro's decision after the two probes). With
+    `arweave_gateways` given, a tokenURI on Arweave is read too — from THOSE
+    gateways, in order, never from the host the URI names and never with a
+    header of ours: the dedicated IPFS gateway's key has no business on an
+    Arweave host, so this path has no way to attach it. Counted apart, in
+    `arweave.stats`, because these requests spend none of the dedicated
+    gateway's quota. Without the list, an Arweave URI is what it was: not
+    content-addressed, metadata None.
+
+    One verdict differs from IPFS. A dead pin (theirs — the only thing that
+    lets /prepare spend a target) needs a 404/410 from EVERY Arweave gateway,
+    and from at least two: on 07/10 one gateway answered 404 to eight pieces
+    out of eight that existed (a partial gateway says "not here", not "not
+    anywhere"). One 404 among timeouts is ours, and the target stays."""
 
     def __init__(self, *, rpcs: dict[str, ChainRpc], gateways: Sequence[str],
                  http_get: HttpGet, fallback_get: HttpGet | None = None,
                  gateway_headers: dict[str, dict] | None = None,
-                 max_bytes: int = 2_000_000):
+                 max_bytes: int = 2_000_000,
+                 arweave_gateways: Sequence[str] = ()):
         gws = [g for g in dict.fromkeys(gateways) if g]
         if not gws:
             raise ValueError("FailoverMetadata needs at least one gateway")
@@ -635,6 +651,59 @@ class FailoverMetadata(Erc721Metadata):
         # that gateway only — a public gateway never sees it
         self._headers = {g: dict(h) for g, h in (gateway_headers or {}).items()}
         self.stats = {"rescued": 0, "outcomes": {}}
+        self._arweave = tuple(g for g in dict.fromkeys(arweave_gateways) if g)
+        self.arweave = GatewayTally()
+
+    @property
+    def reads_arweave(self) -> bool:
+        return bool(self._arweave)
+
+    def read(self, chain: str, contract: str, token_id: int) -> TokenRead | None:
+        uri = self.token_uri(chain, contract, token_id)
+        if uri is None:
+            return None
+        if uri_is_content_addressed(uri):
+            return TokenRead(token_uri=uri, metadata=self._resolve(uri))
+        if self._arweave and arweave_ref(uri) is not None:
+            return TokenRead(token_uri=uri, metadata=self.resolve_arweave(uri))
+        return TokenRead(token_uri=uri, metadata=None)
+
+    def resolve_arweave(self, uri: str) -> dict:
+        """The metadata JSON of an Arweave URI, through OUR Arweave gateways.
+        Raises like `_resolve`; see the class doc for the one difference."""
+        urls = [u for u in (arweave_url(uri, g) for g in self._arweave) if u]
+        if not urls:
+            raise MetadataInvalid("not an Arweave URI, or no Arweave gateway")
+        gone = not_json = 0
+        for i, url in enumerate(urls):
+            get = self._get if i == 0 else self._fallback_get
+            try:
+                # NO extra headers, by construction: nothing of ours travels
+                text = get(url, {"Accept": "application/json"})
+            except Exception as e:  # noqa: BLE001 — this host; try the next
+                self.arweave.note(i + 1, _failure_kind(e))
+                if _http_status(e) in (404, 410):
+                    gone += 1
+                continue
+            if len(text) > self._max:
+                self.arweave.note(i + 1, "serviu")
+                raise MetadataInvalid("metadata body too large")
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                self.arweave.note(i + 1, "não-json")
+                not_json += 1
+                continue
+            self.arweave.note(i + 1, "serviu")
+            if not isinstance(doc, dict):
+                raise MetadataInvalid("metadata is not an object")
+            return doc
+        if gone == len(urls) and gone >= 2:
+            raise MetadataPinGone(f"every Arweave gateway ({gone}) said 404/410")
+        if not_json:
+            raise GatewayNotJson(f"{not_json} of {len(urls)} Arweave gateway(s) "
+                                 "answered non-JSON")
+        raise GatewayUnavailable(f"{len(urls)} Arweave gateway(s), none served it")
 
     @property
     def gateway_count(self) -> int:
@@ -690,31 +759,32 @@ class FailoverMetadata(Erc721Metadata):
 
 
 # --------------------------------------------------------------------------- #
-# Arweave — MEASUREMENT ONLY (/probe, 06/10)                                   #
+# Arweave                                                                      #
 # --------------------------------------------------------------------------- #
 #
 # The 06/10 census of Manifold creator contracts on Base: of 57 with a token,
-# 56 keep their tokenURI on Arweave and none on IPFS. Whether the larder
-# should accept Arweave is Pedro's decision and NOT taken — so nothing here is
-# wired into the deposit, the live check or the vision path. It exists for
-# one question: "what would this source yield IF Arweave were accepted?"
+# 56 keep their tokenURI on Arweave and none on IPFS. After two probes (10 of
+# 58 pieces would pass WITH Arweave, 1 without) Pedro accepted it (07/10) and
+# approved the design on 09/10: the larder reads Arweave through its own
+# gateways, with a reserve (FailoverMetadata, wiring.ask_every_gateway).
+#
+# `ArweaveGateway` below is what is left of the measurement: the /probe's
+# "if Arweave were accepted" column, used only while the switch is off.
 
 ARWEAVE_GATEWAY = "https://arweave.net/"
-_ARWEAVE_RE = re.compile(
-    r"^(?:ar://|https?://(?:www\.)?arweave\.net/)([A-Za-z0-9_-]{43})(/[^?#\s]*)?(?:[?#]\S*)?$")
 
 
-def arweave_url(uri: str | None) -> str | None:
-    """`ar://<id>[/path]` or `https://arweave.net/<id>[/path]` → the ONE URL it
-    is read from: https://arweave.net/<id>[/path]. None for anything else.
+def arweave_url(uri: str | None, gateway: str = ARWEAVE_GATEWAY) -> str | None:
+    """`ar://<id>[/path]` or `https://arweave.net/<id>[/path]` → the URL it is
+    read from on `gateway`: <gateway>/<id>[/path]. None for anything else.
 
-    The host is fixed, never taken from the token: a tokenURI is written by
+    The host is OURS, never taken from the token: a tokenURI is written by
     whoever minted it, and a reader that follows the host it names is the
     SSRF the hostile Base contracts of 22/09 were probing for."""
-    m = _ARWEAVE_RE.match((uri or "").strip())
-    if not m:
+    ref = arweave_ref(uri)
+    if ref is None:
         return None
-    return ARWEAVE_GATEWAY + m.group(1) + (m.group(2) or "")
+    return gateway.rstrip("/") + "/" + ref[0] + ref[1]
 
 
 class ArweaveGateway:

@@ -47,7 +47,7 @@ def _deposit(*, owner=lambda *a: True, unique=lambda *a: True) -> str:
         sources=[Source("x", "base", "0x" + "cd" * 20)],
         total_supply=lambda c, k: 10, token_by_index=lambda c, k, i: i + 1,
         read_token=lambda c, k, t: TokenRead(
-            token_uri="ipfs://bafymeta",
+            token_uri="ipfs://bafymeta" + "a" * 40,
             metadata={"name": "Some Two Words", "image": "ipfs://bafyimg"}),
         probe_image=lambda u: (PNG, len(PNG)), owner_is_eoa=owner,
         name_is_unique=unique, rng=random.Random(0))
