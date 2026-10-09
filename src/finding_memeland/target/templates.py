@@ -385,6 +385,52 @@ POST_REPLY_ONE_TOKEN = (
     "link) and it counts — this one didn't."
 )
 
+# An address that is not an address (09/10, hunt #17): one character that is
+# not hex — an "S" typed for a "5" — or one character too many or too few.
+# It used to fall to the humour judge and earn "a name is not a claim", and a
+# second player copied the same slip. We cannot judge what we cannot read, so
+# this says nothing about right or wrong: it says what is wrong with the
+# ADDRESS, which is the player's own text and tells nobody anything about
+# the treasure. It names the character — that is the whole help.
+_ADDRESS_RULE = "an address is 0x + 40 of 0-9 and a-f."
+_BAD_ADDRESS_SHOWN = 3
+
+
+def post_reply_bad_address(bad_chars, length: int) -> str:
+    """`bad_chars`: the characters that are not hex (letters and digits only,
+    as typed); `length`: characters after the 0x. Built from the post, so
+    the text differs between players — which X prefers anyway."""
+    shown = [f"'{c}'" for c in list(bad_chars)[:_BAD_ADDRESS_SHOWN]]
+    more = " and more" if len(bad_chars) > _BAD_ADDRESS_SHOWN else ""
+    if len(shown) == 1 and not more:
+        chars = f"has a character that isn't hex — the {shown[0]}"
+    elif shown:
+        chars = f"has characters that aren't hex — {', '.join(shown)}{more}"
+    else:
+        chars = ""
+    if length != 40 and chars:
+        return (f"that address {chars} — and it is {length} characters after 0x "
+                "where it takes 40. check it against the source and send it "
+                "again. this one cost you nothing.")
+    if length != 40:
+        return (f"that address is {length} characters after 0x — it takes 40. "
+                "check it and send it again. this one cost you nothing.")
+    return (f"that address {chars}. {_ADDRESS_RULE} check it against the source "
+            "and send it again. this one cost you nothing.")
+
+
+# A token on a chain, or in a format, this game does not read: a chain word we
+# do not know in front of a 0x contract, a Tezos / Solana / Bitcoin id, a link
+# to a marketplace of one of those. ONE text for all three, and it LISTS NO
+# CHAIN (Pedro, 09/10): the chain is part of the answer, and a public reply of
+# the oracle must never narrow it. The example is the published format
+# example, the same one every other reply carries.
+POST_REPLY_OTHER_CHAIN = (
+    "i can't read that one — my side, not yours, and it cost you nothing. "
+    f"reply with chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE}) or "
+    "the marketplace link."
+)
+
 # Appended to the jeer when a reply named something but no token. It is the
 # line the eventual winner of Hunt #11 never got: he wrote the right name,
 # was told he was wrong, and worked the format out on his own.

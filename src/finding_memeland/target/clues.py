@@ -1134,6 +1134,13 @@ class TargetClueEngine(RelicClueEngine):
         self._count(self.TALLY_ANSWER_TERM if getattr(result, "answer_terms", 0)
                     else self.TALLY_TEXT_RULES)
 
+    def _guardrail_kwargs(self, persona, clue_index):
+        # Rule 1b for SHORT answer terms (09/10): refused as a word, not as a
+        # substring (guardrails.SHORT_TERM_LEN). Target hunts only — a
+        # target's name is whatever its artist called it, short words and all.
+        return {**super()._guardrail_kwargs(persona, clue_index),
+                "short_terms_whole_word": True}
+
     def _post_guardrail_reasons(self, draft, persona, clue_index, prior_clues):
         # 1. the address of the answer, mechanically, every phase
         words = forbidden_address_words(draft.text)

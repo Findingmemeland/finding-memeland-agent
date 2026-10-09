@@ -230,6 +230,115 @@ def collection_link(url: str) -> bool:
     return not (_ADDR_TID_RE.search(u) or _QUERY_TID_RE.search(u))
 
 
+# --------------------------------------------------------------------------- #
+# What we could not read — and can say why (09/10, after Hunt #17)             #
+# --------------------------------------------------------------------------- #
+#
+# Two families of post never reached the format replies at all. Neither named
+# a token we could judge, so neither may be told it is wrong; both can be
+# told what to send instead, at no cost to the player.
+
+# A NEAR ADDRESS: 0x + 38..42 letters and digits that is not an address — one
+# character that is not hex (an "S" typed for a "5": hunt #17, and a second
+# player copied the slip), or one character too many or too few. The window
+# stops short of a transaction hash (64) and of anything a player would not
+# mistake for an address.
+_NEAR_ADDR_RE = re.compile(r"(?<![0-9A-Za-z])0[xX]([0-9A-Za-z]{38,42})(?![0-9A-Za-z])")
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+ADDRESS_LEN = 40
+
+
+@dataclass(frozen=True)
+class NearAddress:
+    """An address-shaped token that is not an address. `bad_chars`: the
+    characters that are not hex, as typed, in order, once each. `length`:
+    how many characters follow the 0x (an address has 40)."""
+
+    bad_chars: tuple[str, ...]
+    length: int
+
+
+def near_address(text: str) -> NearAddress | None:
+    """The first address-shaped token in the post that is not an address, or
+    None. A well-formed address is never one, wherever it stands."""
+    for m in _NEAR_ADDR_RE.finditer(text or ""):
+        body = m.group(1)
+        bad = tuple(dict.fromkeys(c for c in body if c not in _HEX_CHARS))
+        if len(body) == ADDRESS_LEN and not bad:
+            continue
+        return NearAddress(bad_chars=bad, length=len(body))
+    return None
+
+
+# ANOTHER CHAIN: a token named in a way that can never become one of ours.
+#
+# These words RECOGNISE a post; they never answer one. No public reply lists
+# the chains this game reads (Pedro, 09/10): the chain is part of the answer,
+# and the oracle must not narrow it.
+OTHER_CHAIN_WORDS = frozenset({
+    # 0x chains this game does not read
+    "bsc", "bnb", "binance", "opbnb", "avalanche", "avax", "fantom", "ftm",
+    "gnosis", "xdai", "linea", "scroll", "blast", "mantle", "celo", "zksync",
+    "abstract", "apechain", "shape", "sei", "berachain", "bera", "monad",
+    "ronin", "immutable", "imx", "unichain", "soneium", "moonbeam", "cronos",
+    "kaia", "klaytn", "taiko", "metis", "sonic", "worldchain", "hyperevm",
+    # not 0x chains at all
+    "tezos", "xtz", "solana", "sol", "btc", "bitcoin", "ordinals", "ordinal",
+    "flow", "cardano", "aptos", "sui", "tron", "starknet", "stacks",
+    "stargaze", "xrpl", "algorand", "hedera",
+})
+# The ones a player writes as a prefix to an id that is not a 0x address
+# (`tezos:KT1…:42`, `solana:<mint>`, `ordinals:<inscription>`). The id must be
+# long enough to be one: "bitcoin: still king" is chatter.
+_NON_EVM_PREFIX_RE = re.compile(
+    r"(?<![0-9A-Za-z])(?:tezos|xtz|solana|sol|btc|bitcoin|ordinals?)"
+    rf"{_SP}:{_SP}[0-9A-Za-z]{{20,}}", re.IGNORECASE)
+_TEZOS_CONTRACT_RE = re.compile(r"(?<![0-9A-Za-z])KT1[1-9A-HJ-NP-Za-km-z]{33}(?![0-9A-Za-z])")
+# Marketplaces and explorers of chains without 0x contracts. A link there
+# that we could not read is not "a link we could not read": nothing on our
+# side would ever read it.
+_NON_EVM_HOSTS = (
+    "objkt.com", "teia.art", "versum.xyz", "akaswap.com", "tzkt.io",
+    "tensor.trade", "solscan.io", "solana.fm", "exchange.art",
+    "ordinals.com", "ord.io", "ordiscan.com",
+)
+_NON_EVM_SEGMENTS = frozenset({"tezos", "solana", "bitcoin", "ordinals", "runes"})
+_SOLANA_ITEM_RE = re.compile(r"^/item-details/[1-9A-HJ-NP-Za-km-z]{32,44}/?$")
+
+
+def non_evm_link(url: str) -> bool:
+    """A link to a piece on a chain without 0x contracts: a marketplace or
+    explorer of one, or any link whose path names such a chain. Only asked
+    about links we already failed to read."""
+    parts = urlsplit((url or "").strip())
+    host = parts.netloc.lower().split("@")[-1].split(":")[0]
+    if any(host == d or host.endswith("." + d) for d in _NON_EVM_HOSTS):
+        return True
+    if any(seg.lower() in _NON_EVM_SEGMENTS for seg in parts.path.split("/")):
+        return True
+    return bool(_SOLANA_ITEM_RE.match(parts.path))     # Magic Eden's old Solana shape
+
+
+def other_chain(text: str) -> bool:
+    """Does the post name a token on a chain, or in a format, we do not read?
+
+      · chain:contract:tokenId, well formed, with a chain word we do not read
+      · a Tezos contract (KT1…), or an id prefixed tezos: / solana: / btc: /
+        ordinals:
+      · a link to a marketplace of such a chain
+
+    Never a verdict: the same artwork may live on a chain we do read."""
+    raw = text or ""
+    if _TEZOS_CONTRACT_RE.search(raw) or _NON_EVM_PREFIX_RE.search(raw):
+        return True
+    urls = [u.rstrip(")>.,;!?'\"") for u in _URL_RE.findall(raw)]
+    if any(non_evm_link(u) for u in urls):
+        return True
+    stripped = _URL_RE.sub(" ", raw)
+    return any(_canonical_chain(word) is None and word.lower() in OTHER_CHAIN_WORDS
+               for word, _addr, _tid in _EXPLICIT_RE.findall(stripped))
+
+
 def claim_shaped(text: str) -> bool:
     """Does the post LOOK like a claim attempt? Explicit triple, chainless
     contract:tokenId paste, or a link that could plausibly BE a token.

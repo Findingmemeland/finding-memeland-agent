@@ -1398,11 +1398,14 @@ class Orchestrator:
             kind = {
                 "no_reshare": "missing_repost", "wrong_door": "wrong_door",
                 "early": "early", "late": "late",
-                # 09/10 (hunt #17): the format reply too. Both rows got it —
-                # a multi-token post ('malformed') and any other post we
-                # could not turn into a token ('format').
-                "format": "format", "malformed": "format",
             }.get(outcome)
+            # 09/10 (hunt #17): the format replies too, by TYPE. A multi-token
+            # post ('malformed') got the one-token rule; any other post we
+            # could not turn into a token ('format') carries its rule's label.
+            if outcome == "format":
+                kind = self._format_key(str(row.get("submitted_claim_code") or ""))
+            elif outcome == "malformed":
+                kind = self._format_key("one_token")
             if kind:
                 sys_sent.setdefault(kind, set()).add(author)
         queue.sort(key=lambda e: (e[0], e[1]))
@@ -1433,6 +1436,28 @@ class Orchestrator:
             # The active pending claim is not "queued behind itself".
             queue = [e for e in queue if e[2].tweet_id != claim_tid]
         return processed, guesses, counted, taunted, sys_sent, pending, queue
+
+    # ONE FORMAT REPLY PER TYPE, AND THREE PER PROFILE (Pedro, 09/10).
+    #
+    # It was one per profile for every kind of slip, so the second mistake —
+    # the collection instead of the piece, then the contract without its
+    # tokenId — met silence, and silence is what made the oracle look dead to
+    # everybody in hunt #12.
+    # The texts differ by type, cost no LLM call and go only to someone
+    # trying to claim. The ceiling is what keeps one account from making the
+    # oracle fill the thread by cycling through every way of being unreadable.
+    _MAX_FORMAT_REPLIES = 3
+    _FORMAT_KEY = "format:"
+
+    @classmethod
+    def _format_key(cls, kind: str | None) -> str:
+        from ..claims.matcher import format_type_of
+        return cls._FORMAT_KEY + format_type_of(kind)
+
+    @classmethod
+    def _format_replies_to(cls, sys_sent: dict[str, set[str]], author: str) -> int:
+        return sum(1 for key, who in sys_sent.items()
+                   if key.startswith(cls._FORMAT_KEY) and author in who)
 
     def _sys_reply(
         self, kind: str, post, text: str, sys_sent: dict[str, set[str]]
@@ -1553,7 +1578,7 @@ class Orchestrator:
         # restart no longer sends it back to zero (09/10, hunt #17).
         spray_log, spray_state = rebuild_spray(self, hunt) if is_target else ([], {})
         # Malformed (>1 token) posts per author — logged as 'malformed', no
-        # guess spent, ONE format reply per profile (sys_sent), and the
+        # guess spent, ONE reply of that type per profile (sys_sent), and the
         # operator hears about a shotgun account once it insists (P1-1).
         malformed_by_author: dict[str, int] = {}
         if is_target:
@@ -1781,6 +1806,8 @@ class Orchestrator:
                     # burn one of the five attempts.
                     hint = matcher.format_hint(post.text)
                     if hint:
+                        kind_of = getattr(matcher, "format_kind", None)
+                        fmt_kind = kind_of(post.text) if kind_of else None
                         if matcher.is_malformed(post.text):
                             n = malformed_by_author.get(post.author_id, 0) + 1
                             malformed_by_author[post.author_id] = n
@@ -1814,19 +1841,22 @@ class Orchestrator:
                             # replies again, and X refused them (403,
                             # duplicate content). The label is OUR name for
                             # the rule it fell under, never the post's text.
-                            kind_of = getattr(matcher, "format_kind", None)
                             try:
                                 self._repo.log_submission(
                                     hunt_id=hunt.id, dm_id=post.tweet_id,
                                     sender_x_id=post.author_id, wallet=None,
                                     sender_handle=post.author_handle,
-                                    submitted_claim_code=(
-                                        kind_of(post.text) if kind_of else None),
+                                    submitted_claim_code=fmt_kind,
                                     outcome="format", x_created_at=post.created_at,
                                 )
                             except Exception as e:  # noqa: BLE001
                                 self._notify(f"format post {post.tweet_id} not logged: {e!r}")
-                        self._sys_reply("format", post, hint, sys_sent)
+                        # one reply per TYPE, three per profile at most: past
+                        # the ceiling the post is still logged, never answered
+                        if (self._format_replies_to(sys_sent, post.author_id)
+                                < self._MAX_FORMAT_REPLIES):
+                            self._sys_reply(
+                                self._format_key(fmt_kind), post, hint, sys_sent)
                         _done(post)
                         continue
                     # Wrong-shape guesses ('TSU19'), lone shouted name guesses

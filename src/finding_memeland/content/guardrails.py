@@ -118,6 +118,36 @@ def _forbidden_tokens(display_name: str, handle: str) -> set[str]:
     return tokens
 
 
+# Rule 1b, SHORT terms (09/10). A solution term is looked for as a SUBSTRING,
+# and for a word of two or three letters that refuses half the language: "or"
+# sits inside for, more, story, word, work and world; "it" inside with and
+# its; "no" inside know, not and now. Hunt #17 lost five rounds of clues to
+# eight such words, and taking those eight off the list (07/10) left every
+# other short word of a name doing the same.
+#
+# With `short_terms_whole_word`, a term under SHORT_TERM_LEN letters is
+# refused only as a WORD — itself, its plural, its possessive ("sun", "suns",
+# "sun's", "skies" for "sky"). Longer terms keep the substring and the root
+# rule, untouched. What it lets through, said plainly: a derived word
+# ("sunny", "sunset") no longer trips 1b. In the puzzle phase the blind
+# solver still stands behind it; in the reveal phase nothing does.
+#
+# A SWITCH, off by default: persona and relic hunts share this function and
+# their terms (handle parts like 'tit') are meant to match inside words.
+SHORT_TERM_LEN = 4
+
+
+def _writes_term(scan_lower: str, term: str, short_whole_word: bool) -> bool:
+    """Does the clue write this solution term? (`term` already lowercased.)"""
+    if not short_whole_word or len(term) >= SHORT_TERM_LEN:
+        return term in scan_lower
+    forms = [re.escape(term) + r"(?:e?s)?"]            # sun, suns, boxes
+    if term.endswith("y"):
+        forms.append(re.escape(term[:-1]) + "ies")     # sky -> skies
+    # the possessive needs no form of its own: an apostrophe ends the word
+    return re.search(r"\b(?:" + "|".join(forms) + r")\b", scan_lower) is not None
+
+
 def check_clue(
     clue_text: str,
     *,
@@ -129,11 +159,14 @@ def check_clue(
     max_len: int = 280,
     is_long_post: bool = False,
     puzzle_phase: bool = False,
+    short_terms_whole_word: bool = False,
 ) -> GuardrailResult:
     """`puzzle_phase=True` (relic hunts, clues 1..PUZZLE_CLUES) switches on the
     hard-clue rules: no emoji at all, no rhyme / sound-alike hints. Both were
     measured on Hunt #7 (27/08): the emoji drew the answer and the rhyme turned
-    the riddle into a crossword lookup."""
+    the riddle into a crossword lookup.
+
+    `short_terms_whole_word=True` (target hunts): see SHORT_TERM_LEN above."""
     reasons: list[str] = []
     text_lower = clue_text.lower()
     found_emoji = emoji_names(clue_text)
@@ -155,7 +188,8 @@ def check_clue(
     answer_leaks = sorted(
         term
         for term in solution_terms
-        if term.strip() and term.strip().lower() in scan_lower
+        if term.strip()
+        and _writes_term(scan_lower, term.strip().lower(), short_terms_whole_word)
     )
     if answer_leaks:
         reasons.append(f"clue contains solution term(s): {answer_leaks}")

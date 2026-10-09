@@ -61,11 +61,13 @@ from .templates import (
     POST_REPLY_COLLECTION_LINK,
     POST_REPLY_FORMAT,
     POST_REPLY_ONE_TOKEN,
+    POST_REPLY_OTHER_CHAIN,
     POST_REPLY_UNRESOLVED_LINK,
     TargetWinnerData,
     VoidRevealData,
     artwork_alt_text,
     item_link_for,
+    post_reply_bad_address,
     target_winner_announcement,
     void_reveal,
 )
@@ -330,6 +332,8 @@ def claim_matcher_for(orch, hunt):
             unresolved_reply=POST_REPLY_UNRESOLVED_LINK,
             one_token_reply=POST_REPLY_ONE_TOKEN,
             collection_reply=POST_REPLY_COLLECTION_LINK,
+            bad_address_reply=post_reply_bad_address,
+            other_chain_reply=POST_REPLY_OTHER_CHAIN,
         )
     return CodeClaimMatcher(hunt.claim_code)
 

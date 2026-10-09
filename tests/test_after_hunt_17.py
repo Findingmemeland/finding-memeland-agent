@@ -465,14 +465,17 @@ def test_after_a_restart_the_same_format_reply_is_not_sent_again():
     rebuilt = _restart(w, hunt)
     processed, guesses, _c, _t, sys_sent, _p, _q = w.orch._rebuild_claim_state(rebuilt)
     assert {"5001", "5002", "5003"} <= processed
-    assert sys_sent["format"] == {"42", "43", "44"}
+    # by TYPE since the per-type replies (tests/test_format_replies.py): "no
+    # chain" and "no tokenId" are answered with the same words — one type
+    assert sys_sent["format:missing"] == {"42", "43"}
+    assert sys_sent["format:unreadable_link"] == {"44"}
     assert guesses == {}                              # a format slip is not a guess
     _crash(w, rebuilt)
     assert list(w.rig.publisher.post_replies) == before   # not one reply more
     assert len(_rows(w, 5001)) == 1                       # and not one row more
 
 
-def test_one_format_reply_per_profile_holds_across_a_restart():
+def test_one_reply_of_a_type_per_profile_holds_across_a_restart():
     w = World()
     hunt = w.launch()
     t0 = hunt.live_at
@@ -483,12 +486,12 @@ def test_one_format_reply_per_profile_holds_across_a_restart():
     w.src.schedule[1] = lambda: [
         post(5010, "42", OTHER, t0 + timedelta(minutes=9), hunt.reshare_post_id)]
     _crash(w, rebuilt)
-    assert replies_to(w.rig, 5010) == []                  # already answered once
+    assert replies_to(w.rig, 5010) == []                  # same words: answered once
     assert _rows(w, 5010)[0]["outcome"] == "format"       # but logged all the same
     assert _rows(w, 5010)[0]["submitted_claim_code"] == "no_token_id"
 
 
-def test_a_multi_token_post_also_counts_as_the_format_reply_after_a_restart():
+def test_a_multi_token_post_is_remembered_as_its_own_type_after_a_restart():
     w = World()
     hunt = w.launch()
     t0 = hunt.live_at
@@ -500,11 +503,14 @@ def test_a_multi_token_post_also_counts_as_the_format_reply_after_a_restart():
     assert replies_to(w.rig, 5001) == [POST_REPLY_ONE_TOKEN]
     assert _rows(w, 5001)[0]["outcome"] == "malformed"    # its own row, as before
     rebuilt = _restart(w, hunt)
-    assert w.orch._rebuild_claim_state(rebuilt)[4]["format"] == {"42"}
+    assert w.orch._rebuild_claim_state(rebuilt)[4]["format:one_token"] == {"42"}
     w.src.schedule[1] = lambda: [
-        post(5010, "42", f"{OTHER}:7", t0 + timedelta(minutes=9), hunt.reshare_post_id)]
+        post(5010, "42", two.replace("/2", "/3"), t0 + timedelta(minutes=9),
+             hunt.reshare_post_id),
+        post(5011, "42", f"{OTHER}:7", t0 + timedelta(minutes=10), hunt.reshare_post_id)]
     _crash(w, rebuilt)
-    assert replies_to(w.rig, 5010) == []
+    assert replies_to(w.rig, 5010) == []                   # the same rule: not again
+    assert replies_to(w.rig, 5011) == [POST_REPLY_FORMAT]  # another one: answered
 
 
 def test_the_player_who_slipped_on_the_format_can_still_win_after_a_restart():

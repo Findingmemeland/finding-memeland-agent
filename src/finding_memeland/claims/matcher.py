@@ -12,12 +12,15 @@ marketplace link — so the loop now asks a matcher and stays shape-agnostic:
   · submitted_label(text)   — what to log as the attempt (never secret)
   · skip_judge(text)        — jeer directly, no humour judge (wrong-shape)
   · format_hint(text)       — a public system reply teaching the format
-                              (target: a paste WITHOUT the chain, or a link
-                              nobody could resolve) — replied, NOT counted
-                              as a guess: a format slip must not burn one of
-                              the five attempts
+                              (target: a paste WITHOUT the chain, a link
+                              nobody could resolve, an address that is not
+                              one, a chain we do not read) — replied, NOT
+                              counted as a guess: a format slip must not burn
+                              one of the five attempts
   · format_kind(text)       — which format rule that was (our label, for the
-                              'format' row in the log), or None
+                              'format' row in the log), or None. Its TYPE
+                              (`format_type_of`) is what a player is answered
+                              once for: one reply per type, not per profile
   · spray_key(text)         — the CANONICAL identity of the guessed target
                               for the anti-spray detector, or None. Only a
                               parsed TargetRef qualifies (Opus, 06/09): the
@@ -37,6 +40,19 @@ from __future__ import annotations
 from typing import Callable, Protocol
 
 from .parser import code_like, contract_paste_like, extract_candidates, guess_like
+
+# ONE FORMAT REPLY PER TYPE (Pedro, 09/10). Until then it was one per profile
+# for every kind of slip: a player who pasted the collection, was told so,
+# and then sent the contract without its tokenId got silence the second
+# time. The type is the reply the player READS — "no chain" and "no tokenId"
+# are answered with the same words, so they are one type.
+_FORMAT_TYPES = {"no_chain": "missing", "no_token_id": "missing"}
+
+
+def format_type_of(kind: str | None) -> str:
+    """The once-per-profile key for a format reply of this kind."""
+    kind = (kind or "").strip()
+    return _FORMAT_TYPES.get(kind, kind) or "format"
 
 
 class ClaimMatcher(Protocol):
@@ -98,7 +114,9 @@ class TargetClaimMatcher:
 
     def __init__(self, *, judge, resolve_link: Callable[[str], object] | None = None,
                  format_reply: str, unresolved_reply: str, one_token_reply: str,
-                 collection_reply: str = ""):
+                 collection_reply: str = "",
+                 bad_address_reply: Callable[..., str] | None = None,
+                 other_chain_reply: str = ""):
         self._judge = judge
         self._resolve = resolve_link
         self._format_reply = format_reply
@@ -106,6 +124,11 @@ class TargetClaimMatcher:
         self._one_token_reply = one_token_reply
         # Opcional: sem ele, o caminho antigo ("não consigo ler") mantém-se.
         self._collection_reply = collection_reply
+        # Optional too (09/10): without them these posts go where they went —
+        # a near address to the humour judge, another chain's id to whatever
+        # caught it. `bad_address_reply(bad_chars, length)` builds the text.
+        self._bad_address_reply = bad_address_reply
+        self._other_chain_reply = other_chain_reply
         self._readable_memo: dict[str, bool] = {}
         self._format_last: tuple[str, tuple[str, str] | None] | None = None
 
@@ -213,6 +236,20 @@ class TargetClaimMatcher:
         self._format_last = (text or "", case)
         return case
 
+    def _unreadable(self, text: str) -> tuple[str, str] | None:
+        """Two things we can name about a post we could not read, before the
+        general rules (09/10). An address that is not one comes first: until
+        it is fixed nothing else about the post can be read at all."""
+        from ..target.claim import near_address, other_chain
+        if self._bad_address_reply is not None:
+            near = near_address(text)
+            if near is not None:
+                return ("bad_address",
+                        self._bad_address_reply(near.bad_chars, near.length))
+        if self._other_chain_reply and other_chain(text):
+            return ("other_chain", self._other_chain_reply)
+        return None
+
     def _classify_format(self, text: str) -> tuple[str, str] | None:
         from ..target.claim import claim_shaped
         ext = self._extract(text)
@@ -223,6 +260,9 @@ class TargetClaimMatcher:
         if ext.unresolved_links:
             v = self._judge.judge(text, resolve_link=self._resolve)
             if v.checked == 0 and v.unresolved:
+                named = self._unreadable(text)
+                if named is not None:
+                    return named
                 # Se o link traz contrato mas não traz token, sabemos o que
                 # falta — e "não consigo ler esse link" seria uma verdade
                 # inútil, a mandar a pessoa adivinhar o que já sabemos.
@@ -233,6 +273,14 @@ class TargetClaimMatcher:
                     return ("collection_link", self._collection_reply)
                 return ("unreadable_link", self._unresolved_reply)
             return None
+        # BEFORE the two rules below: an address one character short reads as
+        # "a contract with no tokenId", and a chain we do not read in front
+        # of a full triple reads the same way — both were answered "a claim
+        # needs chain, contract AND tokenId", to a player who had sent all
+        # three.
+        named = self._unreadable(text)
+        if named is not None:
+            return named
         if claim_shaped(text):                     # contract:tokenId, no chain
             return ("no_chain", self._format_reply)
         if contract_paste_like(text):
