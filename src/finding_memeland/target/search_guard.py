@@ -485,6 +485,42 @@ def is_server_error(kind: str) -> bool:
     return len(kind) == 3 and kind.isdigit() and kind.startswith("5")
 
 
+@dataclass(frozen=True)
+class SearchProbe:
+    """One control search, asked NOW: did it answer, how did it fail if it
+    did not, and how long it took. Words and numbers only."""
+
+    ok: bool
+    kind: str               # "" when it answered; else `search_failure_kind`
+    seconds: float
+
+    def render(self) -> str:
+        took = f"{self.seconds:.1f}".replace(".", ",") + " s"
+        if self.ok:
+            # the transport hands over a body, not a status line: "it
+            # answered" is what is known — an HTTP success with a results
+            # list in it, which is more than a bare 200
+            return f"respondeu em {took}"
+        if self.kind == "timeout":
+            return f"sem resposta em {took} (timeout)"
+        return f"{self.kind} em {took}"
+
+
+def probe_search(search, *, query: str = SEARCH_CONTROL_QUERY,
+                 clock: Callable[[], float] = time.monotonic) -> SearchProbe:
+    """Ask `search` the control query once — no retry, the caller's own
+    transport and its own time limit — and say what happened. For /status
+    (10/10): after two harvests lost candidates to minutes-long bursts of
+    503 while the status page said "operational", the operator needs to see,
+    before a launch, whether the search answers RIGHT NOW. Never raises."""
+    started = clock()
+    try:
+        search.named_items(query)
+    except Exception as e:  # noqa: BLE001 — a probe reports, it never throws
+        return SearchProbe(False, search_failure_kind(e), clock() - started)
+    return SearchProbe(True, "", clock() - started)
+
+
 class MarketNameUniqueness:
     """name_is_unique(base, chain, contract, token_id) -> bool | None — the
     callable hunt.select_judged injects, called at DRAW time on the drawn

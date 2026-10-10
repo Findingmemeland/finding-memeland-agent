@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Callable
@@ -107,6 +108,7 @@ from .search_guard import (
     MarketNameUniqueness,
     OpenSeaSearch,
     RaribleSearch,
+    probe_search,
 )
 from .selector import CurationEpoch
 from .snapshot import Snapshot, SnapshotStore, StratumGateReport, stratum_gate
@@ -201,6 +203,13 @@ class TargetWiring:
     # which marketplace serves the search guard / uniqueness / chain probe
     # ('opensea' or 'rarible') — for /status, never for a public post
     market_surface: str = ""
+    # /status asks the marketplace search a control question (10/10): the
+    # search itself, the same one with a page of ONE (asked only when the
+    # first fails — it measures whether the SHAPE of our request matters),
+    # and the uniqueness guard, for its counters since the process started.
+    market: object = None
+    market_small: object = None
+    uniqueness: object = None
     # the larder (17/09): targets verified in advance, one used per hunt.
     # THE NEXT THIRTY ANSWERS — encrypted, never rendered, counts only.
     finder: TargetFinder | None = None
@@ -331,6 +340,52 @@ class TargetWiring:
             return f"{line} · na despensa: ilegível ({type(e).__name__})"
         return line + (f" · {n} na despensa (saem no próximo /prepare)" if n
                        else " · nenhum na despensa")
+
+    def search_line(self, *, clock: Callable[[], float] = time.monotonic) -> str:
+        """Para o /status: a pesquisa do mercado responde AGORA?
+
+        Uma pesquisa de controlo, com o que respondeu e em quanto tempo —
+        pelo mesmo transporte e com o mesmo tempo limite de uma pesquisa a
+        sério (25 s), para dizer o que uma pesquisa a sério encontraria. Se
+        falhar, a mesma com página de 1: se ESSA responder, é a forma do
+        nosso pedido que pesa, e isso está na nossa mão. E os contadores da
+        guarda de unicidade desde o arranque — sem custo, e sem os quais um
+        "respondeu" agora esconde as falhas de há uma hora.
+
+        Um pedido quando responde, dois quando falha. Nunca o nome de
+        ninguém: o texto do controlo é fixo e os resultados não se lêem."""
+        if self.market is None:
+            return "pesquisa: não ligada"
+        name = {"opensea": "OpenSea", "rarible": "Rarible"}.get(
+            self.market_surface, self.market_surface or "?")
+        first = probe_search(self.market, clock=clock)
+        line = f"pesquisa {name}: " + ("" if first.ok else "⚠️ ") + first.render()
+        if not first.ok:
+            if self.market_small is not None:
+                small = probe_search(self.market_small, clock=clock)
+                line += f" · página de 1: {small.render()}"
+            line += (" — um /launch seria recusado; uma hunt no puzzle "
+                     "ficava em hold")
+        return line + "\n" + self._search_since_boot()
+
+    def _search_since_boot(self) -> str:
+        """What the uniqueness guard has counted since the process started:
+        questions, failed requests by kind, what the control answered."""
+        stats = getattr(self.uniqueness, "stats", None) or {}
+        asked = sum(int(stats.get(k, 0)) for k in
+                    ("unique", "not_unique", "blind", "crowded", "transport"))
+        failed = dict(getattr(self.uniqueness, "failed_requests", None) or {})
+        control = dict(getattr(self.uniqueness, "control", None) or {})
+        if not asked and not failed:
+            return "  unicidade desde o arranque: nenhuma pergunta"
+        text = (f"  unicidade desde o arranque: {asked} pergunta(s) · "
+                f"{sum(failed.values())} pedido(s) falhado(s)")
+        if failed:
+            text += " (" + ", ".join(f"{k} {n}" for k, n in sorted(failed.items())) + ")"
+        if control:
+            text += (f" · controlo: respondeu {control.get('respondeu', 0)}, "
+                     f"falhou {control.get('falhou', 0)}")
+        return text
 
     def larder_spread(self) -> dict:
         """A forma da despensa, em contagens (ver Larder.spread)."""
@@ -826,12 +881,18 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         market_surface = "opensea"
         market = OpenSeaSearch(http_get=http_get, api_key=s.opensea_api_key,
                                size=page)
+        # the same search with a page of ONE — only /status uses it, and
+        # only when the control search fails (TargetWiring.search_line)
+        market_small = OpenSeaSearch(http_get=http_get,
+                                     api_key=s.opensea_api_key, size=1)
         chain_probe = OpenSeaChainProbe(http_get=http_get,
                                         api_key=s.opensea_api_key)
     else:
         market_surface = "rarible"
         market = RaribleSearch(http_post=http_post, api_key=s.rarible_api_key,
                                size=page)
+        market_small = RaribleSearch(http_post=http_post,
+                                     api_key=s.rarible_api_key, size=1)
         chain_probe = RaribleChainProbe(http_get=http_get,
                                         api_key=s.rarible_api_key)
     search_guard = ClueSearchGuard(search=market)
@@ -1393,7 +1454,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         cap_exempt=cap_exempt, thresholds=thresholds,
                         sample_per_stratum=int(s.target_sample_per_stratum),
                         fetch_artwork=fetch_artwork,
-                        market_surface=market_surface)
+                        market_surface=market_surface,
+                        market=market, market_small=market_small,
+                        uniqueness=uniqueness)
 
 
 # Type alias for main.py readers

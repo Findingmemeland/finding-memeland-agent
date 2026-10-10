@@ -1182,6 +1182,14 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     lines.append(target_wiring.exposed_line())
                 except Exception as e:  # noqa: BLE001
                     lines.append(f"lista de queimados: ilegível ({type(e).__name__})")
+                # The marketplace search, asked NOW (10/10): a control
+                # search with what it answered and how long it took. A
+                # /launch is refused while it does not answer, and a hunt in
+                # its puzzle phase goes on hold — read it before every hunt.
+                try:
+                    lines.append(target_wiring.search_line())
+                except Exception as e:  # noqa: BLE001
+                    lines.append(f"pesquisa: ilegível ({type(e).__name__})")
                 # What /launch will actually publish. COUNTS AND CLOCKS ONLY.
                 try:
                     lines.append(target_wiring.prepared_line())

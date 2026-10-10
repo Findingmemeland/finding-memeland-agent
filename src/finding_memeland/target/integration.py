@@ -169,6 +169,12 @@ def recent_void_ids(orch) -> frozenset[str]:
         return frozenset()
 
 
+# What the operator reads when the launch could not ask the marketplace
+# (Pedro's words, 10/10). The preparation is NOT at fault and is kept.
+LAUNCH_SEARCH_SILENT = ("a pesquisa não respondeu — a preparação mantém-se; "
+                        "repete o /launch quando o /status disser que responde")
+
+
 def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
                         ladder_exempt: bool = False):
     """The target twin of prepare_relic_hunt. Returns a PreparedHunt.
@@ -238,16 +244,26 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
                 target_name_onchain=target.name_onchain)
         except Exception as e:  # noqa: BLE001
             raise LaunchRefused(
-                f"guarda de pesquisa indisponível no launch ({type(e).__name__}) "
-                "— nada publicado; tenta outra vez quando o serviço voltar"
+                f"⛔ launch recusado — {LAUNCH_SEARCH_SILENT} "
+                f"({type(e).__name__}). Nada foi publicado."
             ) from None
         if not getattr(verdict, "ok", False):
             found = getattr(verdict, "found", None)
+            detail = getattr(verdict, "detail", "")
+            if found is None and not getattr(verdict, "blind", False):
+                # THE SEARCH DID NOT ANSWER (10/10). That says nothing about
+                # the piece, and the preparation is as good as it was. This
+                # used to share the text below — "Corre /prepare outra vez"
+                # — and obeying it once the search was back sealed ANOTHER
+                # target and threw a valid preparation away.
+                raise LaunchRefused(
+                    f"⛔ launch recusado — {LAUNCH_SEARCH_SILENT} ({detail}). "
+                    "Nada foi publicado.")
             why = ("a peça tornou-se pesquisável desde ontem" if found
                    else "a pesquisabilidade não pôde ser verificada")
             raise LaunchRefused(
                 f"⛔ Clue 1 recusada no launch — {why} "
-                f"({getattr(verdict, 'detail', '')}). Corre /prepare outra vez.")
+                f"({detail}). Corre /prepare outra vez.")
 
     sealed = SealedTarget(target=target, salt=prepared.salt,
                           commitment=prepared.commitment, decoys=())
