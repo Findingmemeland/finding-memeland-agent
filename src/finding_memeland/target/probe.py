@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from .adapters import arweave_url
 from .harvest import looks_serial, name_is_cluable
-from .prepare import Pending, SecondPass, Source, Tally
+from .prepare import Pending, SearchPasses, Source, Tally
 from .refresh import TokenRead, uri_is_content_addressed, uri_kind
 
 # O deployer CREATE2 da Manifold em Base ("Contract Deployment Factory" na
@@ -221,9 +221,9 @@ class ProbeReport:
     uri_kinds: dict = field(default_factory=dict)
     today: ProbeColumn = field(default_factory=ProbeColumn)
     with_arweave: ProbeColumn = field(default_factory=ProbeColumn)
-    # a pesquisa do nome do NOSSO lado (10/10): pedidos falhados por tipo e
-    # a segunda volta — ver prepare.SecondPass
-    second: SecondPass = field(default_factory=SecondPass)
+    # a pesquisa do nome do NOSSO lado (10/10): pedidos falhados, a pesquisa
+    # de controlo, a segunda e a terceira volta — ver prepare.SearchPasses
+    search: SearchPasses = field(default_factory=SearchPasses)
     # MEDIÇÃO, não causa (10/10): nomes de 4+ palavras por espaços que a
     # leitura antiga recusava e a leitura por conteúdo deixa seguir
     long_fits: int = 0
@@ -251,7 +251,7 @@ class ProbeReport:
         if self.long_fits:
             lines.append("nomes de 4+ palavras que cabem pelo conteúdo: "
                          f"{self.long_fits}")
-        search = self.second.render()
+        search = self.search.render()
         if search:
             lines.append(search)
         return "\n".join(lines)
@@ -406,12 +406,13 @@ class ContractProbe:
         rep = ProbeReport(source=self.source, chain=self.chain)
         head = self._sampler.head()
         rep.universe = self._sampler.total(head)          # ProbeBlind se cego
-        # A SEGUNDA VOLTA (10/10), como no depósito: uma peça que passou tudo
-        # e a quem a pesquisa do nome não respondeu (falha NOSSA) espera aqui,
-        # em memória, com o que a travava HOJE — e no fim pergunta-se outra
-        # vez, uma vez. Só então entra nas colunas.
+        # AS VOLTAS SEGUINTES (10/10), como no depósito: uma peça que passou
+        # tudo e a quem a pesquisa do nome não respondeu (falha NOSSA) espera
+        # aqui, em memória, com o que a travava HOJE — e no fim pergunta-se
+        # outra vez, e uma última se falhar de novo. Só então entra nas
+        # colunas.
         waiting: list[tuple[Pending, tuple | None]] = []
-        failed_before = self._finder.search_failures()
+        search_before = self._finder.search_counters()
         for i in range(1, max(1, n) + 1):
             if every and i % every == 0:
                 note(f"probe {self.source}: {i}/{n} contratos · "
@@ -434,20 +435,16 @@ class ContractProbe:
                 rep.empty += 1
                 continue
             self._check(contract, self._rng.randrange(1, last + 1), rep, waiting)
-        if waiting:
-            note(f"probe {self.source}: {len(waiting)} peça(s) sem resposta da "
-                 "pesquisa do nome (falha nossa) — volto a perguntar no fim, uma "
-                 "vez; pode demorar até um minuto")
-        for pending, today in waiting:
-            rep.second.asked += 1
-            tally = Tally()
-            cand = self._finder.ask_again(pending, tally)
-            if cand is not None:
-                rep.second.rescued += 1
+        tallies = [Tally() for _ in waiting]
+        found = self._finder.later_passes(
+            [pending for pending, _today in waiting], rep.search,
+            lambda i: tallies[i], notify=note, label=f"probe {self.source}",
+            what="peça(s)")
+        for (_pending, today), cand, tally in zip(waiting, found, tallies, strict=True):
             cause = None if cand is not None else cause_of(tally)
             rep.with_arweave.add(cause)
             rep.today.add(today or cause)
-        rep.second.failed = self._finder.search_failures(since=failed_before)
+        self._finder.search_since(search_before, rep.search)
         return rep
 
     # -- o contrato -------------------------------------------------------- #

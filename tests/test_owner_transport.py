@@ -293,7 +293,7 @@ def test_the_harvest_does_not_ask_the_owner_again_and_spends_no_search():
     """Não foi decidido repetir o dono na colheita: conta-se, com o tipo, e
     segue — sem segunda volta, sem espera, e sem gastar a pesquisa paga."""
     rep, larder, slept, asked = _deposit(check(owner_of=TimeoutError("timed out")))
-    assert larder.size() == 0 and rep.second.asked == 0
+    assert larder.size() == 0 and rep.search.second_asked == 0
     assert slept == [] and asked == []
     assert "2.ª volta" not in rep.render()
 

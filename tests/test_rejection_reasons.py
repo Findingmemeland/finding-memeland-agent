@@ -53,9 +53,10 @@ def _deposit(*, owner=lambda *a: True, unique=lambda *a: True) -> str:
             metadata={"name": "Some Two Words", "image": "ipfs://bafyimg"}),
         probe_image=lambda u: (PNG, len(PNG)), owner_is_eoa=owner,
         name_is_unique=unique, rng=random.Random(0),
-        # 10/10: a "rede-NOSSO" is asked again at the end of the run, after a
-        # window — which a test has no reason to sit through
-        retry_gap_s=0)
+        # 10/10: a "rede-NOSSO" is asked again at the end of the run — and
+        # once more five minutes later — which a test has no reason to sit
+        # through
+        retry_gap_s=0, third_gap_s=0)
     return f.deposit(Larder(), ["base:0x" + "ab" * 20 + ":1"],
                      chain_ok=lambda c: True).render()
 

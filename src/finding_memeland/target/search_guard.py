@@ -462,6 +462,29 @@ def search_failure_kind(e: BaseException) -> str:
     return f"outro:{type(e).__name__}"
 
 
+# THE CONTROL SEARCH (10/10). When a name's search fails on every attempt,
+# one more search is made for this fixed text — nobody's name, cheap for the
+# marketplace to answer. It says which of two things happened:
+#   · it answers  → the search works right now: the failure is about THAT
+#                   name's query ("the name");
+#   · it fails    → the search is down for everyone ("the moment").
+# Measured on 10/10 (/harvest manifold 150): 25 failed requests, all 503, 24
+# of them in 8 questions that failed three times out of three — and nothing
+# in the counts could tell the name from the moment. A control that never
+# answers reads as "the moment", which is the side that keeps a candidate.
+SEARCH_CONTROL_QUERY = "finding memeland"
+
+# A failed request that took this long was the marketplace's own search timing
+# out; under it, the request was turned away at the door. Counted apart
+# (`failed_speed`), because the two call for different patience.
+SLOW_FAILURE_S = 5.0
+
+
+def is_server_error(kind: str) -> bool:
+    """A 5xx, by its `search_failure_kind`."""
+    return len(kind) == 3 and kind.isdigit() and kind.startswith("5")
+
+
 class MarketNameUniqueness:
     """name_is_unique(base, chain, contract, token_id) -> bool | None — the
     callable hunt.select_judged injects, called at DRAW time on the drawn
@@ -496,12 +519,26 @@ class MarketNameUniqueness:
       · `last_transport`  — the kinds of the attempts of THIS call, when it
         ended in a transport failure; empty otherwise. The caller needs it
         to tell "ours" from a verdict: /prepare keeps the target, the
-        harvest asks again at the end of the run."""
+        harvest asks again at the end of the run.
+
+    THE 503 (10/10, once the kind was measured). Three things:
+      · a 5xx is NOT retried inside the call. The two quick retries (2 s,
+        4 s) recovered at most one failing question in nine and cost sixteen
+        requests in one harvest; what helps is waiting, and that is the
+        caller's second and third pass;
+      · after a question that failed, the CONTROL search (above) is made;
+        `last_control` is True (it answered: the name), False (it failed:
+        the moment) or None (no control), and `control` counts both;
+      · `failed_speed` counts failed requests as "rápidos" / "lentos"."""
 
     def __init__(self, *, search: NameSearch, page_size: int,
                  retries: int = 2, sleep_s: float = 2.0,
-                 item_status: Callable[[str, str, int], object] | None = None):
+                 item_status: Callable[[str, str, int], object] | None = None,
+                 control_query: str | None = SEARCH_CONTROL_QUERY,
+                 clock: Callable[[], float] = time.monotonic):
         self._search = search
+        self._control_query = control_query
+        self._clock = clock
         # "blind" split by ASKING the marketplace for the item itself (30/09,
         # measurement only — the answer stays None): does it not know the
         # piece, or know it and keep it out of the search (flagged or not)?
@@ -531,28 +568,39 @@ class MarketNameUniqueness:
                       "blind_clean_same": 0, "blind_clean_other": 0,
                       "blind_clean_noname": 0}
         self.failed_requests: dict[str, int] = {}
+        self.failed_speed: dict[str, int] = {}
+        self.control: dict[str, int] = {}
         self.last_transport: tuple[str, ...] = ()
+        self.last_control: bool | None = None
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
         from .selector import normalize_name
         want = _canonical(f"{chain}:{contract}:{token_id}")
         self.last_transport = ()
+        self.last_control = None
         kinds: list[str] = []
         for attempt in range(self._retries + 1):
+            started = self._clock()
             try:
                 rows = self._search.named_items(base)     # UNFILTERED
                 break
             except Exception as e:  # noqa: BLE001 — retry, then unverifiable
+                speed = ("lentos" if self._clock() - started >= SLOW_FAILURE_S
+                         else "rápidos")
+                self.failed_speed[speed] = self.failed_speed.get(speed, 0) + 1
                 kind = search_failure_kind(e)
                 self.failed_requests[kind] = self.failed_requests.get(kind, 0) + 1
                 if kind not in kinds:
                     kinds.append(kind)
-                if attempt < self._retries:
+                # a 5xx is not asked again here: waiting is what helps, and
+                # the caller's later passes are the wait
+                if attempt < self._retries and not is_server_error(kind):
                     time.sleep(self._sleep * (attempt + 1))
                     continue
                 self.stats["transport"] += 1
                 self.last_transport = tuple(kinds)
+                self.last_control = self._ask_control()
                 return None
         ids = {_canonical(i): n for i, n in rows}
         key = base.casefold()
@@ -571,6 +619,20 @@ class MarketNameUniqueness:
         self.stats["not_unique" if others else "unique"] += 1
         return not others
 
+
+    def _ask_control(self) -> bool | None:
+        """The control search, after a question that failed. True = it
+        answered (any answer, even an empty one); False = it failed too.
+        Never raises, never retried: one request."""
+        if not self._control_query:
+            return None
+        try:
+            self._search.named_items(self._control_query)
+        except Exception:  # noqa: BLE001 — a measurement never breaks a verdict
+            self.control["falhou"] = self.control.get("falhou", 0) + 1
+            return False
+        self.control["respondeu"] = self.control.get("respondeu", 0) + 1
+        return True
 
     def _split_blind(self, base: str, chain: str, contract: str,
                      token_id: int) -> None:

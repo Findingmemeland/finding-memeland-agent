@@ -39,11 +39,12 @@ from test_target_prepare import World, _finder, _preparer
 
 from finding_memeland.target.prepare import (
     SECOND_PASS_GAP_S,
+    THIRD_PASS_GAP_S,
     Larder,
     Pending,
     PrepareRefused,
     ReadUnavailable,
-    SecondPass,
+    SearchPasses,
     Source,
     Tally,
     TargetFinder,
@@ -51,8 +52,11 @@ from finding_memeland.target.prepare import (
 from finding_memeland.target.probe import ContractProbe
 from finding_memeland.target.refresh import TokenRead
 from finding_memeland.target.search_guard import (
+    SEARCH_CONTROL_QUERY,
+    SLOW_FAILURE_S,
     MarketNameUniqueness,
     OpenSeaSearch,
+    is_server_error,
     search_failure_kind,
 )
 
@@ -80,15 +84,26 @@ class Search:
     gasta-se antes de tudo, seja qual for a peça; depois o guião da peça
     (pela chave: o tokenId ou o contrato); depois `then`."""
 
-    def __init__(self, script=None, *, first=(), then="ok"):
+    def __init__(self, script=None, *, first=(), then="ok", control=()):
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.first = list(first)
         self.then = then
         self.asking = ""           # "chain:contract:tokenId", posto pela guarda
         self.tids: list[int] = []            # um por pedido
         self.contracts: list[str] = []       # idem
+        # a pesquisa de controlo (10/10): o seu guião (excepções a levantar,
+        # uma por pedido; depois responde) e quantas vezes foi feita
+        self.control = list(control)
+        self.control_then = None
+        self.controls = 0
 
     def named_items(self, base):
+        if base == SEARCH_CONTROL_QUERY:
+            self.controls += 1
+            step = self.control.pop(0) if self.control else self.control_then
+            if isinstance(step, BaseException):
+                raise step
+            return []
         _chain, contract, tid = self.asking.split(":")
         self.tids.append(int(tid))
         self.contracts.append(contract)
@@ -116,10 +131,12 @@ class Guard(MarketNameUniqueness):
         return super().__call__(base, chain, contract, token_id)
 
 
-def guard(script=None, *, first=(), then="ok", retries=2) -> Guard:
-    """Três pedidos por pergunta, como em produção; sem esperar entre eles."""
-    return Guard(search=Search(script, first=first, then=then), page_size=50,
-                 retries=retries, sleep_s=0.0)
+def guard(script=None, *, first=(), then="ok", retries=2, control=(), **kw) -> Guard:
+    """Três pedidos por pergunta, como em produção; sem esperar entre eles.
+    `control`: o que a pesquisa de controlo faz, pedido a pedido (por
+    omissão, responde sempre)."""
+    return Guard(search=Search(script, first=first, then=then, control=control),
+                 page_size=50, retries=retries, sleep_s=0.0, **kw)
 
 
 class Clock:
@@ -135,7 +152,7 @@ class Clock:
         self.now += seconds
 
 
-def finder(g, *, clock=None, gap=0.0, image_takes=0.0):
+def finder(g, *, clock=None, gap=0.0, third=0.0, image_takes=0.0):
     """Um finder com a guarda verdadeira. `image_takes`: quanto o relógio
     anda em cada teste de imagem — é assim que o tempo passa numa corrida."""
     clock = clock or Clock()
@@ -156,7 +173,8 @@ def finder(g, *, clock=None, gap=0.0, image_takes=0.0):
         read_token=lambda c, k, t: TokenRead(
             token_uri=IPFS, metadata={"name": f"Name {t} Two", "image": IPFS}),
         probe_image=probe_image, owner_is_eoa=owner_is_eoa, name_is_unique=g,
-        rng=random.Random(0), retry_gap_s=gap, sleep=clock.sleep, clock=clock)
+        rng=random.Random(0), retry_gap_s=gap, third_gap_s=third,
+        sleep=clock.sleep, clock=clock)
     return f, calls, clock
 
 
@@ -196,7 +214,8 @@ def test_a_search_that_failed_says_how(exc, kind):
     assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None        # the answer is what it was
     assert g.stats["transport"] == 1
     assert g.last_transport == (kind,)
-    assert g.failed_requests == {kind: 3}                          # every request, not every check
+    # every request, not every check — and a 5xx is asked once (see section 6)
+    assert g.failed_requests == {kind: 1 if is_server_error(kind) else 3}
 
 
 @pytest.mark.parametrize("body", ["<html>Just a moment…</html>", "", "[]", '{"errors": ["x"]}'])
@@ -303,7 +322,8 @@ def test_prepare_keeps_every_target_when_the_search_is_down(make, how):
                     "MANTIDO na despensa, tento outro" for m in kept)
     assert not any("descartado" in m for m in said)
     assert world.full_reads == []                           # nothing went on to the artwork
-    assert g.stats["transport"] == 6 and len(g._search.tids) == 18
+    assert g.stats["transport"] == 6
+    assert len(g._search.tids) == 6 * (1 if is_server_error(how) else 3)
 
 
 def test_a_search_that_comes_back_costs_no_target():
@@ -367,8 +387,8 @@ def test_a_candidate_the_search_did_not_answer_is_asked_again_at_the_end():
     g = guard({2: [_timeout()] * 3})
     rep, larder, calls, _clock, _said = deposit(g, [1, 2, 3])
     assert rep.added == 3 and larder.size() == 3            # it used to be 2: a good one lost
-    assert rep.second.asked == 1 and rep.second.rescued == 1
-    assert rep.second.failed == {"timeout": 3}
+    assert rep.search.second_asked == 1 and rep.search.second_rescued == 1
+    assert rep.search.failed == {"timeout": 3}
     assert rep.rejected.unique == 0 and rep.rejected.found == 3
     # the order: 1, then 2 (three requests, no answer), then 3 — and ONLY THEN 2 again
     assert g._search.tids == [1, 2, 2, 2, 3, 2]
@@ -385,24 +405,35 @@ def test_the_free_checks_are_not_repeated_only_the_search_is():
     assert len(calls["image"]) == 3 and calls["eoa"] == [1, 2, 3]
 
 
-def test_a_second_failure_is_ours_with_its_kind_and_it_is_asked_only_once_more():
-    g = guard({2: [_http_error(429)] * 3 + [_timeout()] * 3 + ["ok"]})
+def test_a_second_failure_gets_a_third_and_last_pass():
+    g = guard({2: [_http_error(429)] * 3 + [_timeout()] * 3})     # then it answers
+    rep, larder, calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert rep.added == 3 and larder.size() == 3
+    assert (rep.search.second_asked, rep.search.second_rescued) == (1, 0)
+    assert (rep.search.third_asked, rep.search.third_rescued) == (1, 1)
+    assert g._search.tids == [1, 2, 2, 2, 3, 2, 2, 2, 2]
+    assert rep.rejected.unique == 0 and rep.rejected.found == 3
+    assert len(calls["image"]) == 3 and calls["eoa"] == [1, 2, 3]   # still only the search
+    out = rep.render()
+    assert "pesquisa do único: 6 pedido(s) falhado(s) (429 3, timeout 3)" in out
+    assert "2.ª volta: 1 repetido(s), 0 salvo(s) · 3.ª volta: 1 repetido(s), 1 salvo(s)" in out
+    assert "rede-NOSSO" not in out and "índice-cego" not in out
+
+
+def test_a_third_failure_is_final_and_there_is_never_a_fourth_pass():
+    g = guard({2: [_timeout()] * 9 + ["ok"]}, control=[_timeout()])
     rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
-    assert rep.added == 2 and larder.size() == 2
-    assert rep.second.asked == 1 and rep.second.rescued == 0
-    assert g._search.tids == [1, 2, 2, 2, 3, 2, 2, 2]       # never a third round
+    assert larder.size() == 2
+    assert g._search.tids == [1, 2, 2, 2, 3] + [2] * 6            # nine in all, never a tenth
+    assert (rep.search.third_asked, rep.search.third_rescued) == (1, 0)
     assert rep.rejected.unique == 1
     assert rep.rejected.unique_kinds == {"rede-NOSSO:timeout": 1}
-    out = rep.render()
-    assert "único 1 (rede-NOSSO:timeout 1)" in out
-    assert "pesquisa do único: 6 pedido(s) falhado(s) (429 3, timeout 3)" in out
-    assert "2.ª volta: 1 repetido(s), 0 salvo(s)" in out
 
 
 def test_a_verdict_on_the_second_pass_is_the_verdict_it_is():
     g = guard({2: [_timeout()] * 3 + ["namesake"]})
     rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
-    assert larder.size() == 2 and rep.second.rescued == 0
+    assert larder.size() == 2 and rep.search.second_rescued == 0
     assert rep.rejected.unique_kinds == {"não-único": 1}
 
 
@@ -411,8 +442,8 @@ def test_a_candidate_with_a_verdict_is_never_asked_again():
         g = guard({2: [then]})
         rep, larder, _calls, clock, said = deposit(g, [1, 2, 3], gap=60.0)
         assert larder.size() == 2 and rep.rejected.unique_kinds == {kind: 1}
-        assert rep.second.asked == 0 and g._search.tids == [1, 2, 3]
-        assert clock.slept == [] and rep.second.render() == ""
+        assert rep.search.second_asked == 0 and g._search.tids == [1, 2, 3]
+        assert clock.slept == [] and rep.search.render() == ""
         assert not any("volto a perguntar" in m for m in said)
 
 
@@ -421,21 +452,21 @@ def test_the_second_pass_waits_for_the_window_and_no_longer():
     espera 40 e pergunta."""
     g = guard({1: [_timeout()] * 3})
     rep, _larder, _calls, clock, _said = deposit(g, [1, 2, 3], gap=60.0, image_takes=10.0)
-    assert clock.slept == [40.0] and rep.second.rescued == 1
+    assert clock.slept == [40.0] and rep.search.second_rescued == 1
 
 
 def test_a_run_longer_than_the_window_does_not_wait_at_all():
     g = guard({1: [_timeout()] * 3})
     rep, _larder, _calls, clock, _said = deposit(g, list(range(1, 10)), gap=60.0,
                                                  image_takes=10.0)
-    assert clock.slept == [] and rep.second.rescued == 1
+    assert clock.slept == [] and rep.search.second_rescued == 1
 
 
 def test_several_waiting_never_add_up_to_more_than_one_window():
     g = guard({1: [_timeout()] * 3, 2: [_timeout()] * 3})
     rep, _larder, _calls, clock, _said = deposit(g, [1, 2, 3], gap=60.0, image_takes=10.0)
     assert clock.slept == [40.0, 10.0] and sum(clock.slept) <= 60.0
-    assert rep.second.asked == 2 and rep.second.rescued == 2
+    assert rep.search.second_asked == 2 and rep.search.second_rescued == 2
 
 
 def test_the_window_is_the_one_measured_and_production_does_not_shorten_it():
@@ -448,7 +479,7 @@ def test_the_window_is_the_one_measured_and_production_does_not_shorten_it():
     for f in (w.finder, probe_finder):
         assert f._retry_gap == 60.0 and f._sleep is time.sleep       # noqa: SLF001
         assert isinstance(f._name_is_unique, MarketNameUniqueness)   # noqa: SLF001
-        assert f.search_failures() == {}
+        assert f.search_counters() == {"failed": {}, "speed": {}, "control": {}}
 
 
 def test_the_operator_is_told_once_in_counts():
@@ -501,27 +532,32 @@ def test_a_guard_that_does_not_say_how_is_still_ours():
             return None
 
     rep, larder, _calls, _clock, _said = deposit(Mute(), [1])
-    assert larder.size() == 0 and rep.second.asked == 1 and rep.second.rescued == 0
+    assert larder.size() == 0
+    assert (rep.search.second_asked, rep.search.third_asked) == (1, 1)
+    # no control, so nothing says "it is the name": it stays ours to the end
     assert rep.rejected.unique_kinds == {"rede-NOSSO": 1}
-    assert rep.second.render() == "2.ª volta: 1 repetido(s), 0 salvo(s)"
+    assert rep.search.render() == ("2.ª volta: 1 repetido(s), 0 salvo(s) · "
+                                   "3.ª volta: 1 repetido(s), 0 salvo(s)")
 
 
 def test_a_none_nobody_can_explain_is_not_asked_again():
     rep, larder, _calls, _clock, _said = deposit(lambda *a: None, [1])
-    assert larder.size() == 0 and rep.second.asked == 0
+    assert larder.size() == 0 and rep.search.second_asked == 0
     assert rep.rejected.unique_kinds == {"sem-veredicto": 1}
 
 
 def test_the_search_line_is_empty_when_nothing_failed():
     rep, _larder, _calls, _clock, _said = deposit(guard(), [1, 2])
-    assert rep.second == SecondPass() and "pesquisa" not in rep.render()
+    assert rep.search == SearchPasses() and "pesquisa" not in rep.render()
     assert "2.ª volta" not in rep.render()
 
 
 def test_a_recovered_request_shows_in_the_report_without_a_second_pass():
     rep, larder, _calls, _clock, _said = deposit(guard({2: [_http_error(429)]}), [1, 2])
-    assert larder.size() == 2 and rep.second.asked == 0
-    assert rep.render().endswith("pesquisa do único: 1 pedido(s) falhado(s) (429 1)")
+    assert larder.size() == 2 and rep.search.second_asked == 0
+    assert rep.render().endswith(
+        "pesquisa do único: 1 pedido(s) falhado(s) (429 1) — rápidos 1, lentos 0")
+    assert rep.search.control == {}                    # the question was answered: no control
 
 
 def test_each_run_reports_its_own_failures_not_the_process_s():
@@ -529,7 +565,11 @@ def test_each_run_reports_its_own_failures_not_the_process_s():
     f, _calls, _clock = finder(g)
     first = f.deposit(Larder(), [ref(1)], chain_ok=lambda c: True)
     second = f.deposit(Larder(), [ref(2)], chain_ok=lambda c: True)
-    assert first.second.failed == {"timeout": 3} and second.second.failed == {}
+    assert first.search.failed == {"timeout": 3} and second.search.failed == {}
+    # the same for what the control answered and for how fast the requests failed
+    assert first.search.control == {"respondeu": 1} and second.search.control == {}
+    assert first.search.speed == {"rápidos": 3} and second.search.speed == {}
+    assert second.search == SearchPasses()
 
 
 # --------------------------------------------------------------------------- #
@@ -594,12 +634,13 @@ def test_the_probe_asks_again_at_the_end_and_the_columns_still_add_up():
     # "como hoje" keeps what stops the piece TODAY, also for the one that waited
     assert rep.today.passed == 0
     assert rep.today.causes == {("tokenURI fora de IPFS", "arweave"): 3}
-    assert rep.second.asked == 1 and rep.second.rescued == 1
-    assert rep.second.failed == {"timeout": 3}
+    assert rep.search.second_asked == 1 and rep.search.second_rescued == 1
+    assert rep.search.failed == {"timeout": 3}
     assert g._search.contracts == [addr(1), addr(2), addr(2), addr(2), addr(3), addr(2)]
     out = rep.render()
-    assert out.splitlines()[-1] == ("pesquisa do único: 3 pedido(s) falhado(s) (timeout 3)"
-                                    " · 2.ª volta: 1 repetido(s), 1 salvo(s)")
+    assert out.splitlines()[-1] == (
+        "pesquisa do único: 3 pedido(s) falhado(s) (timeout 3) — rápidos 3, lentos 0"
+        " · controlo: respondeu 1, falhou 0 · 2.ª volta: 1 repetido(s), 1 salvo(s)")
     (line,) = [m for m in said if "volto a perguntar" in m]
     assert line.startswith("probe manifold: 1 peça(s) sem resposta da pesquisa do nome")
     assert not ADDRESS.search(out + line) and "Grease" not in out + line
@@ -607,35 +648,359 @@ def test_the_probe_asks_again_at_the_end_and_the_columns_still_add_up():
 
 def test_a_piece_the_larder_accepts_today_passes_in_both_columns_when_rescued():
     chain, order = _three(IPFS_META)
-    p, _clock = probe(chain, order, guard({addr(3): [_http_error(503)] * 3}))
+    p, _clock = probe(chain, order, guard({addr(3): [_http_error(503)]}))
     rep = p.run(3)
     assert rep.today.passed == 3 and rep.with_arweave.passed == 3
-    assert rep.second.rescued == 1 and not rep.today.causes
+    assert rep.search.second_rescued == 1 and not rep.today.causes
 
 
-def test_the_probe_names_a_second_failure_with_its_kind():
+def test_the_probe_names_what_failed_three_times_with_its_kind():
     chain, order = _three()
-    p, _clock = probe(chain, order, guard({addr(2): [_http_error(429)] * 6}))
-    rep = p.run(3)
+    g = guard({addr(2): [_http_error(429)] * 9}, control=[_http_error(429)])
+    p, _clock = probe(chain, order, g)
+    said: list[str] = []
+    rep = p.run(3, notify=said.append)
     assert rep.with_arweave.passed == 2
     assert rep.with_arweave.causes == {("único", "rede-NOSSO:429"): 1}
     assert sum(rep.with_arweave.causes.values()) + rep.with_arweave.passed == rep.tested
     assert sum(rep.today.causes.values()) + rep.today.passed == rep.tested
     out = rep.render()
     assert "com Arweave: passariam 2 de 3 — único 1 (rede-NOSSO:429 1)" in out
-    assert "2.ª volta: 1 repetido(s), 0 salvo(s)" in out
+    assert "2.ª volta: 1 repetido(s), 0 salvo(s) · 3.ª volta: 1 repetido(s), 0 salvo(s)" in out
+    assert "controlo: respondeu 2, falhou 1" in out
+    (third,) = [m for m in said if "3.ª e última volta" in m]
+    assert third.startswith("probe manifold: 1 peça(s) sem resposta outra vez")
+
+
+def test_the_probe_calls_it_a_blind_index_when_it_is_the_name():
+    chain, order = _three()
+    p, _clock = probe(chain, order, guard({addr(2): [_http_error(503)] * 3}))
+    rep = p.run(3)
+    cause = {("único", "índice-cego:pesquisa-503"): 1}
+    assert rep.with_arweave.causes == cause and rep.with_arweave.passed == 2
+    assert "único 1 (índice-cego:pesquisa-503 1)" in rep.render()
 
 
 def test_the_probe_waits_for_the_window_too():
     chain, order = _three()
     p, clock = probe(chain, order, guard({addr(3): [_timeout()] * 3}), gap=60.0)
     rep = p.run(3)
-    assert clock.slept == [60.0] and rep.second.rescued == 1
+    assert clock.slept == [60.0] and rep.search.second_rescued == 1
 
 
 def test_a_probe_where_nothing_failed_reads_as_before():
     chain, order = _three()
     p, clock = probe(chain, order, guard(), gap=60.0)
     rep = p.run(3)
-    assert rep.second == SecondPass() and clock.slept == []
+    assert rep.search == SearchPasses() and clock.slept == []
     assert len(rep.render().splitlines()) == 3              # the head and the two columns
+
+
+# --------------------------------------------------------------------------- #
+# 6. O 503 (10/10, depois de medido): controlo, sem repetições rápidas, 3.ª    #
+#    volta — e "é o nome" passa a índice-cego                                  #
+# --------------------------------------------------------------------------- #
+#
+# O 1.º /harvest manifold 150 disse o tipo: 25 pedidos falhados, todos 503; 24
+# deles em 8 perguntas que falharam nas três tentativas (5 na 1.ª volta, 3 na
+# 2.ª). As duas repetições rápidas salvaram, no máximo, 1 pergunta em 9;
+# esperar um minuto deu resposta a 2 em 5. E os números não separavam o NOME
+# (a pesquisa a falhar para aquela pergunta) do MOMENTO (a pesquisa em baixo
+# para toda a gente). Decisões do Pedro:
+#   · uma pesquisa de CONTROLO depois de cada pergunta falhada;
+#   · num 5xx, NÃO repetir dentro da pergunta — a espera é a das voltas;
+#   · uma 3.ª e última volta, cinco minutos depois, para quem falhou duas;
+#   · se o controlo respondeu sempre e a 3.ª volta não salvou: é o nome —
+#     conta como índice-cego (o mercado não pesquisa aquele nome).
+
+
+@pytest.mark.parametrize("kind, yes", [
+    ("500", True), ("502", True), ("503", True), ("599", True),
+    ("429", False), ("400", False), ("404", False), ("timeout", False),
+    ("ligação", False), ("corpo-ilegível", False), ("5030", False), ("50", False),
+    ("", False), ("outro:KeyError", False),
+])
+def test_a_server_error_is_a_5xx_and_nothing_else(kind, yes):
+    assert is_server_error(kind) is yes
+
+
+@pytest.mark.parametrize("code", [500, 502, 503, 504])
+def test_a_5xx_is_asked_once_inside_the_question(code):
+    g = guard(then=_http_error(code))
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert g._search.tids == [7]                              # one request, no quick retry
+    assert g.failed_requests == {str(code): 1} and g.last_transport == (str(code),)
+
+
+def test_what_is_not_a_5xx_keeps_its_three_attempts():
+    for exc, kind in ((_http_error(429), "429"), (_timeout(), "timeout"),
+                      (_http_error(400), "400")):
+        g = guard(then=exc)
+        assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+        assert g._search.tids == [7, 7, 7] and g.failed_requests == {kind: 3}
+
+
+def test_a_5xx_ends_the_question_wherever_it_comes():
+    g = guard({7: [_http_error(429), _http_error(503), "ok"]})
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert g._search.tids == [7, 7]                           # the "ok" was never asked for
+    assert g.last_transport == ("429", "503")
+    assert g.failed_requests == {"429": 1, "503": 1}
+
+
+def test_the_guard_s_pauses_are_not_spent_on_a_5xx(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    g = Guard(search=Search(then=_http_error(503)), page_size=50)       # production pauses
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and slept == []
+    g = Guard(search=Search(then=_timeout()), page_size=50)
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and slept == [2.0, 4.0]
+
+
+def test_the_control_is_asked_once_after_a_question_that_failed():
+    g = guard(then=_http_error(503))
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert g._search.controls == 1 and g.last_control is True         # it answered: the name
+    assert g.control == {"respondeu": 1}
+    assert g.failed_requests == {"503": 1}                            # the control is not a failure
+
+
+def test_a_control_that_fails_too_says_it_is_the_moment():
+    g = guard(then=_http_error(503), control=[_http_error(503)])
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert g.last_control is False and g.control == {"falhou": 1}
+    assert g._search.controls == 1                                    # never retried
+    assert g.failed_requests == {"503": 1}                            # only the name's request
+
+
+def test_no_control_is_asked_when_the_question_was_answered():
+    for then in ("ok", "namesake", "blind"):
+        g = guard(then=then)
+        g("Salt Harbor", "ethereum", "0xaaa", 7)
+        assert g._search.controls == 0 and g.last_control is None and g.control == {}
+    recovered = guard({7: [_http_error(429)]})
+    assert recovered("Salt Harbor", "ethereum", "0xaaa", 7) is True
+    assert recovered._search.controls == 0 and recovered.last_control is None
+
+
+def test_the_control_s_answer_is_about_the_last_question_only():
+    g = guard({7: [_http_error(503)]})
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and g.last_control is True
+    assert g("Salt Harbor", "ethereum", "0xaaa", 8) is True and g.last_control is None
+
+
+def test_a_guard_without_a_control_asks_nothing():
+    g = guard(then=_http_error(503), control_query=None)
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    assert g._search.controls == 0 and g.last_control is None and g.control == {}
+
+
+def test_the_control_is_a_fixed_text_and_nobody_s_name():
+    assert SEARCH_CONTROL_QUERY == "finding memeland"
+    asked: list[str] = []
+
+    class Recording(Search):
+        def named_items(self, base):
+            asked.append(base)
+            return super().named_items(base)
+
+    g = Guard(search=Recording(then=_http_error(503)), page_size=50, sleep_s=0.0)
+    g("Quiet Lantern Above", "ethereum", "0xaaa", 7)
+    assert asked == ["Quiet Lantern Above", SEARCH_CONTROL_QUERY]
+
+
+def test_a_control_that_blows_up_never_breaks_the_verdict_nor_leaks():
+    g = guard(then=_http_error(503), control=[KeyError(SECRET)])
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+    shown = repr(g.stats) + repr(g.control) + repr(g.failed_requests) + repr(g.failed_speed)
+    assert g.last_control is False and SECRET not in shown
+
+
+def test_a_failed_request_is_counted_as_fast_or_slow():
+    clock = Clock()
+
+    class Slow(Search):
+        def named_items(self, base):
+            clock.now += self.takes
+            return super().named_items(base)
+
+    search = Slow(then=_http_error(503))
+    search.takes = SLOW_FAILURE_S - 0.5
+    g = Guard(search=search, page_size=50, sleep_s=0.0, clock=clock)
+    g("Salt Harbor", "ethereum", "0xaaa", 7)
+    assert g.failed_speed == {"rápidos": 1}
+    search.takes = SLOW_FAILURE_S
+    g("Salt Harbor", "ethereum", "0xaaa", 8)
+    assert g.failed_speed == {"rápidos": 1, "lentos": 1}
+    assert sum(g.failed_speed.values()) == sum(g.failed_requests.values())
+
+
+# -- as três voltas ---------------------------------------------------------- #
+
+
+def test_three_failures_with_the_control_answering_is_the_name_a_blind_index():
+    g = guard({2: [_http_error(503)] * 3})
+    rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert larder.size() == 2 and g._search.tids == [1, 2, 3, 2, 2]
+    assert g._search.controls == 3
+    assert rep.rejected.unique_kinds == {"índice-cego:pesquisa-503": 1}
+    out = rep.render()
+    assert "único 1 (índice-cego:pesquisa-503 1)" in out and "rede-NOSSO" not in out
+    assert out.endswith(
+        "pesquisa do único: 3 pedido(s) falhado(s) (503 3) — rápidos 3, lentos 0 · "
+        "controlo: respondeu 3, falhou 0 · 2.ª volta: 1 repetido(s), 0 salvo(s) · "
+        "3.ª volta: 1 repetido(s), 0 salvo(s)")
+
+
+@pytest.mark.parametrize("control", [
+    [_http_error(503)],                        # the control failed after the 1st failure
+    [None, _http_error(503)],                  # …after the 2nd
+    [None, None, _http_error(503)],            # …after the 3rd
+    [_timeout(), _timeout(), _timeout()],      # every time
+])
+def test_one_failed_control_is_enough_to_keep_it_ours(control):
+    """Se a pesquisa esteve em baixo para todos em qualquer das três, nada
+    se soube sobre a peça: fica nosso."""
+    g = guard({2: [_http_error(503)] * 3}, control=control)
+    rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert larder.size() == 2
+    assert rep.rejected.unique_kinds == {"rede-NOSSO:503": 1}
+    assert "índice-cego" not in rep.render()
+
+
+def test_without_a_control_nothing_ever_becomes_a_blind_index():
+    g = guard({2: [_http_error(503)] * 3}, control_query=None)
+    rep, _larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert rep.rejected.unique_kinds == {"rede-NOSSO:503": 1}
+    assert "controlo" not in rep.render()
+
+
+def test_a_candidate_rescued_on_the_third_pass_is_no_blind_index():
+    g = guard({2: [_http_error(503)] * 2})
+    rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert larder.size() == 3 and rep.rejected.unique == 0
+    assert (rep.search.third_asked, rep.search.third_rescued) == (1, 1)
+    assert rep.search.control == {"respondeu": 2}
+
+
+def test_a_verdict_on_the_third_pass_is_the_verdict_it_is():
+    g = guard({2: [_http_error(503)] * 2 + ["namesake"]})
+    rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
+    assert larder.size() == 2 and rep.rejected.unique_kinds == {"não-único": 1}
+
+
+def test_the_third_pass_waits_five_minutes_from_the_second_failure():
+    """A falha foi aos 10 s, a corrida acabou aos 30 s: espera 40 e pergunta
+    (2.ª volta, aos 70 s); falha outra vez: espera 300 e pergunta (3.ª)."""
+    g = guard({1: [_http_error(503)] * 2})
+    rep, _larder, _calls, clock, _said = deposit(g, [1, 2, 3], gap=60.0, third=300.0,
+                                                 image_takes=10.0)
+    assert clock.slept == [40.0, 300.0] and rep.search.third_rescued == 1
+
+
+def test_several_waiting_for_the_third_pass_wait_once_between_them():
+    g = guard({1: [_http_error(503)] * 2, 2: [_http_error(503)] * 2})
+    rep, _larder, _calls, clock, _said = deposit(g, [1, 2, 3], gap=60.0, third=300.0,
+                                                 image_takes=10.0)
+    assert rep.search.third_rescued == 2
+    # each one five minutes after ITS second failure: together, one window
+    assert clock.slept == [40.0, 10.0, 290.0, 10.0]
+    assert sum(clock.slept[:2]) <= 60.0 and sum(clock.slept[2:]) == 300.0
+
+
+def test_the_gaps_are_the_ones_decided_and_production_does_not_shorten_them():
+    assert THIRD_PASS_GAP_S == 300.0 and SECOND_PASS_GAP_S == 60.0
+    w = _built()
+    for f in (w.finder, w.probes["manifold"]._finder):               # noqa: SLF001
+        assert (f._retry_gap, f._third_gap) == (60.0, 300.0)         # noqa: SLF001
+        assert f._name_is_unique._control_query == SEARCH_CONTROL_QUERY   # noqa: SLF001
+
+
+def test_the_operator_is_told_of_each_pass_in_counts():
+    g = guard({1: [_http_error(503)] * 3, 3: [_http_error(503)]})
+    _rep, _larder, _calls, _clock, said = deposit(g, [1, 2, 3])
+    (second,) = [m for m in said if "volto a perguntar" in m]
+    (third,) = [m for m in said if "3.ª e última volta" in m]
+    assert second.startswith("deposit: 2 candidato(s) sem resposta da pesquisa do nome")
+    assert third.startswith("deposit: 1 candidato(s) sem resposta outra vez")
+    assert said.index(second) < said.index(third)
+    assert not ADDRESS.search(" ".join(said)) and "Name" not in " ".join(said)
+
+
+def test_what_waits_carries_what_the_control_said_and_still_shows_nothing():
+    g = guard(then=_http_error(503), control=[None, _http_error(503)])
+    f, _calls, _clock = finder(g)
+    src = Source("deposit", "ethereum", A)
+    tally = Tally()
+    read, base = f.named_token(src, 5, tally)
+    first = f.verify(src, 5, read, base, tally, defer=True)
+    assert (first.passes, first.controls, first.how) == (1, (True,), "503")
+    second = f.ask_again(first, tally, last=False)
+    assert isinstance(second, Pending)
+    assert (second.passes, second.controls) == (2, (True, False))
+    assert tally.unique == 0                                 # still no cause
+    assert f.ask_again(second, tally, last=True) is None
+    assert tally.unique_kinds == {"rede-NOSSO:503": 1}       # one control failed: ours
+    assert repr(second) == "Pending(<candidate>)"
+
+
+def test_two_passes_alone_never_make_a_blind_index():
+    """A regra pede as TRÊS falhas com o controlo a responder: quem chamar a
+    última volta mais cedo não condena ninguém."""
+    g = guard(then=_http_error(503))
+    f, _calls, _clock = finder(g)
+    src = Source("deposit", "ethereum", A)
+    tally = Tally()
+    read, base = f.named_token(src, 5, tally)
+    first = f.verify(src, 5, read, base, tally, defer=True)
+    assert f.ask_again(first, tally, last=True) is None
+    assert tally.unique_kinds == {"rede-NOSSO:503": 1}
+
+
+# -- o que NÃO mudou --------------------------------------------------------- #
+
+
+def test_prepare_keeps_the_target_whatever_the_control_says():
+    """No /prepare não há voltas: um 503 mantém o alvo, e o controlo é só
+    medição — "é o nome" nunca gasta um alvo da despensa."""
+    for control in ((), [_http_error(503)] * 6):
+        world, g, f, larder = _larder_of(8, then=_http_error(503))
+        g._search.control = list(control)
+        with pytest.raises(PrepareRefused) as e:
+            _preparer(world, f).prepare(larder)
+        assert larder.size() == 8 and "despensa INTACTA" in str(e.value)
+        assert g._search.controls == 6
+
+
+def test_the_fill_counts_a_lost_draw_as_ours_whatever_the_control_says():
+    g = guard(then=_http_error(503))
+    f, _calls, clock = finder(g, gap=60.0, third=300.0)
+    tally = f.fill(Larder(), want=1, max_draws=3)
+    assert tally.unique_kinds == {"rede-NOSSO:503": 3} and clock.slept == []
+
+
+def test_the_probe_gives_each_waiting_piece_its_own_outcome():
+    """Três peças à espera, três fins diferentes: salva na 2.ª volta, salva
+    na 3.ª, e a que nunca responde — cada uma na sua coluna, pela ordem."""
+    chain, order = _three()
+    g = guard({addr(1): [_http_error(503)], addr(2): [_http_error(503)] * 2,
+               addr(3): [_http_error(503)] * 3})
+    p, _clock = probe(chain, order, g)
+    rep = p.run(3)
+    assert rep.with_arweave.passed == 2
+    assert rep.with_arweave.causes == {("único", "índice-cego:pesquisa-503"): 1}
+    assert (rep.search.second_asked, rep.search.second_rescued) == (3, 1)
+    assert (rep.search.third_asked, rep.search.third_rescued) == (2, 1)
+    assert rep.search.failed == {"503": 6} and rep.search.control == {"respondeu": 6}
+    assert sum(rep.today.causes.values()) + rep.today.passed == rep.tested == 3
+
+
+def test_the_deposit_gives_each_waiting_candidate_its_own_outcome():
+    g = guard({1: [_http_error(503)], 2: [_http_error(503)] * 2,
+               3: [_http_error(503)] * 3, 4: ["namesake"]})
+    rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3, 4, 5])
+    assert sorted(c.token_id for c in larder.candidates) == [1, 2, 5]
+    assert rep.added == 3 and rep.rejected.found == 3
+    assert rep.rejected.unique_kinds == {"não-único": 1, "índice-cego:pesquisa-503": 1}
+    assert (rep.search.second_asked, rep.search.second_rescued) == (3, 1)
+    assert (rep.search.third_asked, rep.search.third_rescued) == (2, 1)

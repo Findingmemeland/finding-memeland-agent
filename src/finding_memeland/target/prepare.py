@@ -473,6 +473,13 @@ _OWNER_OURS = _OWNER_REASONS["transport"]
 # The same for every kind of failure: what to do PER kind waits for the first
 # reports that name the kind.
 SECOND_PASS_GAP_S = 60.0
+# THE THIRD PASS, AND THE LAST (10/10, once the kind was measured: 503). In
+# the first harvest that counted, a minute's wait got an answer for 2 of the
+# 5 candidates asked again and the other 3 failed three attempts out of three
+# a second time. They are asked ONE more time, this long after that second
+# failure — and what still fails then is told apart by the control search:
+# the moment (ours), or the name (the marketplace cannot search it).
+THIRD_PASS_GAP_S = 300.0
 
 
 def _transport_how(guard) -> str:
@@ -486,11 +493,28 @@ def _transport_how(guard) -> str:
     return "+".join(str(k) for k in kinds if k)
 
 
-def _failed_requests(guard) -> dict:
-    """The guard's count of failed search REQUESTS by kind, copied — so the
-    difference between two moments is one run's."""
-    got = getattr(guard, "failed_requests", None)
-    return dict(got) if isinstance(got, dict) else {}
+_SEARCH_COUNTERS = (("failed", "failed_requests"), ("speed", "failed_speed"),
+                    ("control", "control"))
+
+
+def _search_counters(guard) -> dict:
+    """What the uniqueness guard has counted about its own requests so far —
+    failed ones by kind, by speed, and what the control search answered —
+    copied, so the difference between two moments is one run's. Empty
+    counters for a guard that does not count."""
+    out = {}
+    for name, attr in _SEARCH_COUNTERS:
+        got = getattr(guard, attr, None)
+        out[name] = dict(got) if isinstance(got, dict) else {}
+    return out
+
+
+def _last_control(guard) -> bool | None:
+    """What the control search said after the guard's last failed question:
+    True (it answered — the name), False (it failed too — the moment), None
+    (no control, or a guard that has none)."""
+    got = getattr(guard, "last_control", None)
+    return got if isinstance(got, bool) else None
 
 
 def _moved(before: dict, after: dict) -> dict:
@@ -548,15 +572,19 @@ def _reason(guard, before: dict | None, answer, labels: dict, *,
 class Pending:
     """A candidate whose ONLY failure so far is ours: every free check passed
     and the uniqueness search did not answer. It waits in memory for the end
-    of the run, is asked once more, and is gone — never written anywhere and
-    never rendered: it holds a name."""
+    of the run, is asked again — once, and once more if that fails too — and
+    is gone: never written anywhere and never rendered, for it holds a name."""
 
     src: Source
     tid: int
     read: object
     base: str
-    how: str = ""             # "timeout", "429+timeout"; "" = the guard does not say
+    how: str = ""             # "503", "429+timeout"; "" = the guard does not say
     at: float = 0.0           # the finder's clock when the search gave up
+    passes: int = 1           # passes in which the search did not answer it
+    # what the control search said after each of them: True = it answered
+    # (the name), False = it failed too (the moment), None = no control
+    controls: tuple = ()
 
     def __repr__(self) -> str:
         return "Pending(<candidate>)"
@@ -565,24 +593,45 @@ class Pending:
 
 
 @dataclass
-class SecondPass:
-    """What the uniqueness search cost one run on OUR side, in counts: the
-    requests that failed, by kind — including those a retry recovered from —
-    and what the second pass did with the candidates that got no answer."""
+class SearchPasses:
+    """What the uniqueness search cost one run on OUR side, in counts:
+      · `failed`  — the requests that failed, by kind, including those a
+                    retry recovered from; `speed` — the same requests as
+                    "rápidos" (turned away) / "lentos" (their search timed
+                    out);
+      · `control` — what the control search answered after each question
+                    that failed: "respondeu" (the name) / "falhou" (the
+                    moment);
+      · the second pass and the third: how many candidates were asked again
+        and how many turned out unique."""
 
-    asked: int = 0            # candidates asked again at the end of the run
-    rescued: int = 0          # …that turned out unique
     failed: dict = field(default_factory=dict)
+    speed: dict = field(default_factory=dict)
+    control: dict = field(default_factory=dict)
+    second_asked: int = 0
+    second_rescued: int = 0
+    third_asked: int = 0
+    third_rescued: int = 0
 
     def render(self) -> str:
         parts = []
         if self.failed:
             kinds = ", ".join(f"{k} {n}" for k, n in sorted(self.failed.items()))
-            parts.append(f"pesquisa do único: {sum(self.failed.values())} "
-                         f"pedido(s) falhado(s) ({kinds})")
-        if self.asked:
-            parts.append(f"2.ª volta: {self.asked} repetido(s), "
-                         f"{self.rescued} salvo(s)")
+            line = (f"pesquisa do único: {sum(self.failed.values())} "
+                    f"pedido(s) falhado(s) ({kinds})")
+            if self.speed:
+                line += (f" — rápidos {self.speed.get('rápidos', 0)}, "
+                         f"lentos {self.speed.get('lentos', 0)}")
+            parts.append(line)
+        if self.control:
+            parts.append(f"controlo: respondeu {self.control.get('respondeu', 0)}, "
+                         f"falhou {self.control.get('falhou', 0)}")
+        if self.second_asked:
+            parts.append(f"2.ª volta: {self.second_asked} repetido(s), "
+                         f"{self.second_rescued} salvo(s)")
+        if self.third_asked:
+            parts.append(f"3.ª volta: {self.third_asked} repetido(s), "
+                         f"{self.third_rescued} salvo(s)")
         return " · ".join(parts)
 
 
@@ -747,9 +796,9 @@ class DepositReport:
     chain_closed: int = 0
     closed_chains: set = field(default_factory=set)
     rejected: Tally = field(default_factory=Tally)
-    # the uniqueness search on OUR side (10/10): failed requests by kind and
-    # the second pass — see SecondPass
-    second: SecondPass = field(default_factory=SecondPass)
+    # the uniqueness search on OUR side (10/10): failed requests, the
+    # control search, the second and third passes — see SearchPasses
+    search: SearchPasses = field(default_factory=SearchPasses)
 
     def render(self) -> str:
         bits = [f"{self.added} guardado(s) de {self.asked}"]
@@ -761,7 +810,7 @@ class DepositReport:
             bits.append(f"cadeia sem provedor {self.chain_closed} "
                         f"({', '.join(sorted(self.closed_chains))})")
         for extra in (self.rejected.causes(), self.rejected.notes(),
-                      self.second.render()):
+                      self.search.render()):
             if extra:
                 bits.append(extra)
         return " · ".join(bits)
@@ -831,6 +880,7 @@ class TargetFinder:
                  accepts_uri: Callable[[str], bool] | None = None,
                  is_exposed: Callable[[str, int], bool] | None = None,
                  retry_gap_s: float = SECOND_PASS_GAP_S,
+                 third_gap_s: float = THIRD_PASS_GAP_S,
                  sleep: Callable[[float], None] | None = None,
                  clock: Callable[[], float] | None = None):
         if not sources:
@@ -838,6 +888,7 @@ class TargetFinder:
         # The second pass of the uniqueness search (10/10): how long after a
         # failure of ours it may be asked again, and the clock that says so.
         self._retry_gap = max(0.0, float(retry_gap_s))
+        self._third_gap = max(0.0, float(third_gap_s))
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
         # THE EXPOSED LIST (09/10, Pedro's "lista de queimados"): a token ever
@@ -1027,7 +1078,7 @@ class TargetFinder:
             RPC: the target stays in the larder;
           · `defer`  — the harvest and the probe: nothing is tallied yet and
             a Pending comes back, to be asked again at the end of the run
-            (`ask_again`). Only ever returned when `defer` is set;
+            (`later_passes`). Only ever returned when `defer` is set;
           · neither (the /fill) — a lost draw, counted as "rede-NOSSO" with
             how it failed. A redraw costs nothing.
 
@@ -1080,7 +1131,8 @@ class TargetFinder:
                 raise ReadUnavailable(step, step=step)
             if defer:
                 return Pending(src=src, tid=tid, read=read, base=base,
-                               how=ours, at=self._clock())
+                               how=ours, at=self._clock(),
+                               controls=(_last_control(self._name_is_unique),))
         tally.unique += 1
         tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
         return None
@@ -1142,29 +1194,89 @@ class TargetFinder:
             image=str(meta.get("image") or ""), token_uri=read.token_uri,
             artist=artist_of(meta), metadata=meta, found_at=self._now())
 
-    def search_failures(self, since: dict | None = None) -> dict:
-        """Failed uniqueness-search requests so far, by kind — a copy. With
-        `since` (an earlier copy), only what was added after it: one run's.
-        {} when the guard does not count."""
-        now = _failed_requests(self._name_is_unique)
-        return now if since is None else _moved(since, now)
+    def search_counters(self) -> dict:
+        """What the uniqueness guard has counted about its own requests so
+        far (`_search_counters`) — a copy, to bracket a run with."""
+        return _search_counters(self._name_is_unique)
 
-    def ask_again(self, pending: Pending, tally: Tally) -> Candidate | None:
-        """THE SECOND PASS, for one candidate (10/10): the uniqueness search
+    def search_since(self, before: dict, report: SearchPasses) -> None:
+        """Fill `report` with what the guard counted since `before`."""
+        now = self.search_counters()
+        report.failed = _moved(before["failed"], now["failed"])
+        report.speed = _moved(before["speed"], now["speed"])
+        report.control = _moved(before["control"], now["control"])
+
+    def ask_again(self, pending: Pending, tally: Tally, *,
+                  last: bool) -> Candidate | Pending | None:
+        """A LATER PASS, for one candidate (10/10): the uniqueness search
         once more and nothing else — the free checks passed minutes ago and
-        are not repeated. Not sooner than `retry_gap_s` after the search gave
-        up on it. Whatever comes back now is final: a verdict is tallied as
-        the verdict it is, and a second failure of ours as "rede-NOSSO"."""
-        wait = pending.at + self._retry_gap - self._clock()
+        are not repeated. Not sooner than the pass's gap after the search
+        gave up on it: a minute before the second, five before the third.
+
+        A verdict is tallied as the verdict it is. A failure of ours comes
+        back as a Pending to be asked again — unless this is the `last`
+        pass, and then it is final:
+          · "rede-NOSSO", with how it failed, when the control search failed
+            too at least once (the MOMENT: nothing was learnt about the
+            piece);
+          · "índice-cego:pesquisa-<how>" when the control answered after
+            EVERY one of the three failures (the NAME: the marketplace
+            searches, and cannot search this — nor can a player)."""
+        gap = self._retry_gap if pending.passes == 1 else self._third_gap
+        wait = pending.at + gap - self._clock()
         if wait > 0:
             self._sleep(wait)
-        uniq, label, _ours = self._unique(pending.src, pending.tid, pending.base)
+        uniq, label, ours = self._unique(pending.src, pending.tid, pending.base)
         if uniq is True:
             return self._candidate(pending.src, pending.tid, pending.read,
                                    pending.base)
+        if ours is not None:
+            controls = pending.controls + (_last_control(self._name_is_unique),)
+            if not last:
+                return Pending(src=pending.src, tid=pending.tid, read=pending.read,
+                               base=pending.base, how=ours, at=self._clock(),
+                               passes=pending.passes + 1, controls=controls)
+            if len(controls) >= 3 and all(c is True for c in controls):
+                label = "índice-cego:pesquisa" + (f"-{ours}" if ours else "")
         tally.unique += 1
         tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
         return None
+
+    def later_passes(self, waiting: Sequence[Pending], report: SearchPasses,
+                     tally_for: Callable[[int], Tally], *,
+                     notify: Callable[[str], None] | None = None,
+                     label: str = "deposit",
+                     what: str = "candidato(s)") -> list[Candidate | None]:
+        """THE SECOND PASS, and the THIRD for what failed twice — at the end
+        of a run, in memory, for the candidates the search did not answer.
+        Returns, for each of `waiting` in order, the Candidate it turned out
+        to be, or None; the final cause of a None is tallied in
+        `tally_for(i)`. Counts go to `report`. Nothing is kept."""
+        note = notify or (lambda _t: None)
+        results: list[Candidate | None] = [None] * len(waiting)
+        again: list[tuple[int, Pending]] = []
+        if waiting:
+            note(f"{label}: {len(waiting)} {what} sem resposta da pesquisa do "
+                 "nome (falha nossa) — volto a perguntar agora, no fim; pode "
+                 "demorar até um minuto")
+        for i, pending in enumerate(waiting):
+            report.second_asked += 1
+            got = self.ask_again(pending, tally_for(i), last=False)
+            if isinstance(got, Pending):
+                again.append((i, got))
+            elif got is not None:
+                report.second_rescued += 1
+                results[i] = got
+        if again:
+            note(f"{label}: {len(again)} {what} sem resposta outra vez — 3.ª e "
+                 "última volta; pode demorar até cinco minutos")
+        for i, pending in again:
+            report.third_asked += 1
+            got = self.ask_again(pending, tally_for(i), last=True)
+            if got is not None:
+                report.third_rescued += 1
+                results[i] = got
+        return results
 
     def fill(self, larder: Larder, want: int, *, max_draws: int = 400,
              notify: Callable[[str], None] | None = None, every: int = 25,
@@ -1238,19 +1350,20 @@ class TargetFinder:
         vez. As outras quatro verificações correm iguais; o /prepare relê
         antes de selar.
 
-        A SEGUNDA VOLTA (10/10). Um candidato que passou tudo e a quem a
-        pesquisa do nome não respondeu — falha NOSSA, não dele — não é
+        AS VOLTAS SEGUINTES (10/10). Um candidato que passou tudo e a quem
+        a pesquisa do nome não respondeu — falha NOSSA, não dele — não é
         deitado fora: fica à espera, em memória, e no fim da corrida
-        pergunta-se outra vez, uma vez. Só a pesquisa; as outras
-        verificações não se repetem. O relatório diz quantos pedidos
-        falharam e de que tipo, quantos candidatos se repetiram e quantos
-        se salvaram. Nada disto se grava."""
+        pergunta-se outra vez (2.ª volta); se falhar de novo, uma última vez
+        cinco minutos depois (3.ª). Só a pesquisa; as outras verificações
+        não se repetem. O relatório diz quantos pedidos falharam e de que
+        tipo, o que a pesquisa de controlo respondeu, quantos candidatos se
+        repetiram em cada volta e quantos se salvaram. Nada disto se grava."""
         note = notify or (lambda _t: None)
         ok = chain_ok or (lambda c: c in {s.chain for s in self._sources})
         known = {parse_ref(k): v for k, v in (known_reads or {}).items()}
         rep = DepositReport()
         waiting: list[Pending] = []
-        failed_before = self.search_failures()
+        search_before = self.search_counters()
         for raw in refs:
             rep.asked += 1
             parsed = parse_ref(raw)
@@ -1283,18 +1396,12 @@ class TargetFinder:
             if larder.add(cand):
                 rep.added += 1
                 rep.rejected.found += 1
-        if waiting:
-            note(f"deposit: {len(waiting)} candidato(s) sem resposta da pesquisa "
-                 "do nome (falha nossa) — volto a perguntar no fim, uma vez; "
-                 "pode demorar até um minuto")
-        for pending in waiting:
-            rep.second.asked += 1
-            cand = self.ask_again(pending, rep.rejected)
+        for cand in self.later_passes(waiting, rep.search, lambda _i: rep.rejected,
+                                      notify=note):
             if cand is not None and larder.add(cand):
                 rep.added += 1
                 rep.rejected.found += 1
-                rep.second.rescued += 1
-        rep.second.failed = self.search_failures(since=failed_before)
+        self.search_since(search_before, rep.search)
         note(f"deposit: {rep.render()} · despensa {larder.size()}")
         return rep
 
