@@ -63,7 +63,6 @@ from ..content.name_words import (
 )
 from ..content.relic_clues import (
     PUZZLE_ANGLES,
-    PUZZLE_CLUES,
     PUZZLE_PHASE_RULES,
     REVEAL_PHASE_RULES,
     RelicClueContext,
@@ -71,10 +70,11 @@ from ..content.relic_clues import (
     ClueGuardUnavailable,
     angle_for_unverifiable,
     enumerable_words_in,
+    puzzle_clues_of,
     relic_guidance_for,
-    relic_ramp_plan,
     relic_slot_for,
     spent_angles,
+    target_ramp_plan,
 )
 from .search_guard import ClueSearchGuard
 from .selector import ARTIST_KEYS, Target
@@ -354,7 +354,7 @@ def image_aspect_for(clue_index: int, ctx) -> str | None:
     plan takes the k-th aspect of a per-hunt permutation seeded by the name
     (stable across a crash-resume; distinct for every art piece by
     construction). None for name pieces and the reveal phase."""
-    plan = ctx.clue_facet_plan or relic_ramp_plan(ctx.display_name)
+    plan = ctx.clue_facet_plan or target_ramp_plan(ctx.display_name)
     if clue_index > len(plan) or plan[clue_index - 1][0] != "image":
         return None
     order = list(_ASPECT_ORDER)
@@ -477,7 +477,7 @@ def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
     """The whole declare-and-verify check for one draft (writer feedback)."""
     errs: list[str] = []
     facet, _ = relic_slot_for(clue_index, ctx)
-    puzzle = clue_index <= PUZZLE_CLUES
+    puzzle = clue_index <= puzzle_clues_of(ctx)
     # angle / aspect: declared == assigned
     if puzzle and facet != "image":
         assigned = angle_label(angle_for_unverifiable(clue_index, ctx))
@@ -604,7 +604,9 @@ class TargetClueContext(RelicClueContext):
             backstory=(target.description or "")[:400],
             solution_terms=sorted(set(terms)),
             enumerable_words=enumerable_words_in(target.name),
-            clue_facet_plan=relic_ramp_plan(target.name),
+            # the puzzle of a TARGET hunt: two pieces a content word and two
+            # for the artwork — 4, 6 or 8 clues, not a fixed seven (10/10)
+            clue_facet_plan=target_ramp_plan(target.name),
             angle_offset=sum(ord(c) for c in target.name) % len(PUZZLE_ANGLES),
             target_id=target.id(),
             name_onchain=target.name_onchain,
@@ -897,8 +899,7 @@ def small_words_for(ctx, clue_index: int) -> str | None:
     reveal phase and for no other; None when the name has nothing to show.
     The puzzle is over at that point, and what the skeleton shows was never
     the puzzle (name_words.name_skeleton)."""
-    plan = getattr(ctx, "clue_facet_plan", None) or relic_ramp_plan(ctx.display_name)
-    if clue_index != len(plan) + 1:
+    if clue_index != puzzle_clues_of(ctx) + 1:
         return None
     return name_skeleton(ctx.display_name)
 
@@ -926,12 +927,12 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
         + _small_words_note(words) + "\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness}.\n"
         + (
-            f"PUZZLE PIECE {clue_index} of {PUZZLE_CLUES}: this clue is one piece "
+            f"PUZZLE PIECE {clue_index} of {puzzle_clues_of(ctx)}: this clue is one piece "
             "of the puzzle, not the answer. Give ONE new constraint on the target "
             "— a single angle nobody could turn into the word by itself, but which "
             "a solver can CHECK against a candidate. No synonym lists, no "
             "explanations, no 'the word means…'.\n"
-            if clue_index <= PUZZLE_CLUES else ""
+            if clue_index <= puzzle_clues_of(ctx) else ""
         )
         + (f"ANGLE FOR THIS PIECE (use THIS one, not another, and declare its label "
            f"as \"angle\"): {angle}\n" if angle else "")
@@ -945,7 +946,7 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
             + ". These belong to a set a player can list out loud. NEVER let a "
             "clue gesture at the CATEGORY — attack these words ONLY by cultural "
             "use, structure, or their relation to the other words.\n"
-            if clue_index <= PUZZLE_CLUES and ctx.enumerable_words else ""
+            if clue_index <= puzzle_clues_of(ctx) and ctx.enumerable_words else ""
         )
         + f"FACET for this clue: {vector} — {_treasure_wording(relic_guidance_for(vector, ctx, clue_index))}\n"
         + f"Previous clues:\n{prior}\n\n"
@@ -1285,7 +1286,7 @@ class TargetClueEngine(RelicClueEngine):
                         "be pushed off it. Rewrite so the clue is TRUE of the word "
                         "under a literal reading — hard is fine, wrong is not"])
         # 5. the search guard, puzzle phase only
-        if self._search_guard is not None and clue_index <= PUZZLE_CLUES:
+        if self._search_guard is not None and clue_index <= puzzle_clues_of(persona):
             v = self._search_guard.check(
                 draft.text, target_item_id=persona.target_id,
                 target_name_onchain=persona.name_onchain)
@@ -1310,7 +1311,7 @@ class TargetClueEngine(RelicClueEngine):
         obliqueness = relic_slot_for(clue_index, persona)[1]
         system = TARGET_SYSTEM_PROMPT.format(
             index=clue_index, obliqueness=obliqueness, hard_floor=HARD_CLUE_FLOOR,
-            phase_rules=(PUZZLE_PHASE_RULES if clue_index <= PUZZLE_CLUES
+            phase_rules=(PUZZLE_PHASE_RULES if clue_index <= puzzle_clues_of(persona)
                          else REVEAL_PHASE_RULES),
         )
         user = build_target_user_message(persona, clue_index, prior_clues)

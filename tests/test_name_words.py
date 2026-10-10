@@ -57,9 +57,12 @@ from finding_memeland.content.relic_clues import (
     angle_for_unverifiable,
     content_facets,
     name_fits_plan,
+    puzzle_clues_of,
     relic_guidance_for,
     relic_ramp_plan,
     relic_slot_for,
+    stretched_obliqueness,
+    target_ramp_plan,
 )
 from finding_memeland.target import clues as target_clues
 from finding_memeland.target import dryrun
@@ -89,7 +92,7 @@ def _ctx(name: str) -> RelicClueContext:
     return RelicClueContext(
         display_name=name, image_description="", lore="", backstory="",
         solution_terms=sorted(set(answer_terms(name))),
-        clue_facet_plan=relic_ramp_plan(name),
+        clue_facet_plan=target_ramp_plan(name),
         angle_offset=sum(ord(c) for c in name) % len(PUZZLE_ANGLES))
 
 
@@ -101,7 +104,7 @@ def _target(name: str) -> Target:
 
 def _pieces(name: str) -> dict[str, int]:
     out: dict[str, int] = {}
-    for facet, _obl in relic_ramp_plan(name):
+    for facet, _obl in target_ramp_plan(name):
         out[facet] = out.get(facet, 0) + 1
     return out
 
@@ -225,12 +228,14 @@ def test_the_plan_holds_three_content_words(name, fits):
     assert MAX_NAME_WORDS == 3
     assert name_fits_plan(name) is fits
     if fits:
-        plan = relic_ramp_plan(name)
-        assert len(plan) == PUZZLE_CLUES
-        assert [obl for _f, obl in plan] == list(PUZZLE_OBLIQUENESS)
+        plan = target_ramp_plan(name)
+        # two pieces a content word and two for the artwork (test_puzzle_length)
+        assert len(plan) == 2 * len(content_facets(name)) + 2
+        assert [obl for _f, obl in plan] == list(stretched_obliqueness(len(plan)))
+        assert len(relic_ramp_plan(name)) == PUZZLE_CLUES        # a relic keeps its seven
     else:
         with pytest.raises(ValueError) as e:
-            relic_ramp_plan(name)
+            target_ramp_plan(name)
         assert "content words" in str(e.value)
         assert all(w not in str(e.value) for w in name.split() if len(w) > 3)
 
@@ -239,16 +244,14 @@ def test_a_function_word_takes_no_piece_and_the_art_gets_its_two_back():
     """Hunt #17, pública: "Chasing the Doge". Pelo plano antigo o "the"
     levava 2 das 7 peças e a arte ficava com 1."""
     doge = _pieces("Chasing the Doge")
-    assert set(doge) == {"name_word_1", "name_word_3", "image"}        # nothing for "the"
-    assert doge["image"] == 2
-    assert sorted(n for f, n in doge.items() if f != "image") == [2, 3]
+    assert doge == {"name_word_1": 2, "name_word_3": 2, "image": 2}    # nothing for "the"
     for name in (LADY, "Salt & Harbor", "Self-Portrait at Dawn"):
         pieces = _pieces(name)
         assert pieces["image"] == 2
         assert set(pieces) - {"image"} == set(content_facets(name))
         assert all(n >= 2 for f, n in pieces.items() if f != "image")
     three = _pieces(GARDEN)
-    assert three == {"name_word_2": 2, "name_word_4": 2, "name_word_5": 2, "image": 1}
+    assert three == {"name_word_2": 2, "name_word_4": 2, "name_word_5": 2, "image": 2}
 
 
 def _old_plan(name: str) -> list:
@@ -269,9 +272,9 @@ def _old_plan(name: str) -> list:
     return [(facet, PUZZLE_OBLIQUENESS[i]) for i, facet in enumerate(slots)]
 
 
-def test_a_name_with_no_small_words_keeps_the_plan_it_had():
-    """A despensa foi enchida com a contagem antiga: um alvo cujas palavras
-    são todas de conteúdo tem de sair com o MESMO plano, peça por peça."""
+def test_a_relic_with_no_small_words_keeps_the_plan_it_had():
+    """As relics ficam nas 7 (Pedro, 10/10): um nome cujas palavras são todas
+    de conteúdo sai com o MESMO plano de sempre, peça por peça."""
     rng = random.Random(5)
     for _ in range(600):
         n = rng.randint(1, 3)
@@ -287,15 +290,16 @@ def test_a_name_with_no_small_words_keeps_the_plan_it_had():
 
 def test_the_plan_is_the_same_every_time_it_is_built():
     for name in (LADY, GARDEN, "Salt & Harbor"):
-        assert relic_ramp_plan(name) == relic_ramp_plan(name)
-        assert relic_ramp_plan(name)[0][0] != "image"            # clue 1 is a name piece
+        for plan in (relic_ramp_plan, target_ramp_plan):
+            assert plan(name) == plan(name)
+            assert plan(name)[0][0] != "image"                   # clue 1 is a name piece
 
 
 def test_every_name_piece_gets_an_angle_and_no_word_repeats_one():
     for name in (LADY, GARDEN, "Chasing the Doge", "A Day in the Life of an Artist"):
         ctx = _ctx(name)
         used: dict[str, list[str]] = {}
-        for i in range(1, PUZZLE_CLUES + 1):
+        for i in range(1, puzzle_clues_of(ctx) + 1):
             facet, _ = relic_slot_for(i, ctx)
             if facet == "image":
                 assert angle_for_unverifiable(i, ctx) is None
@@ -449,7 +453,9 @@ def _judged(name: str, clue_index: int):
 def test_the_consistency_judge_is_told_the_word_the_piece_is_about(name):
     """Pelos espaços, a 2.ª palavra de "Salt & Harbor" era o "&": o juiz lia
     a pista contra um sinal e dava-a como falsa."""
-    for i in range(2, PUZZLE_CLUES + 1):
+    puzzle = puzzle_clues_of(TargetClueContext.from_target(_target(name),
+                                                           image_description="x"))
+    for i in range(2, puzzle + 3):                  # the puzzle, and into the reveal
         ctx, judge = _judged(name, i)
         facet = relic_slot_for(i, ctx)[0]
         told = judge.seen[-1][2]                    # (clue, name, word, artwork)
@@ -502,15 +508,16 @@ def test_a_small_word_is_never_what_the_solver_is_measured_against():
 
 def test_the_reveal_hands_over_the_content_words_only():
     ctx = _ctx(LADY)
-    facets = [relic_slot_for(i, ctx)[0] for i in range(PUZZLE_CLUES + 1, PUZZLE_CLUES + 12)]
+    first = puzzle_clues_of(ctx) + 1
+    facets = [relic_slot_for(i, ctx)[0] for i in range(first, first + 11)]
     assert set(facets) == {"name_word_1", "name_word_4", "image"}
     assert facets.count("image") == 1
 
 
 def test_the_small_words_line_goes_out_with_the_first_reveal_clue_and_only_then():
     ctx = _ctx(LADY)
-    first = PUZZLE_CLUES + 1
-    assert small_words_for(ctx, first) == "___ of a ___"
+    first = puzzle_clues_of(ctx) + 1                 # 2 content words: the 7th clue
+    assert first == 7 and small_words_for(ctx, first) == "___ of a ___"
     assert [i for i in range(1, 30) if small_words_for(ctx, i)] == [first]
     assert all(small_words_for(_ctx(PLAIN), i) is None for i in range(1, 30))
 
@@ -543,11 +550,12 @@ def _clue_posts(monkeypatch, base: str, clues: int = 10) -> list[str]:
     return [p for p in w.posts() if re.match(r"\d+(st|nd|rd|th) Clue:", p, re.IGNORECASE)]
 
 
-def test_a_whole_hunt_shows_the_small_words_once_at_the_eighth_clue(monkeypatch):
+def test_a_whole_hunt_shows_the_small_words_once_at_its_first_reveal_clue(monkeypatch):
+    """Dois de conteúdo → seis pistas de puzzle → a linha sai na 7.ª."""
     posts = _clue_posts(monkeypatch, "Lantern of the Harbor")
     line = "the small words of the name are free: ___ of the ___"
     with_line = [p for p in posts if "small words" in p]
-    assert len(with_line) == 1 and with_line[0].startswith("8th Clue:")
+    assert len(with_line) == 1 and with_line[0].startswith("7th Clue:")
     assert line in with_line[0].split("\n\n")
     assert not any(term in " ".join(posts).lower() for term in ("lantern", "harbor"))
 

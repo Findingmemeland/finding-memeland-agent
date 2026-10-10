@@ -238,6 +238,28 @@ def hunt_status_line(repo, *, local_active: bool) -> str:
     return line
 
 
+def cadence_status_line(min_gap_s: int, max_gap_s: int, holding_hours: int) -> str:
+    """The /status line about the clue cadence: the gap band, the WORST CASE
+    — how long a hunt can plausibly run — and whether the holding window
+    still covers it (the rule behind "hold before the first clue").
+
+    The worst case is the longest hunt the PLAN allows, at the longest gap
+    (Pedro, 10/10): the biggest puzzle and the whole reveal ramp
+    (`relic_clues.longest_target_hunt_clues`). It used to assume ten clues."""
+    from .content.clue_engine import holding_window_covers_hunt, worst_case_hunt_hours
+    from .content.relic_clues import longest_target_hunt_clues
+
+    clues = longest_target_hunt_clues()
+    worst = worst_case_hunt_hours(max_gap_s, clues)
+    ok = holding_window_covers_hunt(holding_hours, max_gap_s, clues)
+    return (
+        f"clues: {min_gap_s // 60}-{max_gap_s // 60}min "
+        f"→ worst case {worst:.1f}h ({clues} clues) "
+        + (f"✅ (< {holding_hours}h)" if ok
+           else f"❌ EXCEEDS the {holding_hours}h window — a mid-hunt buyer could win")
+    )
+
+
 def anchor_status_line(post_id, get_post) -> str:
     """A âncora do hunt ainda existe? PERGUNTADO À API.
 

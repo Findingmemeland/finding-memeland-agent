@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from finding_memeland.content.relic_clues import PUZZLE_CLUES
+from finding_memeland.content.relic_clues import puzzle_clues_of
 from finding_memeland.target.clues import (
     TARGET_SYSTEM_PROMPT,
     ImageUnavailable,
@@ -23,6 +23,10 @@ from finding_memeland.target.clues import (
 )
 from finding_memeland.target.search_guard import ClueSearchGuard, FakeSearch
 from finding_memeland.target.selector import Target
+
+# "Salt Harbor": two content words → 2 × 2 + 2 puzzle clues (10/10: a target
+# hunt's puzzle is as long as its name asks, no longer a fixed seven)
+PUZZLE = 6
 
 TARGET = Target(chain="ethereum", contract="0x3b3ee1931dc30c1957379fac9aba94d1c48a5405",
                 token_id=41234, name="Salt Harbor",
@@ -64,7 +68,7 @@ def test_context_from_target_and_terms():
     assert ctx.target_id == TARGET_ID and ctx.name_onchain == "Salt Harbor #3"
     assert {"salt", "harbor", "mara", "quill"} <= set(ctx.solution_terms)
     assert ctx.handle == "" and ctx.bio == ""            # inherited machinery
-    assert len(ctx.clue_facet_plan) == PUZZLE_CLUES
+    assert len(ctx.clue_facet_plan) == PUZZLE == puzzle_clues_of(ctx)
 
 
 def test_user_message_never_contains_chain_contract_or_token():
@@ -313,7 +317,7 @@ def test_search_guard_not_applied_in_reveal_phase():
                                                "lighthouse": {ITEM_ID}}),
                             retries=0, sleep_s=0.0)
     e = engine(["a lighthouse guards it"], guard=guard)
-    d = e.next_clue(ctx(), PUZZLE_CLUES + 1, ["c"] * PUZZLE_CLUES)
+    d = e.next_clue(ctx(), PUZZLE + 1, ["c"] * PUZZLE)
     assert d.text == "a lighthouse guards it"
 
 
@@ -455,14 +459,14 @@ def test_image_aspects_are_assigned_distinct_and_stable():
     from finding_memeland.target.clues import IMAGE_ASPECTS, image_aspect_for
     from finding_memeland.content.relic_clues import relic_slot_for
     c = ctx()
-    art = [i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image"]
+    art = [i for i in range(1, PUZZLE + 1) if relic_slot_for(i, c)[0] == "image"]
     aspects = [image_aspect_for(i, c) for i in art]
     assert len(art) == 2 and len(set(aspects)) == 2
     assert all(a in IMAGE_ASPECTS for a in aspects)
     assert aspects == [image_aspect_for(i, ctx()) for i in art]          # crash-resume
-    assert all(image_aspect_for(i, c) is None for i in range(1, PUZZLE_CLUES + 1)
+    assert all(image_aspect_for(i, c) is None for i in range(1, PUZZLE + 1)
                if i not in art)
-    assert image_aspect_for(PUZZLE_CLUES + 3, c) is None
+    assert image_aspect_for(PUZZLE + 3, c) is None
 
 
 def test_declared_angle_must_be_the_assigned_one():
@@ -471,7 +475,7 @@ def test_declared_angle_must_be_the_assigned_one():
     from finding_memeland.target.clues import angle_label
     from finding_memeland.content.relic_clues import angle_for_unverifiable, relic_slot_for
     c = ctx()
-    i = next(i for i in range(1, PUZZLE_CLUES + 1)
+    i = next(i for i in range(1, PUZZLE + 1)
              if relic_slot_for(i, c)[0] != "image"
              and angle_label(angle_for_unverifiable(i, c)) not in ("STRUCTURE", None))
     assigned = angle_label(angle_for_unverifiable(i, c))
@@ -490,7 +494,7 @@ def test_two_art_pieces_cannot_share_an_aspect():
     from finding_memeland.target.clues import image_aspect_for
     from finding_memeland.content.relic_clues import relic_slot_for
     c = ctx()
-    art = [i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image"]
+    art = [i for i in range(1, PUZZLE + 1) if relic_slot_for(i, c)[0] == "image"]
     first, second = art
     wrong = image_aspect_for(first, c)                    # the FIRST piece's aspect, again
     e = engine([{"clue": "phosphor bruises where the beam lingers", "taunt": "x",
@@ -506,7 +510,7 @@ def test_structure_piece_needs_a_verified_claim_and_false_claims_reject():
     from finding_memeland.target.clues import angle_label
     from finding_memeland.content.relic_clues import angle_for_unverifiable
     c = ctx()
-    i = next(i for i in range(1, PUZZLE_CLUES + 1)
+    i = next(i for i in range(1, PUZZLE + 1)
              if angle_label(angle_for_unverifiable(i, c)) == "STRUCTURE")
     e = engine([{"clue": "its tail is a vowel, its head is not", "taunt": "",
                  "angle": "STRUCTURE", "claims": []},                        # no claim
@@ -590,10 +594,10 @@ def test_judge_runs_in_the_reveal_phase_too_and_on_art_pieces():
     judge = FakeTruthJudge()
     e = engine(["a clue", "b clue"], judge=judge)
     c = ctx()
-    art = next(i for i in range(1, PUZZLE_CLUES + 1) if relic_slot_for(i, c)[0] == "image")
+    art = next(i for i in range(1, PUZZLE + 1) if relic_slot_for(i, c)[0] == "image")
     e.next_clue(c, art, ["x"] * (art - 1))
     assert judge.seen[-1][2] is None                       # art piece: no word
-    e.next_clue(c, PUZZLE_CLUES + 4, ["x"] * (PUZZLE_CLUES + 3))
+    e.next_clue(c, PUZZLE + 4, ["x"] * (PUZZLE + 3))
     assert len(judge.seen) == 2                            # reveal phase: judged as well
 
 
@@ -716,7 +720,7 @@ def test_target_prompt_says_treasure_never_relic():
     assert _treasure_wording("the relic's NAME and the RELIC'S ARTWORK, a relic") == \
         "the treasure's NAME and the TREASURE'S ARTWORK, a treasure"
     c = ctx()
-    for i in range(1, PUZZLE_CLUES + 4):
+    for i in range(1, PUZZLE + 4):
         assert "relic" not in build_target_user_message(c, i, ["x"] * (i - 1)).lower()
 
 

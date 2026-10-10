@@ -572,8 +572,8 @@ class LiveHash:
         return cls(LIVE_HASH_UNAVAILABLE, None)
 
 
-PHASE_PUZZLE = "puzzle"      # clues 1-7
-PHASE_REVEAL = "reveal"      # clues 8+
+PHASE_PUZZLE = "puzzle"      # the clues of the hunt's plan (4, 6 or 8)
+PHASE_REVEAL = "reveal"      # every clue after them
 PHASE_CLAIM = "claim"        # a claim was accepted; before payout
 
 

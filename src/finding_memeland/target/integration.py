@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from ..content.relic_clues import PUZZLE_CLUES
+from ..content.relic_clues import puzzle_clues_of
 from ..orchestrator.ports import ReadyPersona
 from .claim import ClaimJudge, parse_explicit
 from .clues import TargetClueContext
@@ -360,8 +360,12 @@ def claim_matcher_for(orch, hunt):
     return CodeClaimMatcher(hunt.claim_code)
 
 
-def phase_for(clue_index: int) -> str:
-    return PHASE_PUZZLE if clue_index <= PUZZLE_CLUES else PHASE_REVEAL
+def phase_for(clue_index: int, ctx=None) -> str:
+    """Puzzle or reveal — by the length of THIS hunt's plan (10/10: four, six
+    or eight clues, `relic_clues.puzzle_clues_of`). The phase decides what a
+    mutation of the target does: relaunch while the puzzle runs, void with a
+    reveal after it."""
+    return PHASE_PUZZLE if clue_index <= puzzle_clues_of(ctx) else PHASE_REVEAL
 
 
 PRE_CLUE_POST = "post"
@@ -445,7 +449,8 @@ def pre_clue_live_check(orch, hunt, clue_index: int) -> str:
     except Exception as e:  # noqa: BLE001 — the checker itself broke: hold
         verdict = LiveVerdict(LIVE_UNAVAILABLE, None, 0)
         orch._notify(f"live check errored ({type(e).__name__}) — treating as unavailable")
-    action = live_policy(verdict.status, phase=phase_for(clue_index))
+    action = live_policy(verdict.status,
+                         phase=phase_for(clue_index, getattr(hunt, "ctx", None)))
     if action == ACT_CONTINUE:
         # releases only a hold the LIVE CHECK opened — a guard hold stays
         manage_hold(orch, hunt, holding=False, reason=HOLD_LIVE)
@@ -680,7 +685,8 @@ def spray_check(orch, hunt, clue_index: int, log: list[tuple[str, str]],
     the loop keeps; `state` remembers whether we already paused so the
     detector fires ONCE per hunt. Pause + notify — never a void."""
     ports: TargetPorts = orch._target
-    if ports.spray is None or clue_index > PUZZLE_CLUES or state.get("fired"):
+    puzzle = puzzle_clues_of(getattr(hunt, "ctx", None))
+    if ports.spray is None or clue_index > puzzle or state.get("fired"):
         return
     v = ports.spray.evaluate(log)
     if not v.triggered:

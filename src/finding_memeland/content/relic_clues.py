@@ -83,6 +83,12 @@ MIN_PIECES_PER_WORD = 2
 # Counting by spaces made "nome-longo" the biggest filter of both harvests
 # (13 of 22 on Ethereum, 3 of 6 on the Manifold) and spent pieces on words
 # that are not the puzzle — in Hunt #17 "the" took two of the seven.
+#
+# For a TARGET hunt the number is no longer arithmetic (10/10): its puzzle
+# grows with the name — `target_ramp_plan`, two pieces a word plus two for
+# the artwork — so a fourth word would simply be a ten-clue puzzle. It stays
+# at three by DECISION (Pedro), until the harvests have measured how many
+# names a four-word plan would let in ("nome-longo … conteúdo-4").
 MAX_NAME_WORDS = PUZZLE_CLUES // MIN_PIECES_PER_WORD
 REVEAL_START = 0.4             # first easy clue after the puzzle phase
 REVEAL_FLOOR = 0.05
@@ -250,24 +256,116 @@ def relic_ramp_plan(name: str) -> list:
     while len(slots) < n_name:
         slots.append(rng.choice(words))
     slots += ["image"] * n_art
+    slots = _placed(slots, rng)
+    return [(facet, PUZZLE_OBLIQUENESS[i]) for i, facet in enumerate(slots)]
+
+
+def _legal(slots: list) -> bool:
+    """Clue 1 is the post cold traffic reads — it always opens on a NAME
+    piece (Opus, 27/08: reassess after three or four hunts). Two art pieces
+    never touch: two unsearchable clues back to back is dead air."""
+    return slots[0] != "image" and not any(
+        a == b == "image" for a, b in zip(slots, slots[1:], strict=False))
+
+
+def _placed(slots: list, rng: random.Random) -> list:
+    """`slots` in a legal order, shuffled by `rng`. The shuffle is tried a
+    hundred times; a short puzzle has few legal orders (two name pieces and
+    two art pieces have exactly ONE), so if none came up the pieces are laid
+    out by hand — name, art, the other names, art — rather than failing a
+    hunt on a run of bad luck."""
+    slots = list(slots)
     for _ in range(100):
         rng.shuffle(slots)
-        # Clue 1 is the post cold traffic reads, right under "work out the
-        # two-word name" — it always opens on a NAME piece (Opus, 27/08:
-        # reassess after three or four hunts). Two art pieces never touch.
-        if slots[0] != "image" and not any(
-            a == b == "image" for a, b in zip(slots, slots[1:], strict=False)
-        ):
-            break
-    else:  # pragma: no cover — 7 slots, 2 art pieces: a legal order always exists
+        if _legal(slots):
+            return slots
+    names = [s for s in slots if s != "image"]
+    art = [s for s in slots if s == "image"]
+    laid = names[:1] + art[:1] + names[1:] + art[1:]
+    if not _legal(laid):  # pragma: no cover — one art piece, or none
         raise RuntimeError("could not place the art pieces apart")
-    return [(facet, PUZZLE_OBLIQUENESS[i]) for i, facet in enumerate(slots)]
+    return laid
+
+
+def stretched_obliqueness(n: int) -> tuple:
+    """The hard curve over `n` pieces: PUZZLE_OBLIQUENESS — the same ends
+    (0.9 → 0.65) and the same shape — resampled to `n` points (Pedro, 10/10:
+    "a mesma curva, esticada"). Seven pieces give the curve itself."""
+    base = PUZZLE_OBLIQUENESS
+    if n <= 1:
+        return (base[0],) * max(n, 0)
+    out = []
+    for i in range(n):
+        pos = i * (len(base) - 1) / (n - 1)
+        lo = min(int(pos), len(base) - 2)
+        out.append(round(base[lo] + (base[lo + 1] - base[lo]) * (pos - lo), 2))
+    return tuple(out)
+
+
+def target_ramp_plan(name: str) -> list:
+    """The puzzle phase of a TARGET hunt, as (facet, obliqueness).
+
+    PEDRO'S RULE (10/10): before the difficulty drops, the bot ALWAYS
+    publishes at least two clues for every content word and two for the
+    artwork. So the puzzle is 2 × content words + 2 pieces — four, six or
+    eight — and never a fixed seven; and no piece is dropped to make room
+    for another. The fixed seven did both things the rule forbids: with
+    three words the artwork lost one of its two pieces, and with two words
+    one of them got a third piece the other never had.
+
+    Everything else is `relic_ramp_plan`'s: clue 1 is a name piece, two art
+    pieces never touch, the order is otherwise free, the curve is the hard
+    one (stretched over the pieces there are), and the plan is SEEDED by the
+    name — it is rebuilt on a crash-resume and must come out the same.
+
+    Relic hunts keep their seven (`relic_ramp_plan`)."""
+    words = content_facets(name)
+    if len(words) > MAX_NAME_WORDS:
+        # COUNTS ONLY: this reaches the operator, and the name is the answer
+        raise ValueError(f"no puzzle plan for a name of {len(words)} content "
+                         f"words (the plan holds {MAX_NAME_WORDS})")
+    slots = [w for w in words for _ in range(MIN_PIECES_PER_WORD)]
+    slots += ["image"] * PUZZLE_IMAGE_PIECES
+    slots = _placed(slots, random.Random(name))
+    curve = stretched_obliqueness(len(slots))
+    return [(facet, curve[i]) for i, facet in enumerate(slots)]
+
+
+def reveal_clues_to_floor() -> int:
+    """How many clues the reveal phase takes to get as plain as it gets: the
+    name clues easing from REVEAL_START down to REVEAL_FLOOR, one step each,
+    and the one plain description of the artwork among them. Every clue
+    after that is at the floor — the hunt is not going to get any easier."""
+    name_clues = round((REVEAL_START - REVEAL_FLOOR) / _REVEAL_STEP) + 1
+    return name_clues + 1
+
+
+def longest_target_hunt_clues() -> int:
+    """The longest a target hunt is PLANNED to run, in clues: the biggest
+    puzzle there is — two pieces for each of MAX_NAME_WORDS content words
+    and two for the artwork — and then the whole reveal ramp.
+
+    The "worst case" of /status is this many clues at the longest gap
+    (Pedro, 10/10). It used to assume ten, a number from when every puzzle
+    had seven pieces; a three-word target now starts its reveal at clue 9."""
+    return (MIN_PIECES_PER_WORD * MAX_NAME_WORDS + PUZZLE_IMAGE_PIECES
+            + reveal_clues_to_floor())
+
+
+def puzzle_clues_of(ctx) -> int:
+    """How many clues THIS hunt's puzzle phase has: the length of its plan.
+    A target hunt has four, six or eight (`target_ramp_plan`); a relic hunt,
+    and anything without a plan, PUZZLE_CLUES. Everything that asks "is this
+    clue still a puzzle piece?" asks through here — the phase rules, the
+    blind solver, the search guard, the anti-spray detector and what a
+    mutation of the target does to the hunt."""
+    return len(getattr(ctx, "clue_facet_plan", None) or ()) or PUZZLE_CLUES
 
 
 def relic_slot_for(clue_index: int, ctx: RelicClueContext) -> tuple:
     """(facet, obliqueness) for this clue.
 
-    PUZZLE PHASE (1..PUZZLE_CLUES): hard pieces on the name words and the
+    PUZZLE PHASE (the clues of the plan): hard pieces on the name words and the
     artwork — each one a constraint, together decisive.
 
     REVEAL PHASE (after that): plain clues on each name word, alternating
@@ -330,9 +428,16 @@ def angle_for(
     got the SAME angle — on 27/08 that angle was SOUND, twice in a row.
     Deterministic, so a crash-resume reproduces the same assignment."""
     facet, _ = relic_slot_for(clue_index, ctx)
-    if clue_index > PUZZLE_CLUES or facet == "image":
+    if clue_index > puzzle_clues_of(ctx) or facet == "image":
         return None
     seq = _angle_sequence(ctx, allow_anchor=allow_anchor)
+    relation = {a for a in seq if a.startswith("RELATION")}
+    # ONE content word (10/10): RELATION is "how this word sits against the
+    # OTHER word" — there is none. With the two name pieces a one-word
+    # target gets, it is never used; a plan with more name pieces than there
+    # are other angles (a one-word relic's five) still falls back on it.
+    name_pieces = [f for f, _o in (ctx.clue_facet_plan or ()) if f != "image"]
+    alone = len(set(name_pieces)) == 1 and len(name_pieces) <= len(seq) - len(relation)
     used: dict[str, list[str]] = {}
     prev: str | None = None
     chosen: str | None = None
@@ -346,11 +451,11 @@ def angle_for(
             avoid.add(prev)
         if not used.get(f):
             avoid |= {v[0] for k, v in used.items() if k != f and v}
-        if i < RELATION_EARLIEST:
+        if i < RELATION_EARLIEST or alone:
             # RELATION ("how this word sits against the OTHER word") is a
             # constraint nobody can use before the other word has had a piece
             # — and clue 1 is the most-read post (Opus, 27/08).
-            avoid |= {a for a in seq if a.startswith("RELATION")}
+            avoid |= relation
         pick = next((a for a in seq if a not in avoid), None) or next(
             (a for a in seq if a not in taken), seq[0]
         )
@@ -390,7 +495,7 @@ def spent_angles(
 
 
 def relic_guidance_for(
-    facet: str, ctx: RelicClueContext, clue_index: int = PUZZLE_CLUES + 1
+    facet: str, ctx: RelicClueContext, clue_index: int | None = None
 ) -> str:
     """Facet -> guidance, including the dynamic name-word facets.
 
@@ -405,7 +510,8 @@ def relic_guidance_for(
         word = hit.text if hit else ""
         which = ("the only word" if len(name_words(ctx.display_name)) <= 1
                  else f"the {_ordinal(n)} word")
-        if clue_index <= PUZZLE_CLUES:
+        # no clue number = the reveal-phase wording, as it always was
+        if clue_index is not None and clue_index <= puzzle_clues_of(ctx):
             return (
                 f"{which} of the relic's NAME (the word '{word}') — ONE constraint "
                 "on THAT EXACT word, from the assigned angle and nothing else. "
@@ -565,13 +671,13 @@ def build_relic_user_message(
         f"Terms to NEVER write: {ctx.solution_terms}\n\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness}.\n"
         + (
-            f"PUZZLE PIECE {clue_index} of {PUZZLE_CLUES}: this clue is one piece "
+            f"PUZZLE PIECE {clue_index} of {puzzle_clues_of(ctx)}: this clue is one piece "
             "of the puzzle, not the answer. Give ONE new constraint on the target "
             "— a single angle nobody could turn into the word by itself, but which "
             "a solver can CHECK against a candidate. No synonym lists, no "
             "explanations, no 'the word means…'. If an average reader gets the "
             "word on first read, it is too easy.\n"
-            if clue_index <= PUZZLE_CLUES else ""
+            if clue_index <= puzzle_clues_of(ctx) else ""
         )
         + (
             f"ANGLE FOR THIS PIECE (use THIS one, not another): {angle}\n"
@@ -592,7 +698,7 @@ def build_relic_user_message(
             "whole hunt: 'a title that skips a generation' is just 'uncle' with "
             "extra steps. Attack these words ONLY by concrete anchor, cultural "
             "use, structure, or their relation to the other word.\n"
-            if clue_index <= PUZZLE_CLUES and ctx.enumerable_words else ""
+            if clue_index <= puzzle_clues_of(ctx) and ctx.enumerable_words else ""
         )
         + f"FACET for this clue: {vector} — {relic_guidance_for(vector, ctx, clue_index)}\n"
         + (
@@ -787,7 +893,7 @@ class RelicClueEngine(ClueEngine):
         return super().next_clue(persona, clue_index, prior_clues, max_attempts=max_attempts)
 
     def _guardrail_kwargs(self, persona, clue_index):
-        return {"puzzle_phase": clue_index <= PUZZLE_CLUES}
+        return {"puzzle_phase": clue_index <= puzzle_clues_of(persona)}
 
     def _post_guardrail_reasons(self, draft, persona, clue_index, prior_clues):
         """The blind solver, puzzle phase only — alone, then accumulated.
@@ -797,7 +903,7 @@ class RelicClueEngine(ClueEngine):
         once instead of after six wasted generations); FAIL-OPEN from clue 2
         (the hunt is live and stopping is worse than publishing on the text
         rules alone), logged as a warning (Opus, 27/08)."""
-        if self._solver is None or clue_index > PUZZLE_CLUES:
+        if self._solver is None or clue_index > puzzle_clues_of(persona):
             return []
         log = logging.getLogger(__name__)
         facet, _ = relic_slot_for(clue_index, persona)
@@ -895,7 +1001,8 @@ class RelicClueEngine(ClueEngine):
         system = RELIC_SYSTEM_PROMPT.format(
             index=clue_index, obliqueness=obliqueness, hard_floor=HARD_CLUE_FLOOR,
             phase_rules=(
-                PUZZLE_PHASE_RULES if clue_index <= PUZZLE_CLUES else REVEAL_PHASE_RULES
+                PUZZLE_PHASE_RULES if clue_index <= puzzle_clues_of(persona)
+                else REVEAL_PHASE_RULES
             ),
         )
         # The DIRECT path never writes an anchor clue: an artefact nobody checked

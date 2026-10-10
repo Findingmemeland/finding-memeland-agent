@@ -256,9 +256,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
     from .chain.payout import PayoutEngine
     from .content.clue_engine import (
         ClueEngine,
-        holding_window_covers_hunt,
         next_clue_due_factory,
-        worst_case_hunt_hours,
     )
     from .claims.source import XClaimSource
     from .claims.taunts import TauntEngine
@@ -290,6 +288,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         active_hunt_guard,
         env_token_resolver,
         anchor_status_line,
+        cadence_status_line,
         hunt_status_line,
         write_temp_png,
     )
@@ -1077,17 +1076,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 )
             )
 
-        worst = worst_case_hunt_hours(s.clue_max_gap_s)
-        ok = holding_window_covers_hunt(s.holding_hours, s.clue_max_gap_s)
-        lines.append(
-            f"clues: {s.clue_min_gap_s // 60}-{s.clue_max_gap_s // 60}min "
-            f"→ worst case {worst:.1f}h "
-            + (
-                f"✅ (< {s.holding_hours}h)"
-                if ok
-                else f"❌ EXCEEDS the {s.holding_hours}h window — a mid-hunt buyer could win"
-            )
-        )
+        # the worst case comes from the longest plan there is (10/10)
+        lines.append(cadence_status_line(
+            s.clue_min_gap_s, s.clue_max_gap_s, s.holding_hours))
         lines.append(
             f"prize min: {fmt_tokens(s.min_prize_fmml)} $FIND "
             f"(/launch {fmt_tokens(s.min_prize_fmml)}) | non-holder share: "
