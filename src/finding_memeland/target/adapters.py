@@ -135,6 +135,16 @@ def _is_revert(code: int, message: str, data: object) -> bool:
     return isinstance(data, str) and data.lower().startswith(_REVERT_SELECTORS)
 
 
+def _rpc_down(message: str, how: str) -> ChainUnavailable:
+    """A ChainUnavailable that also says HOW the call failed, in one word a
+    report can show (10/10): "timeout", an HTTP code, "ligação", "limitado"
+    (the node's own rate limit), "não-json", "resposta-malformada". The
+    message stays what it was. Read by sources.rpc_failure_kind."""
+    e = ChainUnavailable(message)
+    e.how = how
+    return e
+
+
 class JsonRpc:
     """One endpoint. `http_post(url, body, headers) -> text` raises on
     HTTP/transport failure; everything that is not a well-formed JSON-RPC
@@ -153,13 +163,14 @@ class JsonRpc:
         try:
             text = self._post(self._url, body, {"Content-Type": "application/json"})
         except Exception as e:  # noqa: BLE001 — transport
-            raise ChainUnavailable(f"{self.label}: {type(e).__name__}") from e
+            raise _rpc_down(f"{self.label}: {type(e).__name__}",
+                            _failure_kind(e)) from e
         try:
             doc = json.loads(text)
         except ValueError as e:
-            raise ChainUnavailable(f"{self.label}: non-JSON answer") from e
+            raise _rpc_down(f"{self.label}: non-JSON answer", "não-json") from e
         if not isinstance(doc, dict):
-            raise ChainUnavailable(f"{self.label}: malformed answer")
+            raise _rpc_down(f"{self.label}: malformed answer", "resposta-malformada")
         if "error" in doc and doc["error"]:
             err = doc["error"] if isinstance(doc["error"], dict) else {}
             code = int(err.get("code", 0) or 0)
@@ -169,11 +180,11 @@ class JsonRpc:
             low = msg.lower()
             if code in (429, -32005, -32016, -32029) or "rate" in low \
                     or "capacity" in low or "too many requests" in low:
-                raise ChainUnavailable(f"{self.label}: throttled")
+                raise _rpc_down(f"{self.label}: throttled", "limitado")
             raise RpcError(code, msg, revert=_is_revert(code, msg, err.get("data")),
                            data=err.get("data"))
         if "result" not in doc:
-            raise ChainUnavailable(f"{self.label}: no result field")
+            raise _rpc_down(f"{self.label}: no result field", "resposta-malformada")
         return doc["result"]
 
     # -- the ChainRpc shape ------------------------------------------------ #

@@ -454,7 +454,15 @@ _OWNER_REASONS = {
     "contract_empty": "contrato:vazio",
     "contract_other": "contrato:outro",
     "contract_noanswer": "contrato:sem-resposta",
-    "contract": "contrato", "unverifiable": "sem-veredicto"}
+    "contract": "contrato",
+    # 10/10: WHY the owner could not be told (sources.ChainEoaCheck). The
+    # first two are the token's answer; the third is ours. ORDER MATTERS:
+    # `unverifiable` moves with every one of them, so it comes last.
+    "no_owner_revert": "sem-dono:ownerOf-reverte",
+    "no_owner_address": "sem-dono:sem-endereço",
+    "transport": "rpc-NOSSO",
+    "unverifiable": "sem-veredicto"}
+_OWNER_OURS = _OWNER_REASONS["transport"]
 
 # THE SECOND PASS (10/10). A candidate that passed every free check and then
 # lost the uniqueness search to OUR transport is asked once more at the end
@@ -468,8 +476,10 @@ SECOND_PASS_GAP_S = 60.0
 
 
 def _transport_how(guard) -> str:
-    """HOW the guard's last search failed, in its own words ("timeout",
-    "429+timeout"), or "" when it does not say (a fake, another surface)."""
+    """HOW the guard's last request failed, in its own words ("timeout",
+    "429+timeout", "sem-rpc"), or "" when it does not say (a fake, another
+    surface). Both guards that can fail on our side speak it: the
+    uniqueness search and the owner check."""
     kinds = getattr(guard, "last_transport", None)
     if not isinstance(kinds, (tuple, list)):
         return ""
@@ -979,7 +989,16 @@ class TargetFinder:
             a Pending comes back, to be asked again at the end of the run
             (`ask_again`). Only ever returned when `defer` is set;
           · neither (the /fill) — a lost draw, counted as "rede-NOSSO" with
-            how it failed. A redraw costs nothing."""
+            how it failed. A redraw costs nothing.
+
+        AND SO IS THE OWNER CHECK THAT COULD NOT ASK (10/10). It answers
+        None without throwing too — for "ownerOf reverted" (the token's: it
+        was burned) and for "the RPC failed" (ours) alike. Same measurement,
+        same result: an RPC failing ONLY there spent six targets (8 → 2).
+        Under `strict` an RPC failure raises ReadUnavailable and the target
+        stays; a revert, or an owner that is a contract, still drops it.
+        Everywhere else it is counted under "dono" as "rpc-NOSSO" with how
+        it failed — the harvest does not ask again (not decided)."""
         meta = read.metadata
         image_uri = str(meta.get("image") or "")
         try:
@@ -1003,18 +1022,14 @@ class TargetFinder:
         if self._max_image and head[1] and head[1] > self._max_image:
             tally.too_big += 1          # 171 MB, measured — vision cannot use it
             return None
-        before = _snapshot(self._owner_is_eoa)
-        try:
-            eoa = self._owner_is_eoa(src.chain, src.contract, tid)
-        except Exception as e:  # noqa: BLE001
-            if strict:
-                raise ReadUnavailable(type(e).__name__) from None
-            eoa = None
+        eoa, label, ours = self._owner(src, tid, strict=strict)
         if eoa is not True:
+            if ours is not None and strict:
+                # OUR RPC, not the piece (10/10): the target stays
+                step = "dono" + (f":{ours}" if ours else "")
+                raise ReadUnavailable(step, step=step)
             tally.owner += 1
-            k = _reason(self._owner_is_eoa, before, eoa, _OWNER_REASONS,
-                        if_false="contrato")
-            tally.owner_kinds[k] = tally.owner_kinds.get(k, 0) + 1
+            tally.owner_kinds[label] = tally.owner_kinds.get(label, 0) + 1
             return None
         uniq, label, ours = self._unique(src, tid, base, strict=strict)
         if uniq is True:
@@ -1038,22 +1053,44 @@ class TargetFinder:
         `ours` is None unless THE SEARCH ITSELF FAILED — the guard counted a
         transport failure during this call — and then says how ("timeout",
         "429+timeout"; "" when the guard does not say)."""
-        before = _snapshot(self._name_is_unique)
+        return self._ask(
+            self._name_is_unique, (base, src.chain, src.contract, tid),
+            _UNIQUE_REASONS, ours=_UNIQUE_OURS, if_false="não-único",
+            strict=strict)
+
+    def _owner(self, src: Source, tid: int, *,
+               strict: bool = False) -> tuple[bool | None, str, str | None]:
+        """Check 4 alone, read like check 5 (`_unique`): (answer, label,
+        ours). `ours` is None unless OUR RPC failed — the check counted a
+        transport failure during this call — and then says how ("timeout",
+        "limitado", "sem-rpc", "rpc-cego"; "" when the check does not say).
+        An ownerOf that reverted is the token's answer, never ours."""
+        return self._ask(
+            self._owner_is_eoa, (src.chain, src.contract, tid),
+            _OWNER_REASONS, ours=_OWNER_OURS, if_false="contrato",
+            strict=strict)
+
+    @staticmethod
+    def _ask(guard, args: tuple, labels: dict, *, ours: str, if_false: str,
+             strict: bool) -> tuple[bool | None, str, str | None]:
+        """One guard, one question: (answer, label, ours). The label is read
+        from the guard's own counters (`_reason`); it is OURS only when
+        nothing was answered AND the guard says the request itself failed —
+        a blind or crowded index, a burned token, a contract owner are all
+        answers about the piece."""
+        before = _snapshot(guard)
         try:
-            uniq = self._name_is_unique(base, src.chain, src.contract, tid)
+            answer = guard(*args)
         except Exception as e:  # noqa: BLE001
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
-            uniq = None
-        if uniq is True:
+            answer = None
+        if answer is True:
             return True, "", None
-        label = _reason(self._name_is_unique, before, uniq, _UNIQUE_REASONS,
-                        if_false="não-único")
-        # ours ONLY when nothing was answered and the guard says the request
-        # failed — a blind or a crowded index is an answer about the piece
-        if uniq is not None or label != _UNIQUE_OURS:
-            return uniq, label, None
-        how = _transport_how(self._name_is_unique)
+        label = _reason(guard, before, answer, labels, if_false=if_false)
+        if answer is not None or label != ours:
+            return answer, label, None
+        how = _transport_how(guard)
         return None, (f"{label}:{how}" if how else label), how
 
     def _candidate(self, src: Source, tid: int, read, base: str) -> Candidate:

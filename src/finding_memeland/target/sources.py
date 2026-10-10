@@ -556,6 +556,30 @@ def epoch1_listers(*, rpcs: dict[str, ChainRpc],
 # --------------------------------------------------------------------------- #
 
 
+def rpc_failure_kind(e: BaseException) -> str:
+    """How ONE RPC call failed, in a word a report can show (10/10): what
+    the adapter named (`how`: "timeout", an HTTP code, "ligação", "limitado",
+    "não-json", "resposta-malformada"); a node error that is NOT a revert
+    ("erro-rpc:-32603" — cloudflare-eth says that for its own trouble, and
+    read as a burn it would spend an honest target); or, for an exception
+    nobody labelled, what the transport's own type says. Never the message:
+    it can carry an address.
+
+    Imported lazily: adapters imports this module."""
+    how = getattr(e, "how", None)
+    if isinstance(how, str) and how:
+        return how
+    code = getattr(e, "code", None)
+    if hasattr(e, "revert") and isinstance(code, int):
+        return f"erro-rpc:{code}"
+    from .adapters import _failure_kind
+    for err in (e, e.__cause__):
+        kind = _failure_kind(err) if err is not None else "outro"
+        if kind != "outro":
+            return kind
+    return f"outro:{type(e).__name__}"
+
+
 class ChainEoaCheck:
     """owner_is_eoa(chain, contract, token_id) -> bool | None, the shape the
     selector and the refresh inject.
@@ -565,7 +589,22 @@ class ChainEoaCheck:
     to have code on the same RPC: if the contract is invisible, so is the
     owner, and '0x' means nothing. None (unverifiable) in that case, on a
     missing RPC for the chain, on an ownerOf revert (burned/unknown), or on
-    transport trouble — the callers fail closed on None."""
+    transport trouble — the callers fail closed on None.
+
+    THAT None WAS TWO OPPOSITE FACTS (10/10), and /prepare treated them as
+    one: measured offline with this class and the real preparer, an RPC
+    that failed ONLY here spent six larder targets (8 → 2) — exactly as if
+    all six had been burned. The answer is still None; what is kept now is
+    WHY, in counts and words only:
+      · the TOKEN's — `no_owner_revert` (ownerOf reverted: burned, or never
+        minted) and `no_owner_address` (it answered no address, or the zero
+        address). An answer about the piece: /prepare drops it;
+      · OURS — `transport`, with `last_transport` saying how: the call
+        failed (a timeout, a 429, the node's rate limit, a node error that
+        is not a revert), the chain has no RPC here ("sem-rpc"), or the RPC
+        cannot see the contract it has just read ("rpc-cego"). It says
+        nothing about the piece: /prepare keeps it.
+    `unverifiable` still counts every None, as before."""
 
     def __init__(self, *, rpcs: dict[str, ChainRpc]):
         self._rpcs = rpcs
@@ -573,40 +612,63 @@ class ChainEoaCheck:
         # facts — the owner IS a contract (the candidate's), or we could not
         # tell (ours, or a burned token). Same pattern as the uniqueness
         # guard's `stats`.
-        self.stats = {"eoa": 0, "contract": 0, "unverifiable": 0}
+        self.stats = {"eoa": 0, "contract": 0, "unverifiable": 0,
+                      "no_owner_revert": 0, "no_owner_address": 0,
+                      "transport": 0}
         # "contract" again, by how the owner answered ERC-1271 (30/09) —
         # MEASUREMENT ONLY: the verdict stays False either way. See
         # _erc1271_answer for what each one means and does not mean.
         for k in _ERC1271_KINDS:
             self.stats[f"contract_{k}"] = 0
         self._contract_kind: str | None = None
+        self.last_transport: tuple[str, ...] = ()
 
     def __call__(self, chain: str, contract: str, token_id: int) -> bool | None:
         self._contract_kind = None
+        self.last_transport = ()
         got = self._check(chain, contract, token_id)
         self.stats[{True: "eoa", False: "contract"}.get(got, "unverifiable")] += 1
         if got is False and self._contract_kind:
             self.stats[f"contract_{self._contract_kind}"] += 1
         return got
 
+    def _ours(self, how: str) -> None:
+        self.stats["transport"] += 1
+        self.last_transport = (how,)
+
     def _check(self, chain: str, contract: str, token_id: int) -> bool | None:
         rpc = self._rpcs.get(chain)
         if rpc is None or rpc.chain != chain:
-            return None
+            return self._ours("sem-rpc")
         try:
             if not rpc.has_code(contract):
-                return None                       # canary: RPC blind to it
+                return self._ours("rpc-cego")     # canary: RPC blind to it
+        except Exception as e:  # noqa: BLE001 — eth_getCode cannot revert: ours
+            return self._ours(rpc_failure_kind(e))
+        # ONLY HERE can a revert be the token's answer: ownerOf is the one
+        # call of the three that executes the contract.
+        try:
             data = rpc.eth_call(
                 contract, SEL_OWNEROF + token_id.to_bytes(32, "big").hex())
-            owner = _address_from_word(data)
-            if owner is None:
+        except Exception as e:  # noqa: BLE001
+            if getattr(e, "revert", False):
+                self.stats["no_owner_revert"] += 1
                 return None
-            eoa = rpc.is_eoa(owner)
-            if not eoa:
-                self._contract_kind = _erc1271_answer(rpc, owner)
-            return eoa
-        except Exception:  # noqa: BLE001 — revert or transport: unverifiable
+            return self._ours(rpc_failure_kind(e))
+        try:
+            owner = _address_from_word(data)
+        except ValueError:                        # not hex: no address in it
+            owner = None
+        if owner is None:
+            self.stats["no_owner_address"] += 1
             return None
+        try:
+            eoa = rpc.is_eoa(owner)
+        except Exception as e:  # noqa: BLE001 — eth_getCode again: ours
+            return self._ours(rpc_failure_kind(e))
+        if not eoa:
+            self._contract_kind = _erc1271_answer(rpc, owner)
+        return eoa
 
 
 # --------------------------------------------------------------------------- #
