@@ -440,6 +440,28 @@ class NameSearch(Protocol):
     def named_items(self, text: str) -> list[tuple[str, str]]: ...
 
 
+def search_failure_kind(e: BaseException) -> str:
+    """How ONE search request failed, in the words the gateway reports
+    already use (adapters._failure_kind): the HTTP code ("429", "503",
+    "400", …), "timeout", "ligação" (DNS, refused, reset, TLS, a cut-off
+    body) — plus the one that is the search's own: "corpo-ilegível", an
+    answer that arrived and is not the JSON we know (not JSON at all, or
+    without a results list). Anything else is "outro:" and the exception's
+    TYPE, so that an "outro" in a report is already half a diagnosis.
+
+    The type, never the message: a transport's message can quote the URL,
+    and the URL carries the name being searched.
+
+    Imported lazily: this module stays free of the adapters' imports."""
+    from .adapters import _failure_kind
+    kind = _failure_kind(e)
+    if kind != "outro":
+        return kind
+    if isinstance(e, ValueError):         # json.JSONDecodeError is one
+        return "corpo-ilegível"
+    return f"outro:{type(e).__name__}"
+
+
 class MarketNameUniqueness:
     """name_is_unique(base, chain, contract, token_id) -> bool | None — the
     callable hunt.select_judged injects, called at DRAW time on the drawn
@@ -460,7 +482,21 @@ class MarketNameUniqueness:
                   than `page_size`; conservative and correct, but it is a
                   not-unique-shaped fact, not an outage — reporting it as
                   'unverifiable' would misdiagnose the refresh
-    `stats` is counts only (never names) — safe for the operator log."""
+    `stats` is counts only (never names) — safe for the operator log.
+
+    A THIRD None is OURS, and it used to be anonymous (10/10): the request
+    itself failed. Every exception was swallowed into `transport` and its
+    type thrown away, so when it came back — 2 of the 6 that reached this
+    check in one probe — nobody could say whether OpenSea was limiting us,
+    timing out or answering something else. Two things are kept now, both
+    counts and words only (never the message: it can quote the query):
+      · `failed_requests` — every request that failed, by kind, INCLUDING
+        the ones a retry then recovered from (those never reach `transport`
+        and would stay invisible);
+      · `last_transport`  — the kinds of the attempts of THIS call, when it
+        ended in a transport failure; empty otherwise. The caller needs it
+        to tell "ours" from a verdict: /prepare keeps the target, the
+        harvest asks again at the end of the run."""
 
     def __init__(self, *, search: NameSearch, page_size: int,
                  retries: int = 2, sleep_s: float = 2.0,
@@ -494,20 +530,29 @@ class MarketNameUniqueness:
                       "blind_clean": 0, "blind_unknown": 0,
                       "blind_clean_same": 0, "blind_clean_other": 0,
                       "blind_clean_noname": 0}
+        self.failed_requests: dict[str, int] = {}
+        self.last_transport: tuple[str, ...] = ()
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
         from .selector import normalize_name
         want = _canonical(f"{chain}:{contract}:{token_id}")
+        self.last_transport = ()
+        kinds: list[str] = []
         for attempt in range(self._retries + 1):
             try:
                 rows = self._search.named_items(base)     # UNFILTERED
                 break
-            except Exception:  # noqa: BLE001 — retry, then unverifiable
+            except Exception as e:  # noqa: BLE001 — retry, then unverifiable
+                kind = search_failure_kind(e)
+                self.failed_requests[kind] = self.failed_requests.get(kind, 0) + 1
+                if kind not in kinds:
+                    kinds.append(kind)
                 if attempt < self._retries:
                     time.sleep(self._sleep * (attempt + 1))
                     continue
                 self.stats["transport"] += 1
+                self.last_transport = tuple(kinds)
                 return None
         ids = {_canonical(i): n for i, n in rows}
         key = base.casefold()

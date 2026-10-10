@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 
 from .adapters import arweave_url
 from .harvest import looks_serial, name_is_cluable
-from .prepare import Source, Tally
+from .prepare import Pending, SecondPass, Source, Tally
 from .refresh import TokenRead, uri_is_content_addressed, uri_kind
 
 # O deployer CREATE2 da Manifold em Base ("Contract Deployment Factory" na
@@ -220,6 +220,9 @@ class ProbeReport:
     uri_kinds: dict = field(default_factory=dict)
     today: ProbeColumn = field(default_factory=ProbeColumn)
     with_arweave: ProbeColumn = field(default_factory=ProbeColumn)
+    # a pesquisa do nome do NOSSO lado (10/10): pedidos falhados por tipo e
+    # a segunda volta — ver prepare.SecondPass
+    second: SecondPass = field(default_factory=SecondPass)
 
     def render(self) -> str:
         head = [f"{self.asked} contrato(s) sorteado(s) de {self.universe} criações"]
@@ -241,6 +244,9 @@ class ProbeReport:
             causes = col.render()
             lines.append(f"{label}: passariam {col.passed} de {self.tested}"
                          + (f" — {causes}" if causes else ""))
+        search = self.second.render()
+        if search:
+            lines.append(search)
         return "\n".join(lines)
 
 
@@ -393,6 +399,12 @@ class ContractProbe:
         rep = ProbeReport(source=self.source, chain=self.chain)
         head = self._sampler.head()
         rep.universe = self._sampler.total(head)          # ProbeBlind se cego
+        # A SEGUNDA VOLTA (10/10), como no depósito: uma peça que passou tudo
+        # e a quem a pesquisa do nome não respondeu (falha NOSSA) espera aqui,
+        # em memória, com o que a travava HOJE — e no fim pergunta-se outra
+        # vez, uma vez. Só então entra nas colunas.
+        waiting: list[tuple[Pending, tuple | None]] = []
+        failed_before = self._finder.search_failures()
         for i in range(1, max(1, n) + 1):
             if every and i % every == 0:
                 note(f"probe {self.source}: {i}/{n} contratos · "
@@ -414,7 +426,21 @@ class ContractProbe:
             if last == 0:
                 rep.empty += 1
                 continue
-            self._check(contract, self._rng.randrange(1, last + 1), rep)
+            self._check(contract, self._rng.randrange(1, last + 1), rep, waiting)
+        if waiting:
+            note(f"probe {self.source}: {len(waiting)} peça(s) sem resposta da "
+                 "pesquisa do nome (falha nossa) — volto a perguntar no fim, uma "
+                 "vez; pode demorar até um minuto")
+        for pending, today in waiting:
+            rep.second.asked += 1
+            tally = Tally()
+            cand = self._finder.ask_again(pending, tally)
+            if cand is not None:
+                rep.second.rescued += 1
+            cause = None if cand is not None else cause_of(tally)
+            rep.with_arweave.add(cause)
+            rep.today.add(today or cause)
+        rep.second.failed = self._finder.search_failures(since=failed_before)
         return rep
 
     # -- o contrato -------------------------------------------------------- #
@@ -427,7 +453,8 @@ class ContractProbe:
 
     # -- a peça ------------------------------------------------------------ #
 
-    def _check(self, contract: str, token_id: int, rep: ProbeReport) -> None:
+    def _check(self, contract: str, token_id: int, rep: ProbeReport,
+               waiting: list) -> None:
         rep.tested += 1
 
         def both(cause):
@@ -483,8 +510,12 @@ class ContractProbe:
             src = Source("probe", self.chain, contract)
             named = self._finder.named_token(
                 src, token_id, tally, known=TokenRead(token_uri=uri, metadata=meta))
-            cand = (self._finder.verify(src, token_id, named[0], named[1], tally)
+            cand = (self._finder.verify(src, token_id, named[0], named[1], tally,
+                                        defer=True)
                     if named is not None else None)
+            if isinstance(cand, Pending):
+                waiting.append((cand, today))       # a segunda volta decide
+                return
             cause = None if cand is not None else cause_of(tally)
         rep.with_arweave.add(cause)
         rep.today.add(today or cause)

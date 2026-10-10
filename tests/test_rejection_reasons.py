@@ -8,7 +8,9 @@
            cheio-sem-igual página cheia, nenhum homónimo — o OpenSea só não
                            pôs a nossa entre as 50 (o nome não prova nada)
            índice-cego     a pesquisa não mostra a peça (o caçador também não)
-           rede-NOSSO      o pedido falhou — nosso
+           rede-NOSSO      o pedido falhou — nosso (desde 10/10 com o tipo,
+                           "rede-NOSSO:timeout", quando a guarda o diz:
+                           tests/test_unique_transport.py)
   dono   → contrato        um contrato é dono (cofre, custódia, carteira-contrato)
            sem-veredicto   não se soube: RPC cego, token queimado, rede
 
@@ -50,7 +52,10 @@ def _deposit(*, owner=lambda *a: True, unique=lambda *a: True) -> str:
             token_uri="ipfs://bafymeta" + "a" * 40,
             metadata={"name": "Some Two Words", "image": "ipfs://bafyimg"}),
         probe_image=lambda u: (PNG, len(PNG)), owner_is_eoa=owner,
-        name_is_unique=unique, rng=random.Random(0))
+        name_is_unique=unique, rng=random.Random(0),
+        # 10/10: a "rede-NOSSO" is asked again at the end of the run, after a
+        # window — which a test has no reason to sit through
+        retry_gap_s=0)
     return f.deposit(Larder(), ["base:0x" + "ab" * 20 + ":1"],
                      chain_ok=lambda c: True).render()
 

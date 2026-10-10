@@ -70,6 +70,7 @@ import hmac
 import json
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -356,7 +357,16 @@ class ReadUnavailable(RuntimeError):
     NFTs. During `/fill` the distinction costs nothing — a lost draw is a
     redraw. During `/prepare` it is everything: a candidate dropped for OUR
     outage is a verified target thrown away, and six of them in a row empties
-    a third of the larder for a 429."""
+    a third of the larder for a 429.
+
+    `step` (10/10): WHERE it failed, for the tally of our own outages —
+    "leitura" unless the raiser knows better. The uniqueness search says
+    "unicidade:<how>", so a /prepare that kept its targets through a
+    marketplace outage also says what the outage was."""
+
+    def __init__(self, what: str = "", *, step: str = "leitura"):
+        super().__init__(what)
+        self.step = step
 
 
 class LarderIntegrityError(RuntimeError):
@@ -435,6 +445,7 @@ _UNIQUE_REASONS = {"not_unique": "não-único", "crowded_same": "cheio-com-igual
                    "blind_unknown": "índice-cego:sem-veredicto",
                    "blind": "índice-cego",
                    "transport": "rede-NOSSO"}
+_UNIQUE_OURS = _UNIQUE_REASONS["transport"]
 _OWNER_REASONS = {
     # 30/09: how a contract owner answered ERC-1271 (sources._erc1271_answer)
     "contract_1271": "contrato:responde-1271",
@@ -444,6 +455,38 @@ _OWNER_REASONS = {
     "contract_other": "contrato:outro",
     "contract_noanswer": "contrato:sem-resposta",
     "contract": "contrato", "unverifiable": "sem-veredicto"}
+
+# THE SECOND PASS (10/10). A candidate that passed every free check and then
+# lost the uniqueness search to OUR transport is asked once more at the end
+# of the run — and not sooner than this after the search gave up. 60 s is the
+# one number ever measured about the marketplace's limits (10/09: a window of
+# 60 s, 120 requests); the guard's own three attempts had already failed
+# inside ~6 s, so asking again seconds later would mostly repeat the failure.
+# The same for every kind of failure: what to do PER kind waits for the first
+# reports that name the kind.
+SECOND_PASS_GAP_S = 60.0
+
+
+def _transport_how(guard) -> str:
+    """HOW the guard's last search failed, in its own words ("timeout",
+    "429+timeout"), or "" when it does not say (a fake, another surface)."""
+    kinds = getattr(guard, "last_transport", None)
+    if not isinstance(kinds, (tuple, list)):
+        return ""
+    return "+".join(str(k) for k in kinds if k)
+
+
+def _failed_requests(guard) -> dict:
+    """The guard's count of failed search REQUESTS by kind, copied — so the
+    difference between two moments is one run's."""
+    got = getattr(guard, "failed_requests", None)
+    return dict(got) if isinstance(got, dict) else {}
+
+
+def _moved(before: dict, after: dict) -> dict:
+    """What a counter-by-kind gained between two copies of it."""
+    return {k: n - before.get(k, 0) for k, n in after.items()
+            if n > before.get(k, 0)}
 
 
 def _name_fits_plan(base: str) -> bool:
@@ -475,6 +518,48 @@ def _reason(guard, before: dict | None, answer, labels: dict, *,
             if stats.get(key, 0) > before.get(key, 0):
                 return label
     return if_false if answer is False else "sem-veredicto"
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A candidate whose ONLY failure so far is ours: every free check passed
+    and the uniqueness search did not answer. It waits in memory for the end
+    of the run, is asked once more, and is gone — never written anywhere and
+    never rendered: it holds a name."""
+
+    src: Source
+    tid: int
+    read: object
+    base: str
+    how: str = ""             # "timeout", "429+timeout"; "" = the guard does not say
+    at: float = 0.0           # the finder's clock when the search gave up
+
+    def __repr__(self) -> str:
+        return "Pending(<candidate>)"
+
+    __str__ = __repr__
+
+
+@dataclass
+class SecondPass:
+    """What the uniqueness search cost one run on OUR side, in counts: the
+    requests that failed, by kind — including those a retry recovered from —
+    and what the second pass did with the candidates that got no answer."""
+
+    asked: int = 0            # candidates asked again at the end of the run
+    rescued: int = 0          # …that turned out unique
+    failed: dict = field(default_factory=dict)
+
+    def render(self) -> str:
+        parts = []
+        if self.failed:
+            kinds = ", ".join(f"{k} {n}" for k, n in sorted(self.failed.items()))
+            parts.append(f"pesquisa do único: {sum(self.failed.values())} "
+                         f"pedido(s) falhado(s) ({kinds})")
+        if self.asked:
+            parts.append(f"2.ª volta: {self.asked} repetido(s), "
+                         f"{self.rescued} salvo(s)")
+        return " · ".join(parts)
 
 
 @dataclass
@@ -616,6 +701,9 @@ class DepositReport:
     chain_closed: int = 0
     closed_chains: set = field(default_factory=set)
     rejected: Tally = field(default_factory=Tally)
+    # the uniqueness search on OUR side (10/10): failed requests by kind and
+    # the second pass — see SecondPass
+    second: SecondPass = field(default_factory=SecondPass)
 
     def render(self) -> str:
         bits = [f"{self.added} guardado(s) de {self.asked}"]
@@ -629,6 +717,9 @@ class DepositReport:
         causes = self.rejected.render()
         if " — " in causes:
             bits.append(causes.split(" — ", 1)[1])
+        search = self.second.render()
+        if search:
+            bits.append(search)
         return " · ".join(bits)
 
 
@@ -694,9 +785,17 @@ class TargetFinder:
                  rng: random.Random | None = None,
                  now_iso: Callable[[], str] | None = None,
                  accepts_uri: Callable[[str], bool] | None = None,
-                 is_exposed: Callable[[str, int], bool] | None = None):
+                 is_exposed: Callable[[str, int], bool] | None = None,
+                 retry_gap_s: float = SECOND_PASS_GAP_S,
+                 sleep: Callable[[float], None] | None = None,
+                 clock: Callable[[], float] | None = None):
         if not sources:
             raise ValueError("TargetFinder needs at least one source")
+        # The second pass of the uniqueness search (10/10): how long after a
+        # failure of ours it may be asked again, and the clock that says so.
+        self._retry_gap = max(0.0, float(retry_gap_s))
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
         # THE EXPOSED LIST (09/10, Pedro's "lista de queimados"): a token ever
         # named in a versioned file of the public repository is never
         # deposited and never drawn. `is_exposed(contract, token_id)` raises
@@ -857,7 +956,8 @@ class TargetFinder:
         return read, base
 
     def verify(self, src: Source, tid: int, read, base: str, tally: Tally,
-               *, strict: bool = False) -> Candidate | None:
+               *, strict: bool = False,
+               defer: bool = False) -> Candidate | Pending | None:
         """Checks 3, 4 and 5 — the image really is there, the owner is an
         EOA, the name is unique. Uniqueness LAST: it is the only paid call,
         so nothing that a free check can kill ever spends one.
@@ -865,7 +965,21 @@ class TargetFinder:
         `strict`: see named_token. Note what it does NOT cover — the probe's
         verdicts about the CONTENT (a 404/410, bytes that are not a still
         image) and a probe that returns no bytes are the candidate's fault,
-        not ours (Hunt #11; Pedro, 29/09). Every other throw is ours."""
+        not ours (Hunt #11; Pedro, 29/09). Every other throw is ours.
+
+        THE UNIQUENESS SEARCH THAT DID NOT ANSWER IS OURS TOO (10/10). The
+        guard does not throw: it returns None for "could not ask" exactly as
+        it does for "the index cannot see the piece", and until 10/10 both
+        were counted against the candidate. Measured offline with the real
+        guard and the real preparer: one /prepare with the search down spent
+        SIX larder targets (8 → 2) — for a timeout, a 429 or a 503 alike.
+          · `strict` — it raises ReadUnavailable, like the gateway and the
+            RPC: the target stays in the larder;
+          · `defer`  — the harvest and the probe: nothing is tallied yet and
+            a Pending comes back, to be asked again at the end of the run
+            (`ask_again`). Only ever returned when `defer` is set;
+          · neither (the /fill) — a lost draw, counted as "rede-NOSSO" with
+            how it failed. A redraw costs nothing."""
         meta = read.metadata
         image_uri = str(meta.get("image") or "")
         try:
@@ -902,6 +1016,28 @@ class TargetFinder:
                         if_false="contrato")
             tally.owner_kinds[k] = tally.owner_kinds.get(k, 0) + 1
             return None
+        uniq, label, ours = self._unique(src, tid, base, strict=strict)
+        if uniq is True:
+            return self._candidate(src, tid, read, base)
+        if ours is not None:
+            if strict:
+                step = "unicidade" + (f":{ours}" if ours else "")
+                raise ReadUnavailable(step, step=step)
+            if defer:
+                return Pending(src=src, tid=tid, read=read, base=base,
+                               how=ours, at=self._clock())
+        tally.unique += 1
+        tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
+        return None
+
+    def _unique(self, src: Source, tid: int, base: str, *,
+                strict: bool = False) -> tuple[bool | None, str, str | None]:
+        """Check 5 alone — the paid one. Returns (answer, label, ours).
+
+        `label` is the cause for the tally when the answer is not True.
+        `ours` is None unless THE SEARCH ITSELF FAILED — the guard counted a
+        transport failure during this call — and then says how ("timeout",
+        "429+timeout"; "" when the guard does not say)."""
         before = _snapshot(self._name_is_unique)
         try:
             uniq = self._name_is_unique(base, src.chain, src.contract, tid)
@@ -909,18 +1045,49 @@ class TargetFinder:
             if strict:
                 raise ReadUnavailable(type(e).__name__) from None
             uniq = None
-        if uniq is not True:
-            tally.unique += 1
-            k = _reason(self._name_is_unique, before, uniq, _UNIQUE_REASONS,
+        if uniq is True:
+            return True, "", None
+        label = _reason(self._name_is_unique, before, uniq, _UNIQUE_REASONS,
                         if_false="não-único")
-            tally.unique_kinds[k] = tally.unique_kinds.get(k, 0) + 1
-            return None
+        # ours ONLY when nothing was answered and the guard says the request
+        # failed — a blind or a crowded index is an answer about the piece
+        if uniq is not None or label != _UNIQUE_OURS:
+            return uniq, label, None
+        how = _transport_how(self._name_is_unique)
+        return None, (f"{label}:{how}" if how else label), how
+
+    def _candidate(self, src: Source, tid: int, read, base: str) -> Candidate:
+        meta = read.metadata
         return Candidate(
             chain=src.chain, contract=src.contract.lower(), token_id=tid,
             name=base, name_onchain=str(meta.get("name") or "").strip(),
             description=str(meta.get("description") or "")[:600],
-            image=image_uri, token_uri=read.token_uri, artist=artist_of(meta),
-            metadata=meta, found_at=self._now())
+            image=str(meta.get("image") or ""), token_uri=read.token_uri,
+            artist=artist_of(meta), metadata=meta, found_at=self._now())
+
+    def search_failures(self, since: dict | None = None) -> dict:
+        """Failed uniqueness-search requests so far, by kind — a copy. With
+        `since` (an earlier copy), only what was added after it: one run's.
+        {} when the guard does not count."""
+        now = _failed_requests(self._name_is_unique)
+        return now if since is None else _moved(since, now)
+
+    def ask_again(self, pending: Pending, tally: Tally) -> Candidate | None:
+        """THE SECOND PASS, for one candidate (10/10): the uniqueness search
+        once more and nothing else — the free checks passed minutes ago and
+        are not repeated. Not sooner than `retry_gap_s` after the search gave
+        up on it. Whatever comes back now is final: a verdict is tallied as
+        the verdict it is, and a second failure of ours as "rede-NOSSO"."""
+        wait = pending.at + self._retry_gap - self._clock()
+        if wait > 0:
+            self._sleep(wait)
+        uniq, label, _ours = self._unique(pending.src, pending.tid, pending.base)
+        if uniq is True:
+            return self._candidate(pending.src, pending.tid, pending.read,
+                                   pending.base)
+        tally.unique += 1
+        tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
+        return None
 
     def fill(self, larder: Larder, want: int, *, max_draws: int = 400,
              notify: Callable[[str], None] | None = None, every: int = 25,
@@ -992,11 +1159,21 @@ class TargetFinder:
         não verificava nada — só custava um pedido ao gateway, e em 29/09
         custou 14 candidatos de Base que ele falhou a servir pela segunda
         vez. As outras quatro verificações correm iguais; o /prepare relê
-        antes de selar."""
+        antes de selar.
+
+        A SEGUNDA VOLTA (10/10). Um candidato que passou tudo e a quem a
+        pesquisa do nome não respondeu — falha NOSSA, não dele — não é
+        deitado fora: fica à espera, em memória, e no fim da corrida
+        pergunta-se outra vez, uma vez. Só a pesquisa; as outras
+        verificações não se repetem. O relatório diz quantos pedidos
+        falharam e de que tipo, quantos candidatos se repetiram e quantos
+        se salvaram. Nada disto se grava."""
         note = notify or (lambda _t: None)
         ok = chain_ok or (lambda c: c in {s.chain for s in self._sources})
         known = {parse_ref(k): v for k, v in (known_reads or {}).items()}
         rep = DepositReport()
+        waiting: list[Pending] = []
+        failed_before = self.search_failures()
         for raw in refs:
             rep.asked += 1
             parsed = parse_ref(raw)
@@ -1020,12 +1197,27 @@ class TargetFinder:
             if named is None:
                 continue
             read, base = named
-            cand = self.verify(src, tid, read, base, rep.rejected)
+            cand = self.verify(src, tid, read, base, rep.rejected, defer=True)
+            if isinstance(cand, Pending):
+                waiting.append(cand)
+                continue
             if cand is None:
                 continue
             if larder.add(cand):
                 rep.added += 1
                 rep.rejected.found += 1
+        if waiting:
+            note(f"deposit: {len(waiting)} candidato(s) sem resposta da pesquisa "
+                 "do nome (falha nossa) — volto a perguntar no fim, uma vez; "
+                 "pode demorar até um minuto")
+        for pending in waiting:
+            rep.second.asked += 1
+            cand = self.ask_again(pending, rep.rejected)
+            if cand is not None and larder.add(cand):
+                rep.added += 1
+                rep.rejected.found += 1
+                rep.second.rescued += 1
+        rep.second.failed = self.search_failures(since=failed_before)
         note(f"deposit: {rep.render()} · despensa {larder.size()}")
         return rep
 
@@ -1331,14 +1523,16 @@ class TargetPreparer:
                                             tally, strict=True)
             except ReadUnavailable as e:
                 unavailable += 1
-                tally.note_ours("leitura")
+                # "leitura", or what the raiser named (10/10: the uniqueness
+                # search says "unicidade:<how>")
+                tally.note_ours(getattr(e, "step", None) or "leitura")
                 self._notify(f"prepare: leitura indisponível ({e}) — candidato "
                              "MANTIDO na despensa, tento outro")
                 if unavailable >= max_unavailable:
                     raise PrepareRefused(
                         f"{unavailable} leituras seguidas falharam por nossa "
-                        "causa (gateway/RPC) — despensa INTACTA. Tenta daqui "
-                        "a pouco.") from None
+                        "causa (gateway/RPC/pesquisa) — despensa INTACTA. "
+                        "Tenta daqui a pouco.") from None
                 continue
             if fresh is None:
                 larder.consume(cand.id())
