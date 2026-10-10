@@ -31,10 +31,10 @@ from .clue_engine import (
     HARD_CLUE_FLOOR,
     ClueDraft,
     ClueEngine,
-    _name_facets,
     _ordinal,
     _parse_clue,
 )
+from .name_words import content_words, name_words, word_at
 
 # --------------------------------------------------------------------------- #
 # The relic ramp (Pedro, 2026-08-22, after the first live clue sample).         #
@@ -78,6 +78,11 @@ MIN_PIECES_PER_WORD = 2
 # its minimum out of PUZZLE_CLUES pieces. Until 09/10 nothing said so, and a
 # four-word name died inside `relic_ramp_plan` with an IndexError — after the
 # target had been through every paid check on the way to Clue 1.
+#
+# CONTENT words since 10/10 (name_words.py): "Portrait of a Lady" is two.
+# Counting by spaces made "nome-longo" the biggest filter of both harvests
+# (13 of 22 on Ethereum, 3 of 6 on the Manifold) and spent pieces on words
+# that are not the puzzle — in Hunt #17 "the" took two of the seven.
 MAX_NAME_WORDS = PUZZLE_CLUES // MIN_PIECES_PER_WORD
 REVEAL_START = 0.4             # first easy clue after the puzzle phase
 REVEAL_FLOOR = 0.05
@@ -204,11 +209,18 @@ def enumerable_words_in(name: str) -> tuple[str, ...]:
     )
 
 
+def content_facets(name: str) -> list[str]:
+    """One facet per CONTENT word of the name, named after the word's TRUE
+    position: "Portrait of a Lady" → name_word_1, name_word_4. The words in
+    between get no pieces and no reveal clues (name_words.py). A name with
+    no word at all still has one facet — the engine never plans on nothing."""
+    return [f"name_word_{w.position}" for w in content_words(name)] or ["name_word_1"]
+
+
 def name_fits_plan(name: str) -> bool:
-    """Does the puzzle plan have room for every word of this name? Counted
-    exactly as the plan counts them (`_name_facets`: one word per run of
-    non-space characters)."""
-    return len(_name_facets(name)) <= MAX_NAME_WORDS
+    """Does the puzzle plan have room for every CONTENT word of this name?
+    Counted exactly as the plan counts them (`content_facets`)."""
+    return len(content_facets(name)) <= MAX_NAME_WORDS
 
 
 def relic_ramp_plan(name: str) -> list:
@@ -225,11 +237,11 @@ def relic_ramp_plan(name: str) -> list:
 
     SEEDED by the name (auditoria 2026-08-26, P1-4): the plan is rebuilt on a
     crash-resume, so it must come out identical before and after."""
-    words = _name_facets(name)
+    words = content_facets(name)
     if len(words) > MAX_NAME_WORDS:
         # COUNTS ONLY: this reaches the operator, and the name is the answer
-        raise ValueError(f"no puzzle plan for a name of {len(words)} words "
-                         f"(the plan holds {MAX_NAME_WORDS})")
+        raise ValueError(f"no puzzle plan for a name of {len(words)} content "
+                         f"words (the plan holds {MAX_NAME_WORDS})")
     rng = random.Random(name)
     n_art = max(0, min(PUZZLE_IMAGE_PIECES, PUZZLE_CLUES - MIN_PIECES_PER_WORD * len(words)))
     n_name = PUZZLE_CLUES - n_art
@@ -267,7 +279,7 @@ def relic_slot_for(clue_index: int, ctx: RelicClueContext) -> tuple:
     n = len(plan)
     if clue_index <= n:
         return tuple(plan[clue_index - 1])
-    words = _name_facets(ctx.display_name)
+    words = content_facets(ctx.display_name)       # the reveal hands over the answer
     reveal_no = clue_index - n                     # 1-based inside the reveal phase
     if reveal_no == REVEAL_IMAGE_SLOT:
         return ("image", IMAGE_EASY_OBLIQUENESS)
@@ -389,9 +401,10 @@ def relic_guidance_for(
     here, and every clue carried two independent routes to the word."""
     if facet.startswith("name_word_"):
         n = int(facet.rsplit("_", 1)[1])
-        words = ctx.display_name.split()
-        word = words[n - 1] if 0 < n <= len(words) else ""
-        which = "the only word" if len(words) <= 1 else f"the {_ordinal(n)} word"
+        hit = word_at(ctx.display_name, n)         # the TRUE position
+        word = hit.text if hit else ""
+        which = ("the only word" if len(name_words(ctx.display_name)) <= 1
+                 else f"the {_ordinal(n)} word")
         if clue_index <= PUZZLE_CLUES:
             return (
                 f"{which} of the relic's NAME (the word '{word}') — ONE constraint "
@@ -642,12 +655,16 @@ JSON object: {{"guesses": ["...", "...", ...]}} with up to {n} guesses."""
 
 def _solver_target_words(ctx: RelicClueContext, facet: str) -> list[str]:
     """The word(s) a hit is measured against: the facet's word for a name
-    piece, every name word plus the solution terms for an art piece."""
-    words = [w.lower() for w in re.findall(r"[A-Za-z]+", ctx.display_name)]
+    piece, every CONTENT word plus the solution terms for an art piece. Read
+    through name_words (10/10): the facet's number is the word's TRUE
+    position, and a word that is not content is never a target — "a" and
+    "the" used to be, so any guess that merely contained one was a hit."""
+    every = [r for w in content_words(ctx.display_name) for r in w.runs if len(r) > 1]
+    words = every
     if facet.startswith("name_word_"):
-        n = int(facet.rsplit("_", 1)[1])
-        if 0 < n <= len(words):
-            words = [words[n - 1]]
+        hit = word_at(ctx.display_name, int(facet.rsplit("_", 1)[1]))
+        if hit is not None:
+            words = [r for r in hit.runs if len(r) > 1] or list(hit.runs)
     return words + [t.strip().lower() for t in ctx.solution_terms if t.strip()]
 
 
@@ -785,7 +802,7 @@ class RelicClueEngine(ClueEngine):
         log = logging.getLogger(__name__)
         facet, _ = relic_slot_for(clue_index, persona)
         targets = _solver_target_words(persona, facet)
-        word_count = len(persona.display_name.split())
+        word_count = len(name_words(persona.display_name)) or 1
         try:
             alone = self._solver.guess([draft.text], word_count)
             accumulated = (

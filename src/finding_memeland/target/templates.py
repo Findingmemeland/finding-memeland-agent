@@ -84,8 +84,20 @@ def claim_hint_due(clue_index: int) -> bool:
     return clue_index in (2, 3) or (clue_index >= 5 and clue_index % 5 == 0)
 
 
-def target_clue_followup(clue_index: int, clue_text: str, taunt: str) -> str:
-    body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}" + (f"\n\n{taunt}" if taunt else "")
+# The first clue of the reveal phase also shows the SMALL WORDS of the name —
+# the function words, a lone letter, a number, an "&" — with every content
+# word blanked (10/10, Pedro: "numa linha fixa"). They were never the puzzle
+# and never on the never-write list; from here on the game is handing the
+# name over. A fixed line, not the writer's: it is the same in every hunt.
+TARGET_SMALL_WORDS_LINE = "the small words of the name are free: {skeleton}"
+
+
+def target_clue_followup(clue_index: int, clue_text: str, taunt: str, *,
+                         skeleton: str | None = None) -> str:
+    body = f"{_ordinal(clue_index)} Clue:\n\n{clue_text}"
+    if skeleton:
+        body += "\n\n" + TARGET_SMALL_WORDS_LINE.format(skeleton=skeleton)
+    body += f"\n\n{taunt}" if taunt else ""
     if claim_hint_due(clue_index):
         body += f"\n\n{TARGET_CLUE_FOLLOWUP_CLAIM_HINT}"
     return body

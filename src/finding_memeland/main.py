@@ -503,7 +503,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 http_get_larder_art=_http_get_larder_art,
                 http_post=_http_post, http_get_bytes=_http_get_image_bytes,
                 get_artwork_bytes=_http_get_artwork, solver=_target_solver,
-                progress=lambda line: notifier.notify(f"🏴 [snapshot] {line}"),
+                # the label of the job that is RUNNING (10/10): every progress
+                # line used to say "[snapshot]", whatever the command was
+                progress=lambda line: notifier.notify(
+                    f"🏴 [{target_flag.get('label') or 'alvo'}] {line}"),
             )
             print("[target] mode wired (epoch "
                   f"{s.target_epoch_id!r}; launch={'ON' if s.target_launch else 'off'})")
@@ -1435,6 +1438,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
                 return ("⛔ já há um trabalho de alvo a correr "
                         "(/scan, /fill ou /prepare) — espera pelo relatório.")
             target_flag["active"] = True
+            target_flag["label"] = label
 
         def _run():
             try:

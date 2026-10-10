@@ -1264,8 +1264,13 @@ class Orchestrator:
         try:
             draft = self._engine_for(hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
             if is_target:
+                from ..target.clues import small_words_for
                 from ..target.templates import target_clue_followup
-                text = target_clue_followup(clue_index, draft.text, draft.taunt or "")
+                text = target_clue_followup(
+                    clue_index, draft.text, draft.taunt or "",
+                    # the first clue of the reveal phase shows the name's
+                    # small words (10/10); every other clue gets None
+                    skeleton=small_words_for(hunt.ctx, clue_index))
             else:
                 text = clue_followup(clue_index, draft.text, draft.taunt or "", claim_hint)
             tweet_id = self._publisher.post(text)

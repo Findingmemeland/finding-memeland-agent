@@ -166,6 +166,7 @@ class DeployerSampler:
 # --------------------------------------------------------------------------- #
 
 # A ordem em que as causas aparecem: a do funil (colheita → depósito).
+# "nome-longo" traz o tipo desde 10/10 (conteúdo-4 / conteúdo-5+).
 _GROUPS = ("queimados", "indisponível-NOSSO", "defeito-DELES",
            "tokenURI fora de IPFS", "imagem fora de IPFS", "sem nome",
            "numerados", "nome recusado", "metadata", "nome", "nome-longo",
@@ -223,6 +224,9 @@ class ProbeReport:
     # a pesquisa do nome do NOSSO lado (10/10): pedidos falhados por tipo e
     # a segunda volta — ver prepare.SecondPass
     second: SecondPass = field(default_factory=SecondPass)
+    # MEDIÇÃO, não causa (10/10): nomes de 4+ palavras por espaços que a
+    # leitura antiga recusava e a leitura por conteúdo deixa seguir
+    long_fits: int = 0
 
     def render(self) -> str:
         head = [f"{self.asked} contrato(s) sorteado(s) de {self.universe} criações"]
@@ -244,6 +248,9 @@ class ProbeReport:
             causes = col.render()
             lines.append(f"{label}: passariam {col.passed} de {self.tested}"
                          + (f" — {causes}" if causes else ""))
+        if self.long_fits:
+            lines.append("nomes de 4+ palavras que cabem pelo conteúdo: "
+                         f"{self.long_fits}")
         search = self.second.render()
         if search:
             lines.append(search)
@@ -268,7 +275,7 @@ def cause_of(tally: Tally) -> tuple[str, str | None]:
     if tally.name:
         return "nome", None
     if tally.long_name:
-        return "nome-longo", None
+        return "nome-longo", _first(tally.long_name_kinds)
     if tally.no_identity:
         return "sem-identidade", None
     if tally.exposed:
@@ -510,6 +517,7 @@ class ContractProbe:
             src = Source("probe", self.chain, contract)
             named = self._finder.named_token(
                 src, token_id, tally, known=TokenRead(token_uri=uri, metadata=meta))
+            rep.long_fits += tally.long_fits
             cand = (self._finder.verify(src, token_id, named[0], named[1], tally,
                                         defer=True)
                     if named is not None else None)

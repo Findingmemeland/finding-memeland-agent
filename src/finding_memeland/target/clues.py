@@ -54,6 +54,13 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from ..content.clue_engine import HARD_CLUE_FLOOR, MalformedAnswer
+from ..content.name_words import (
+    FUNCTION_WORDS,
+    answer_terms,
+    name_skeleton,
+    name_words,
+    word_at,
+)
 from ..content.relic_clues import (
     PUZZLE_ANGLES,
     PUZZLE_CLUES,
@@ -163,7 +170,7 @@ def _n(tok: str) -> int:
     return int(tok) if tok.isdigit() else _NUM_WORDS.get(tok, 0)
 
 
-def _scope_at(text: str, pos: int, words: list[str]) -> tuple[list[str], bool]:
+def _scope_at(text: str, pos: int, words: list) -> tuple[list, bool]:
     """The name word(s) a claim at `pos` is about: the NEAREST preceding
     reference in the same sentence ("word two", "the first word"); none →
     every word plus the whole name (a claim then needs to hold for ANY).
@@ -196,6 +203,36 @@ def _is(letter: str, m) -> bool:
     return letter == target.lower()
 
 
+@dataclass(frozen=True)
+class _Spelling:
+    """Letters to check a claim against when it is about the WHOLE name: the
+    words' letters run together, as one run."""
+
+    letters: str
+    runs: tuple[str, ...]
+
+
+def _whole_name(words) -> _Spelling:
+    joined = "".join(w.letters for w in words)
+    return _Spelling(letters=joined, runs=(joined,))
+
+
+def _has_double(w) -> bool:
+    """A doubled letter is two equal letters SIDE BY SIDE — inside one run,
+    never across a hyphen or an apostrophe."""
+    return any(a == b for run in w.runs for a, b in zip(run, run[1:]))
+
+
+def _is_palindrome(w) -> bool:
+    return len(w.letters) > 1 and w.letters == w.letters[::-1]
+
+
+def _spells_inside(w, inner: str) -> bool:
+    """A shorter real word spelt inside this one — "self" inside
+    "Self-Portrait" counts; the word itself does not."""
+    return any(inner in run for run in w.runs) and inner != w.letters
+
+
 def structural_claim_errors(text: str, name: str) -> list[str]:
     """Claims the clue makes about the NAME'S STRING that are false or
     unverifiable, as feedback lines for the writer (each names the word:
@@ -217,13 +254,13 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
     guard verifies those, and prose that makes a structural claim not on
     the declared list is refused. Same jump as emoji: from a banned word
     to a deterministic test."""
-    words = [w for w in re.findall(r"[A-Za-zÀ-ÿ']+", (name or "").lower())]
+    words = list(name_words(name))            # ONE reading of the name (10/10)
     if not words:
         return []
     errs: list[str] = []
-    whole = "".join(words)
+    whole = _whole_name(words)
 
-    def holds(pos: int, pred) -> tuple[bool, list[str]]:
+    def holds(pos: int, pred) -> tuple[bool, list]:
         scope, any_ok = _scope_at(text, pos, words)
         ok = any(pred(w) for w in scope) or (any_ok and pred(whole))
         return ok, scope
@@ -232,7 +269,8 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
         ok, scope = holds(m.start(), pred)
         if not ok:
             errs.append(f"'{m.group(0)}' is false for "
-                        + (detail(scope) if detail else ", ".join(scope)))
+                        + (detail(scope) if detail
+                           else ", ".join(w.letters for w in scope)))
 
     m = _UNVERIFIABLE_RE.search(text)
     if m:
@@ -243,28 +281,30 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
     for m in _LETTERS_RE.finditer(text):
         n = _n(m.group("n"))
         if n:
-            false(m, lambda w: len(w) == n,
-                  lambda scope: ", ".join(f"{w} ({len(w)} letters)" for w in scope))
+            false(m, lambda w: len(w.letters) == n,
+                  lambda scope: ", ".join(f"{w.letters} ({len(w.letters)} letters)"
+                                          for w in scope))
     for m in _WORDS_RE.finditer(text):
         n = _n(m.group("n"))
         if n and n != len(words) and "letter" not in text[m.end():m.end() + 12].lower():
             errs.append(f"'{m.group(0)}' is false: the name has {len(words)} words")
     for m in _STARTS_RE.finditer(text):
-        false(m, lambda w: _is(w[0], m))
+        false(m, lambda w: _is(w.letters[0], m))
     for m in _ENDS_RE.finditer(text):
-        false(m, lambda w: _is(w[-1], m))
+        false(m, lambda w: _is(w.letters[-1], m))
     for m in _FIRST_LETTER_RE.finditer(text):
-        pick = (lambda w: w[0]) if m.group("pos").lower() == "first" else (lambda w: w[-1])
+        pick = ((lambda w: w.letters[0]) if m.group("pos").lower() == "first"
+                else (lambda w: w.letters[-1]))
         false(m, lambda w: _is(pick(w), m))
     for m in _DOUBLE_RE.finditer(text):
-        false(m, lambda w: any(a == b for a, b in zip(w, w[1:])))
+        false(m, _has_double)
     for m in _PALINDROME_RE.finditer(text):
-        false(m, lambda w: len(w) > 1 and w == w[::-1])
+        false(m, _is_palindrome)
     for m in _NO_VOWELS_RE.finditer(text):
-        false(m, lambda w: not any(c in _VOWELS for c in w))
+        false(m, lambda w: not any(c in _VOWELS for c in w.letters))
     for m in _CONTAINS_RE.finditer(text):
         inner = m.group("w").lower()
-        false(m, lambda w: inner in w and inner != w)
+        false(m, lambda w: _spells_inside(w, inner))
     return errs
 
 
@@ -323,7 +363,7 @@ def image_aspect_for(clue_index: int, ctx) -> str | None:
     return order[k % len(order)]
 
 
-def _claim_scope(words: list[str], word: int) -> tuple[list[str], bool]:
+def _claim_scope(words: list, word: int) -> tuple[list, bool]:
     if word == 0:
         return words, True
     if 1 <= word <= len(words):
@@ -333,8 +373,14 @@ def _claim_scope(words: list[str], word: int) -> tuple[list[str], bool]:
 
 def verify_claims(claims, name: str) -> list[str]:
     """Every declared claim, checked against the real spelling. Errors name
-    the claim and the word (writer-facing; never public)."""
-    words = re.findall(r"[A-Za-zÀ-ÿ']+", (name or "").lower())
+    the claim and the word (writer-facing; never public).
+
+    `word` is the word's TRUE position in the name (name_words, 10/10) — the
+    same number the writer was given for the piece, function words and all.
+    Until then this counted runs of letters while the plan counted spaces,
+    and a true claim about the third word of "Self-Portrait at Dawn" was
+    checked against "at"."""
+    words = list(name_words(name))
     errs: list[str] = []
     if not isinstance(claims, list):
         return ["'claims' must be a list"]
@@ -353,7 +399,8 @@ def verify_claims(claims, name: str) -> list[str]:
             errs.append(f"claim {t}: 'word' must be 1..{len(words)} or 0 for the whole name")
             continue
         v = str(c.get("value", "")).strip().lower()
-        joined = "".join(scope) if whole_ok else scope[0]
+        joined = "".join(x.letters for x in scope) if whole_ok else scope[0].letters
+        spelt = ", ".join(x.letters for x in scope)
         if t == "word_count":
             ok = v.isdigit() and int(v) == len(words)
             why = f"the name has {len(words)} words"
@@ -373,16 +420,17 @@ def verify_claims(claims, name: str) -> list[str]:
             if len(v) < 2 or not v.isalpha():
                 errs.append("claim contains: value must be a real substring of 2+ letters")
                 continue
-            ok = any(v in x and v != x for x in scope) or (whole_ok and v in joined and v != joined)
-            why = f"'{v}' is not spelt inside " + ", ".join(scope)
+            ok = any(_spells_inside(x, v) for x in scope) \
+                or (whole_ok and v in joined and v != joined)
+            why = f"'{v}' is not spelt inside " + spelt
         elif t == "double_letter":
-            ok = any(a == b for x in scope for a, b in zip(x, x[1:]))
-            why = "no letter is doubled in " + ", ".join(scope)
+            ok = any(_has_double(x) for x in scope)
+            why = "no letter is doubled in " + spelt
         elif t == "palindrome":
-            ok = any(len(x) > 1 and x == x[::-1] for x in scope) or (whole_ok and joined == joined[::-1])
+            ok = any(_is_palindrome(x) for x in scope) or (whole_ok and joined == joined[::-1])
             why = "nothing here reads the same backwards"
         else:  # no_vowels
-            ok = any(not any(ch in _VOWELS for ch in x) for x in scope)
+            ok = any(not any(ch in _VOWELS for ch in x.letters) for x in scope)
             why = "every word here has a vowel"
         if not ok:
             errs.append(f"claim {t} (word {w}, value {v!r}) is FALSE: {why}")
@@ -519,7 +567,10 @@ _ARTIST_KEYS = ARTIST_KEYS      # one reading (R9): banned here, credited at the
 # written. Exactly these eight leave the list. The matching itself (the
 # substring, the roots) is untouched: a distinctive word is still refused as
 # a word and as a root.
-_FUNCTION_WORDS = frozenset({"the", "an", "of", "and", "in", "on", "to", "at"})
+#
+# 10/10: the list lives in content/name_words.py, with the ONE reading of a
+# name's words — the same eight decide which words get puzzle pieces.
+_FUNCTION_WORDS = FUNCTION_WORDS
 
 
 @dataclass
@@ -538,11 +589,9 @@ class TargetClueContext(RelicClueContext):
         describe_image_batched); `metadata` (the full token metadata, if the
         caller has it) contributes the artist/creator name to the never-write
         list — a creator name is a search box too."""
-        words = [w for w in re.findall(r"[A-Za-zÀ-ÿ]{2,}", target.name)]
-        named = [w.lower() for w in words]
-        # a name made ONLY of function words keeps them all: an empty list
-        # would let a clue write the whole answer
-        terms = [t for t in named if t not in _FUNCTION_WORDS] or named
+        # the name's own terms: runs of 2+ letters minus the function words
+        # (and all of them, if nothing else is left) — name_words.answer_terms
+        terms = answer_terms(target.name)
         for k in _ARTIST_KEYS:
             v = (metadata or {}).get(k)
             if isinstance(v, str) and v.strip() and not v.startswith("0x"):
@@ -827,6 +876,33 @@ def _treasure_wording(guidance: str) -> str:
     return _RELIC_WORD_RE.sub(sub, guidance)
 
 
+def _small_words_note(words) -> str:
+    """What the writer is told about the words of the name that are NOT the
+    puzzle (10/10): which they are, that no clue is about them, and that
+    word numbers are the TRUE ones — counted over every word. Empty when
+    every word is a content word."""
+    small = [w for w in words if not w.content]
+    if not small:
+        return ""
+    listed = ", ".join(f"word {w.position} ('{w.text}')" for w in small)
+    return (f"SMALL WORDS: {listed} — part of the name, NOT part of the puzzle. "
+            "No clue is ever about them; you may write them freely. Word numbers "
+            "count EVERY word of the name, these included: when you say which "
+            "word a clue is about, and in \"claims\", use the number the FACET "
+            "below gives.\n")
+
+
+def small_words_for(ctx, clue_index: int) -> str | None:
+    """The name's skeleton — "___ of a ___" — for the FIRST clue of the
+    reveal phase and for no other; None when the name has nothing to show.
+    The puzzle is over at that point, and what the skeleton shows was never
+    the puzzle (name_words.name_skeleton)."""
+    plan = getattr(ctx, "clue_facet_plan", None) or relic_ramp_plan(ctx.display_name)
+    if clue_index != len(plan) + 1:
+        return None
+    return name_skeleton(ctx.display_name)
+
+
 def build_target_user_message(ctx: TargetClueContext, clue_index: int,
                               prior_clues: list[str]) -> str:
     """Mirrors build_relic_user_message on the DIRECT path (no anchor angle —
@@ -838,14 +914,16 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
     angle = angle_for_unverifiable(clue_index, ctx)
     aspect = image_aspect_for(clue_index, ctx)
     spent = spent_angles(clue_index, ctx, allow_anchor=False)
-    n_words = len(ctx.display_name.split())
+    words = name_words(ctx.display_name)
+    n_words = len(words)
     return (
         "The NFT's REAL attributes (point clues AT these; never write them verbatim):\n"
         f"- name ({n_words} words): {ctx.display_name}\n"
         f"- artwork: {ctx.image_description}\n"
         f"- lore (on-chain description, FLAVOUR ONLY, never quote it): {ctx.lore or '(none)'}\n"
         "\n"
-        f"Terms to NEVER write: {ctx.solution_terms}\n\n"
+        f"Terms to NEVER write: {ctx.solution_terms}\n"
+        + _small_words_note(words) + "\n"
         f"This is clue #{clue_index}. Target obliqueness: {obliqueness}.\n"
         + (
             f"PUZZLE PIECE {clue_index} of {PUZZLE_CLUES}: this clue is one piece "
@@ -1050,9 +1128,12 @@ class TargetClueEngine(RelicClueEngine):
         calls per hunt. The canary texts never leave this process."""
         if self._truth_judge is None:
             return
-        words = persona.display_name.split()
-        n = len(words)
-        w = words[-1]
+        # the LAST word of the name, at its true position (name_words, 10/10:
+        # by spaces, "Salt & Harbor" made Harbor "the third word")
+        words = name_words(persona.display_name)
+        if not words:
+            return
+        n, w = words[-1].position, words[-1].text
         ordinal = {1: "first", 2: "second", 3: "third"}.get(n, f"{n}th")
         canaries = []
         if len(w) >= 2:
@@ -1186,9 +1267,9 @@ class TargetClueEngine(RelicClueEngine):
             facet, _ = relic_slot_for(clue_index, persona)
             word = None
             if facet.startswith("name_word_"):
-                n = int(facet.rsplit("_", 1)[1])
-                ws = persona.display_name.split()
-                word = ws[n - 1] if 0 < n <= len(ws) else None
+                # the facet's number is the word's TRUE position (10/10)
+                hit = word_at(persona.display_name, int(facet.rsplit("_", 1)[1]))
+                word = hit.text if hit else None
             v = self._truth_judge.check(draft.text, name=persona.display_name,
                                         word=word, artwork=persona.image_description)
             if v.consistent is None:

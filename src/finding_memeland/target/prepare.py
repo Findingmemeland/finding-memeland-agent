@@ -499,17 +499,31 @@ def _moved(before: dict, after: dict) -> dict:
             if n > before.get(k, 0)}
 
 
-def _name_fits_plan(base: str) -> bool:
-    """Can the clue engine plan a hunt on this name at all? The puzzle plan
-    gives every word of the name its own pieces and holds only so many words
-    (`relic_clues.MAX_NAME_WORDS`). A longer name used to be accepted here
-    and then die inside the plan — at /prepare, after the paid uniqueness
-    call and the vision call — as "sem-pista (IndexError)".
+def _plan_load(base: str) -> tuple[int, int, int]:
+    """(content words, what the plan holds, words by spaces) for one name.
+
+    Can the clue engine plan a hunt on this name at all? The puzzle plan
+    gives every CONTENT word of the name its own pieces and holds only so
+    many (`relic_clues.MAX_NAME_WORDS`). A longer name used to be accepted
+    here and then die inside the plan — at /prepare, after the paid
+    uniqueness call and the vision call — as "sem-pista (IndexError)".
+
+    Content words since 10/10 (content/name_words.py): until then the plan
+    counted by spaces, "Portrait of a Lady" was four words, and "nome-longo"
+    was the biggest filter of both harvests. The third number is that old
+    count, kept ONLY so the report can say how many names the new reading
+    lets in.
 
     Imported lazily: prepare.py must not drag the clue engine into every
     import of the larder."""
-    from ..content.relic_clues import name_fits_plan
-    return name_fits_plan(base)
+    from ..content.name_words import content_words
+    from ..content.relic_clues import MAX_NAME_WORDS
+    return len(content_words(base)), MAX_NAME_WORDS, len(base.split())
+
+
+def _name_fits_plan(base: str) -> bool:
+    content, holds, _by_spaces = _plan_load(base)
+    return content <= holds
 
 
 def _snapshot(guard) -> dict | None:
@@ -580,7 +594,14 @@ class Tally:
     draws: int = 0
     metadata: int = 0        # tokenURI reverts, or metadata came back empty
     name: int = 0            # base name has fewer than two real words
-    long_name: int = 0       # more words than the clue plan holds (09/10)
+    long_name: int = 0       # more CONTENT words than the clue plan holds
+    # `long_name` again, by HOW MANY content words (10/10): "conteúdo-4" is
+    # what a four-word plan would let in, "conteúdo-5+" is what nothing will.
+    long_name_kinds: dict = field(default_factory=dict)
+    # NOT a cause — a measurement (10/10): names of 4+ words by spaces that
+    # the old reading refused and the content reading lets through. They go
+    # on to the other checks; this only says how many there were.
+    long_fits: int = 0
     no_identity: int = 0     # the tokenURI has no content id to seal (09/10)
     exposed: int = 0         # named in a public file of the repository (09/10)
     image: int = 0           # the gateway ANSWERED without bytes (dead pin)
@@ -638,7 +659,22 @@ class Tally:
         self.unavailable += 1
         self.unavailable_kinds[kind] = self.unavailable_kinds.get(kind, 0) + 1
 
+    def notes(self) -> str:
+        """What the report says that is NOT a cause — measurements about
+        candidates that went on. '' when there is nothing to say."""
+        if not self.long_fits:
+            return ""
+        return f"nomes de 4+ palavras que cabem pelo conteúdo: {self.long_fits}"
+
     def render(self) -> str:
+        causes, notes = self.causes(), self.notes()
+        return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
+                + (f" — {causes}" if causes else "")
+                + (f" · {notes}" if notes else ""))
+
+    def causes(self) -> str:
+        """Why candidates were lost, by cause — and nothing else: these
+        numbers add up to the candidates that did not make it."""
         causes = ", ".join(f"{k} {v}" for k, v in (
             ("metadata", self.metadata), ("nome", self.name),
             ("nome-longo", self.long_name),
@@ -653,7 +689,8 @@ class Tally:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.image_kinds.items()))
             causes = causes.replace(f"imagem {self.image}",
                                     f"imagem {self.image} ({kinds})", 1)
-        for label, n, split in (("único", self.unique, self.unique_kinds),
+        for label, n, split in (("nome-longo", self.long_name, self.long_name_kinds),
+                                ("único", self.unique, self.unique_kinds),
                                 ("dono", self.owner, self.owner_kinds),
                                 ("indisponível-NOSSO", self.unavailable,
                                  self.unavailable_kinds)):
@@ -669,8 +706,7 @@ class Tally:
             # same label as HarvestReport: the group now holds the dead pin
             causes = (causes + ", " if causes else "") + \
                 f"defeito-DELES {sum(self.bad_meta.values())} ({kinds})"
-        return (f"{self.found} encontrado(s) em {self.draws} sorteio(s)"
-                + (f" — {causes}" if causes else ""))
+        return causes
 
 
 # `chain:0xcontrato:tokenId`. O tokenId não tem tecto: os basenames que a
@@ -724,12 +760,10 @@ class DepositReport:
         if self.chain_closed:
             bits.append(f"cadeia sem provedor {self.chain_closed} "
                         f"({', '.join(sorted(self.closed_chains))})")
-        causes = self.rejected.render()
-        if " — " in causes:
-            bits.append(causes.split(" — ", 1)[1])
-        search = self.second.render()
-        if search:
-            bits.append(search)
+        for extra in (self.rejected.causes(), self.rejected.notes(),
+                      self.second.render()):
+            if extra:
+                bits.append(extra)
         return " · ".join(bits)
 
 
@@ -946,12 +980,18 @@ class TargetFinder:
         if not name_qualifies(base, min_words=self._min_words):
             tally.name += 1
             return None
-        if not _name_fits_plan(base):
+        content, holds, by_spaces = _plan_load(base)
+        if content > holds:
             # its own cause, never folded into 'nome': a name that is fine
             # and that we cannot plan yet is OUR limit, and the day the plan
-            # grows this number says what it was costing
+            # grows this number says what it was costing — by how many
+            # content words (10/10), so it says what a 4-word plan would buy
             tally.long_name += 1
+            kind = f"conteúdo-{content}" if content == holds + 1 else f"conteúdo-{holds + 2}+"
+            tally.long_name_kinds[kind] = tally.long_name_kinds.get(kind, 0) + 1
             return None
+        if by_spaces > holds:
+            tally.long_fits += 1        # measurement: the old reading refused it
         if not content_id(read.token_uri):
             # NO IDENTITY, NO TARGET (09/10). The live check compares content
             # ids read from the chain. A target sealed without one makes

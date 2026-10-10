@@ -819,9 +819,11 @@ def test_the_resume_notice_speaks_the_public_number_too():
 
 # --------------------------------------------------------------------------- #
 # 9. Um nome com mais palavras do que o plano aguenta é recusado à entrada      #
+#    — palavras DE CONTEÚDO desde 10/10 (tests/test_name_words.py): até lá     #
+#    contava-se por espaços, e um número ou um "&" soltos eram palavras.       #
 # --------------------------------------------------------------------------- #
 
-FOUR = "Quiet Lantern Above Water"        # four words: more than the plan holds
+FOUR = "Quiet Lantern Above Water"        # four content words: more than the plan holds
 THREE = "Quiet Lantern Above"
 
 
@@ -831,9 +833,9 @@ def test_the_plan_holds_three_words_and_the_limit_comes_from_the_plan():
 
 @pytest.mark.parametrize("name, fits", [
     ("Lantern", True), ("Quiet Lantern", True), (THREE, True),
-    (FOUR, False), ("Quiet Lantern Above The Water", False),
-    ("Name 42 Of Two", False),             # a number in the middle is a word too
-    ("Sun & Moon Rising", False),          # and so is a sign on its own
+    (FOUR, False), ("Quiet Lantern Above The Water", False),   # "The" is not one of the four
+    ("Name 42 Of Two", True),              # 10/10: a number is not a word, "Of" is not content
+    ("Sun & Moon Rising", True),           # 10/10: nor is a sign on its own
     ("Lion-Hearted King Rises", True),     # a hyphen does not split a word
 ])
 def test_a_name_fits_exactly_when_the_plan_can_be_built(name, fits):
@@ -853,7 +855,7 @@ def test_the_clue_context_refuses_a_long_name_by_its_count_never_by_its_words():
                     image="ipfs://QmImage", metadata_sha256="ab" * 32, epoch="e1")
     with pytest.raises(ValueError) as e:
         TargetClueContext.from_target(target, image_description="a lighthouse")
-    assert "4 words" in str(e.value) and "Lantern" not in str(e.value)
+    assert "4 content words" in str(e.value) and "Lantern" not in str(e.value)
 
 
 def test_a_long_name_is_refused_at_the_deposit_before_anything_is_spent():
