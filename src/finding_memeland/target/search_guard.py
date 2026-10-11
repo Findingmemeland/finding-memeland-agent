@@ -360,12 +360,37 @@ class OpenSeaSearch:
                 out.append((ident, str(nft.get("name") or "")))
         return out
 
-    def _search(self, text: str, *, chains: str | None) -> list[dict]:
+    def control(self, text: str, *, chain: str | None = None) -> int:
+        """A CONTROL search (10/10): the same request as a real one —
+        unfiltered, or filtered by `chain` — that NO CACHE can answer, and
+        how many results came back.
+
+        MEASURED 10/10, 12:13 UTC, with the search itself failing (503 on
+        every unfiltered page of 20 or more): the same successful request,
+        repeated a minute later, came back in 0.1 s with `cf-cache-status:
+        HIT` — the CDN answered, not the search. A control that can be served from a
+        cache says "it answers" about a search that is down. An extra query
+        parameter the API does not know (`cb`) makes every control a cache
+        MISS, and the API ignores it (measured: same results).
+
+        Real searches stay cacheable: a cached answer to the SAME question
+        is still the answer."""
+        slug = None
+        if chain is not None:
+            slug = OPENSEA_CHAIN.get(chain.lower())
+            if slug is None:
+                raise ValueError("chain not searchable on this surface")
+        return len(self._search(text, chains=slug, fresh=True))
+
+    def _search(self, text: str, *, chains: str | None,
+                fresh: bool = False) -> list[dict]:
         from urllib.parse import quote
         url = (f"{self._base}/search?query={quote(text)}"
                f"&asset_types=nft&limit={self._size}")
         if chains:
             url += f"&chains={chains}"
+        if fresh:
+            url += f"&cb={time.time_ns():x}"      # a nonce: nothing but a cache key
         raw = self._get(url, {"X-API-KEY": self._key,
                               "Accept": "application/json"})
         payload = json.loads(raw or "{}")
@@ -485,40 +510,66 @@ def is_server_error(kind: str) -> bool:
     return len(kind) == 3 and kind.isdigit() and kind.startswith("5")
 
 
+def control_results(search, query: str = SEARCH_CONTROL_QUERY, *,
+                    chain: str | None = None) -> int:
+    """Ask `search` the control question — unfiltered, or filtered by
+    `chain` — and return how many results came back. Through the adapter's
+    own `control` when it has one (OpenSea: never from a cache); otherwise
+    by its ordinary search. Raises what the search raises."""
+    fresh = getattr(search, "control", None)
+    if callable(fresh):
+        return int(fresh(query, chain=chain))
+    if chain is None:
+        return len(search.named_items(query))
+    return len(search.item_ids(query, chain=chain))
+
+
 @dataclass(frozen=True)
 class SearchProbe:
     """One control search, asked NOW: did it answer, how did it fail if it
-    did not, and how long it took. Words and numbers only."""
+    did not, how long it took and how many results it brought. Words and
+    numbers only."""
 
     ok: bool
     kind: str               # "" when it answered; else `search_failure_kind`
     seconds: float
+    results: int | None = None
 
     def render(self) -> str:
         took = f"{self.seconds:.1f}".replace(".", ",") + " s"
         if self.ok:
             # the transport hands over a body, not a status line: "it
             # answered" is what is known — an HTTP success with a results
-            # list in it, which is more than a bare 200
-            return f"respondeu em {took}"
+            # list in it, which is more than a bare 200. HOW MANY results
+            # matters. Measured 10/10, same page of 50, filtered by one
+            # chain: a text with no results was answered, a text with a
+            # full page got a 503. An answer with none says little about
+            # a question that has fifty.
+            n = self.results
+            count = "" if n is None else (" (1 resultado)" if n == 1
+                                          else f" ({n} resultados)")
+            return f"respondeu em {took}{count}"
         if self.kind == "timeout":
             return f"sem resposta em {took} (timeout)"
         return f"{self.kind} em {took}"
 
 
 def probe_search(search, *, query: str = SEARCH_CONTROL_QUERY,
+                 chain: str | None = None,
                  clock: Callable[[], float] = time.monotonic) -> SearchProbe:
-    """Ask `search` the control query once — no retry, the caller's own
-    transport and its own time limit — and say what happened. For /status
-    (10/10): after two harvests lost candidates to minutes-long bursts of
-    503 while the status page said "operational", the operator needs to see,
-    before a launch, whether the search answers RIGHT NOW. Never raises."""
+    """Ask `search` the control query once — no retry, no cache, the
+    caller's own transport and its own time limit — and say what happened.
+    For /status (10/10): after two harvests lost candidates to minutes-long
+    bursts of 503 while the status page said "operational", the operator
+    needs to see, before a launch, whether the search answers RIGHT NOW.
+    `chain`: the search filtered by one chain — the shape the clue guard and
+    the launch check use. Never raises."""
     started = clock()
     try:
-        search.named_items(query)
+        n = control_results(search, query, chain=chain)
     except Exception as e:  # noqa: BLE001 — a probe reports, it never throws
         return SearchProbe(False, search_failure_kind(e), clock() - started)
-    return SearchProbe(True, "", clock() - started)
+    return SearchProbe(True, "", clock() - started, n)
 
 
 class MarketNameUniqueness:
@@ -663,7 +714,7 @@ class MarketNameUniqueness:
         if not self._control_query:
             return None
         try:
-            self._search.named_items(self._control_query)
+            control_results(self._search, self._control_query)   # never a cache
         except Exception:  # noqa: BLE001 — a measurement never breaks a verdict
             self.control["falhou"] = self.control.get("falhou", 0) + 1
             return False

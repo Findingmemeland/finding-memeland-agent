@@ -71,7 +71,7 @@ import json
 import random
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
@@ -480,6 +480,21 @@ SECOND_PASS_GAP_S = 60.0
 # failure — and what still fails then is told apart by the control search:
 # the moment (ours), or the name (the marketplace cannot search it).
 THIRD_PASS_GAP_S = 300.0
+# CARRIED TO THE NEXT RUN (Pedro, 10/10). What is still unanswered after the
+# third pass — the MOMENT, not the name — is not thrown away: it waits in the
+# finder's memory and is asked again at the start of the next harvest of the
+# same process. Measured the same day: the search's bursts last minutes (15
+# requests out of 15 over more than six), and a harvest lost 5 candidates to
+# one while gaining a single target. In memory only: never written, never
+# rendered; a restart (every deploy) empties it. This many at most — the
+# oldest go first, and the same piece is never there twice — so a search
+# that stays down for days cannot grow it without end.
+CARRY_MAX = 50
+# How many failures IN A ROW, each with the control search answering right
+# after it, say "the name" and not "the moment": the marketplace searches,
+# and cannot search this — nor can a player. The same three the passes of one
+# run use (`ask_again`); a carried candidate reaches them across runs.
+NAME_BOUND_AFTER = 3
 
 
 def _transport_how(guard) -> str:
@@ -585,6 +600,13 @@ class Pending:
     # what the control search said after each of them: True = it answered
     # (the name), False = it failed too (the moment), None = no control
     controls: tuple = ()
+    # the "at most this many per contract IN THE LARDER" rule of the harvest
+    # that found it (0 = none): it still holds when it is asked again later
+    cap: int = 0
+
+    def ref(self) -> str:
+        """The piece, as the larder names it — to compare, never to show."""
+        return f"{self.src.chain}:{self.src.contract.lower()}:{self.tid}"
 
     def __repr__(self) -> str:
         return "Pending(<candidate>)"
@@ -612,6 +634,8 @@ class SearchPasses:
     second_rescued: int = 0
     third_asked: int = 0
     third_rescued: int = 0
+    carried: int = 0          # still unanswered: kept in memory for the next run
+    evicted: int = 0          # left memory to make room (CARRY_MAX), any run's
 
     def render(self) -> str:
         parts = []
@@ -632,7 +656,55 @@ class SearchPasses:
         if self.third_asked:
             parts.append(f"3.ª volta: {self.third_asked} repetido(s), "
                          f"{self.third_rescued} salvo(s)")
+        if self.carried:
+            parts.append(f"ficam em memória para a próxima corrida: {self.carried}")
+        if self.evicted:
+            parts.append(f"saíram da memória, os mais antigos: {self.evicted} "
+                         f"(cabem {CARRY_MAX})")
         return " · ".join(parts)
+
+
+@dataclass
+class CarryReport:
+    """What became of the candidates a previous run left unanswered, at the
+    start of this one. Counts only."""
+
+    total: int = 0            # waiting in memory when the run started
+    asked: int = 0            # the search was asked about it again
+    rescued: int = 0          # unique now: in the larder
+    verdict: int = 0          # the search answered, and it was not "unique"
+    blind: int = 0            # the NAME: the control answers, this never does
+    waiting: int = 0          # no answer again: still in memory
+    duplicate: int = 0        # already in the larder: not asked
+    full: int = 0             # its contract has its share by now: not asked
+    unasked: int = 0          # the control failed too: the rest were not asked
+
+    def kept(self) -> int:
+        return self.waiting + self.unasked
+
+    def render(self) -> str:
+        if not self.total:
+            return ""
+        parts = []
+        if self.asked:
+            bits = [f"{self.rescued} guardado(s)"]
+            if self.verdict:
+                bits.append(f"{self.verdict} com veredicto")
+            if self.blind:
+                bits.append(f"{self.blind} que a pesquisa não procura (índice-cego)")
+            if self.waiting:
+                bits.append(f"{self.waiting} sem resposta outra vez")
+            parts.append(f"{self.asked} perguntado(s) outra vez: " + ", ".join(bits))
+        if self.duplicate:
+            parts.append(f"{self.duplicate} já na despensa")
+        if self.full:
+            parts.append(f"{self.full} de contrato já cheio")
+        if self.unasked:
+            parts.append(f"{self.unasked} nem perguntado(s): o controlo também falhou")
+        if self.kept():
+            parts.append(f"ficam em memória: {self.kept()}")
+        return (f"da corrida anterior: {self.total} candidato(s) em memória — "
+                + " · ".join(parts))
 
 
 @dataclass
@@ -889,6 +961,9 @@ class TargetFinder:
         # failure of ours it may be asked again, and the clock that says so.
         self._retry_gap = max(0.0, float(retry_gap_s))
         self._third_gap = max(0.0, float(third_gap_s))
+        # candidates no pass got an answer for, kept for the next run
+        # (CARRY_MAX). IN MEMORY ONLY: never written, never rendered.
+        self._carried: list[Pending] = []
         self._sleep = sleep or time.sleep
         self._clock = clock or time.monotonic
         # THE EXPOSED LIST (09/10, Pedro's "lista de queimados"): a token ever
@@ -1206,8 +1281,8 @@ class TargetFinder:
         report.speed = _moved(before["speed"], now["speed"])
         report.control = _moved(before["control"], now["control"])
 
-    def ask_again(self, pending: Pending, tally: Tally, *,
-                  last: bool) -> Candidate | Pending | None:
+    def ask_again(self, pending: Pending, tally: Tally, *, last: bool,
+                  unanswered: list | None = None) -> Candidate | Pending | None:
         """A LATER PASS, for one candidate (10/10): the uniqueness search
         once more and nothing else — the free checks passed minutes ago and
         are not repeated. Not sooner than the pass's gap after the search
@@ -1221,7 +1296,9 @@ class TargetFinder:
             piece);
           · "índice-cego:pesquisa-<how>" when the control answered after
             EVERY one of the three failures (the NAME: the marketplace
-            searches, and cannot search this — nor can a player)."""
+            searches, and cannot search this — nor can a player).
+        What ends as "rede-NOSSO" is also appended to `unanswered`, when the
+        caller gives one: it may be asked again in a later run."""
         gap = self._retry_gap if pending.passes == 1 else self._third_gap
         wait = pending.at + gap - self._clock()
         if wait > 0:
@@ -1236,8 +1313,13 @@ class TargetFinder:
                 return Pending(src=pending.src, tid=pending.tid, read=pending.read,
                                base=pending.base, how=ours, at=self._clock(),
                                passes=pending.passes + 1, controls=controls)
-            if len(controls) >= 3 and all(c is True for c in controls):
+            if len(controls) >= NAME_BOUND_AFTER and all(c is True for c in controls):
                 label = "índice-cego:pesquisa" + (f"-{ours}" if ours else "")
+            elif unanswered is not None:
+                unanswered.append(Pending(
+                    src=pending.src, tid=pending.tid, read=pending.read,
+                    base=pending.base, how=ours, at=self._clock(),
+                    passes=pending.passes + 1, controls=controls))
         tally.unique += 1
         tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
         return None
@@ -1246,7 +1328,8 @@ class TargetFinder:
                      tally_for: Callable[[int], Tally], *,
                      notify: Callable[[str], None] | None = None,
                      label: str = "deposit",
-                     what: str = "candidato(s)") -> list[Candidate | None]:
+                     what: str = "candidato(s)",
+                     unanswered: list | None = None) -> list[Candidate | None]:
         """THE SECOND PASS, and the THIRD for what failed twice — at the end
         of a run, in memory, for the candidates the search did not answer.
         Returns, for each of `waiting` in order, the Candidate it turned out
@@ -1272,11 +1355,102 @@ class TargetFinder:
                  "última volta; pode demorar até cinco minutos")
         for i, pending in again:
             report.third_asked += 1
-            got = self.ask_again(pending, tally_for(i), last=True)
+            got = self.ask_again(pending, tally_for(i), last=True,
+                                 unanswered=unanswered)
             if got is not None:
                 report.third_rescued += 1
                 results[i] = got
         return results
+
+    # -- carried to the next run (in memory, CARRY_MAX) -------------------- #
+
+    def carried(self) -> int:
+        """How many candidates are waiting in memory for the next run."""
+        return len(self._carried)
+
+    def _carry(self, unanswered: Sequence[Pending]) -> tuple[int, int]:
+        """Into memory, the same piece never twice (a harvest can find again
+        the piece an earlier one left waiting: the newer reading stays).
+        Returns (how many of THESE stayed, how many left to make room)."""
+        by_ref = {p.ref(): p for p in self._carried}
+        for pending in unanswered:
+            by_ref.pop(pending.ref(), None)
+            by_ref[pending.ref()] = pending
+        everyone = list(by_ref.values())
+        self._carried = everyone[-CARRY_MAX:]                # the oldest go first
+        mine = {p.ref() for p in unanswered}
+        stayed = sum(1 for p in self._carried if p.ref() in mine)
+        return stayed, len(everyone) - len(self._carried)
+
+    def retry_carried(self, larder: Larder) -> CarryReport:
+        """THE START OF A RUN: ask again, once each, the candidates the
+        previous run could get no answer for. The search only — they had
+        passed every other check when they were set aside, and /prepare
+        re-reads everything before it seals anyway.
+
+          · unique now: into the larder;
+          · a verdict: gone;
+          · no answer again: back in memory, for the run after this one —
+            unless it is the NAME (`NAME_BOUND_AFTER` failures in a row with
+            the control answering): then it is gone, as "índice-cego";
+          · no answer AND the control failed too: the search is not
+            answering NOW, so the ones behind it are not asked at all — they
+            wait as they were. Nothing is lost by not asking, and a search
+            that is down is not hammered (each of them would cost a failed
+            question and a failed control: ~20 s at what was measured 10/10).
+
+        Not asked either: what is in the larder by now, and a piece of a
+        contract that has its share by now (`Pending.cap`).
+
+        Whatever happens in here, nobody leaves memory unanswered. Counts
+        only leave here."""
+        waiting = list(self._carried)
+        rep = CarryReport(total=len(waiting))
+        kept: list[Pending] = []
+        reached = 0
+        try:
+            for pending in waiting:
+                reached += 1
+                kept.append(pending)                # until it is settled
+                src, tid = pending.src, pending.tid
+                if larder.has(pending.ref()):
+                    kept.pop()
+                    rep.duplicate += 1
+                    continue
+                if pending.cap and larder.count_of(src.chain, src.contract) >= pending.cap:
+                    kept.pop()
+                    rep.full += 1
+                    continue
+                rep.asked += 1
+                uniq, _label, ours = self._unique(src, tid, pending.base)
+                if uniq is True:
+                    added = larder.add(
+                        self._candidate(src, tid, pending.read, pending.base))
+                    kept.pop()
+                    rep.rescued += added
+                    rep.duplicate += not added
+                    continue
+                if ours is None:
+                    kept.pop()
+                    rep.verdict += 1
+                    continue
+                control = _last_control(self._name_is_unique)
+                controls = pending.controls + (control,)
+                if (len(controls) >= NAME_BOUND_AFTER
+                        and all(c is True for c in controls[-NAME_BOUND_AFTER:])):
+                    kept.pop()
+                    rep.blind += 1
+                    continue
+                kept[-1] = replace(pending, how=ours, at=self._clock(),
+                                   passes=pending.passes + 1, controls=controls)
+                rep.waiting += 1
+                if control is False:
+                    break                           # the moment: stop asking
+        finally:
+            rest = waiting[reached:]
+            rep.unasked = len(rest)
+            self._carried = kept + rest
+        return rep
 
     def fill(self, larder: Larder, want: int, *, max_draws: int = 400,
              notify: Callable[[str], None] | None = None, every: int = 25,
@@ -1314,6 +1488,7 @@ class TargetFinder:
                 chain_ok: Callable[[str], bool] | None = None,
                 notify: Callable[[str], None] | None = None,
                 known_reads: dict | None = None,
+                larder_cap: int = 0,
                 ) -> DepositReport:
         """Alvos NOMEADOS entram na despensa, sem passarem pelo sorteio.
 
@@ -1357,7 +1532,16 @@ class TargetFinder:
         cinco minutos depois (3.ª). Só a pesquisa; as outras verificações
         não se repetem. O relatório diz quantos pedidos falharam e de que
         tipo, o que a pesquisa de controlo respondeu, quantos candidatos se
-        repetiram em cada volta e quantos se salvaram. Nada disto se grava."""
+        repetiram em cada volta e quantos se salvaram. Nada disto se grava.
+
+        O QUE NEM À TERCEIRA TEVE RESPOSTA (o momento, não o nome) fica na
+        memória do finder e volta a ser perguntado no início da corrida
+        seguinte do mesmo processo (`retry_carried`, que quem corre a
+        colheita chama antes de começar). Conta no relatório desta corrida
+        como "rede-NOSSO" — desta não entrou — e como "ficam em memória".
+        `larder_cap` é a regra "no máximo N por contrato NA DESPENSA" de
+        quem colheu (a colheita de uma fonte; 0 = nenhuma): segue com o
+        candidato, para valer também quando ele voltar a ser perguntado."""
         note = notify or (lambda _t: None)
         ok = chain_ok or (lambda c: c in {s.chain for s in self._sources})
         known = {parse_ref(k): v for k, v in (known_reads or {}).items()}
@@ -1396,11 +1580,15 @@ class TargetFinder:
             if larder.add(cand):
                 rep.added += 1
                 rep.rejected.found += 1
+        unanswered: list[Pending] = []
         for cand in self.later_passes(waiting, rep.search, lambda _i: rep.rejected,
-                                      notify=note):
+                                      notify=note, unanswered=unanswered):
             if cand is not None and larder.add(cand):
                 rep.added += 1
                 rep.rejected.found += 1
+        # what no pass got an answer for waits for the next run (10/10)
+        rep.search.carried, rep.search.evicted = self._carry(
+            [replace(p, cap=larder_cap) for p in unanswered])
         self.search_since(search_before, rep.search)
         note(f"deposit: {rep.render()} · despensa {larder.size()}")
         return rep

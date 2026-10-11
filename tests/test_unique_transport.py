@@ -534,10 +534,12 @@ def test_a_guard_that_does_not_say_how_is_still_ours():
     rep, larder, _calls, _clock, _said = deposit(Mute(), [1])
     assert larder.size() == 0
     assert (rep.search.second_asked, rep.search.third_asked) == (1, 1)
-    # no control, so nothing says "it is the name": it stays ours to the end
+    # no control, so nothing says "it is the name": it stays ours to the end —
+    # and, being ours, it waits in memory for the next run (10/10)
     assert rep.rejected.unique_kinds == {"rede-NOSSO": 1}
     assert rep.search.render() == ("2.ª volta: 1 repetido(s), 0 salvo(s) · "
-                                   "3.ª volta: 1 repetido(s), 0 salvo(s)")
+                                   "3.ª volta: 1 repetido(s), 0 salvo(s) · "
+                                   "ficam em memória para a próxima corrida: 1")
 
 
 def test_a_none_nobody_can_explain_is_not_asked_again():

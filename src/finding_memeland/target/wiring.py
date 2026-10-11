@@ -21,6 +21,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Callable
@@ -344,29 +345,64 @@ class TargetWiring:
     def search_line(self, *, clock: Callable[[], float] = time.monotonic) -> str:
         """Para o /status: a pesquisa do mercado responde AGORA?
 
-        Uma pesquisa de controlo, com o que respondeu e em quanto tempo —
-        pelo mesmo transporte e com o mesmo tempo limite de uma pesquisa a
-        sério (25 s), para dizer o que uma pesquisa a sério encontraria. Se
-        falhar, a mesma com página de 1: se ESSA responder, é a forma do
-        nosso pedido que pesa, e isso está na nossa mão. E os contadores da
-        guarda de unicidade desde o arranque — sem custo, e sem os quais um
-        "respondeu" agora esconde as falhas de há uma hora.
+        Pesquisas de controlo, cada uma com o que respondeu, em quanto tempo
+        e com quantos resultados — pelo transporte das pesquisas a sério e
+        com o tempo limite delas (25 s), e sempre a furar a cache (uma
+        resposta guardada pela CDN diria "responde" de uma pesquisa em
+        baixo; medido a 10/10):
 
-        Um pedido quando responde, dois quando falha. Nunca o nome de
-        ninguém: o texto do controlo é fixo e os resultados não se lêem."""
+          · SEM FILTRO de cadeia, página de 50 — a forma em que a colheita
+            e o /prepare perguntam pela unicidade. Se falhar, a mesma com
+            página de 1: mede se é o tamanho do pedido que pesa;
+          · POR CADEIA, página de 50, uma por cadeia em que o jogo guarda
+            alvos — a forma em que as pistas e o /launch perguntam.
+
+        O QUE A LINHA NÃO DIZ, de propósito: se um /launch passava. Disse-o
+        durante umas horas a 10/10 ("um /launch seria recusado…"), sem o
+        ter medido — e a pesquisa por cadeia estava a responder. Nem o
+        contrário: medido no mesmo dia, com a mesma página de 50 e filtrada
+        por uma cadeia, a pesquisa respondeu a um texto sem resultados e
+        deu 503 a um texto com a página cheia. O controlo tem poucos
+        resultados ou nenhuns: uma pergunta a sério pode falhar onde ele
+        respondeu. Por isso cada resposta traz a contagem ao lado.
+
+        AO MESMO TEMPO (Pedro, 10/10): cada forma mede-se na sua thread. A
+        linha demora o que demorar a mais lenta — no pior caso os 25 s da
+        pesquisa sem filtro mais os 25 s da página de 1, 50 s — e não a soma
+        de todas (100 s com duas cadeias). A página de 1 só se pede depois
+        de a de 50 falhar, por isso essas duas vão em fila.
+
+        E os contadores da guarda de unicidade desde o arranque, sem custo.
+        Nunca o nome de ninguém: o texto do controlo é fixo e os resultados
+        não se lêem — contam-se."""
         if self.market is None:
             return "pesquisa: não ligada"
         name = {"opensea": "OpenSea", "rarible": "Rarible"}.get(
             self.market_surface, self.market_surface or "?")
-        first = probe_search(self.market, clock=clock)
-        line = f"pesquisa {name}: " + ("" if first.ok else "⚠️ ") + first.render()
-        if not first.ok:
-            if self.market_small is not None:
+        chains = sorted(self.deposit_chains or ())
+
+        def unfiltered() -> str:
+            first = probe_search(self.market, clock=clock)
+            line = (f"pesquisa {name}, sem filtro: " + ("" if first.ok else "⚠️ ")
+                    + first.render())
+            if not first.ok and self.market_small is not None:
                 small = probe_search(self.market_small, clock=clock)
                 line += f" · página de 1: {small.render()}"
-            line += (" — um /launch seria recusado; uma hunt no puzzle "
-                     "ficava em hold")
-        return line + "\n" + self._search_since_boot()
+            return line
+
+        def by_chain(chain: str) -> str:
+            got = probe_search(self.market, chain=chain, clock=clock)
+            return f"{chain} " + ("" if got.ok else "⚠️ ") + got.render()
+
+        with ThreadPoolExecutor(max_workers=1 + len(chains),
+                                thread_name_prefix="search-probe") as pool:
+            first = pool.submit(unfiltered)
+            rest = [pool.submit(by_chain, chain) for chain in chains]
+            lines = [first.result()]
+            if rest:
+                lines.append("  por cadeia: " + " · ".join(f.result() for f in rest))
+        lines.append(self._search_since_boot())
+        return "\n".join(lines)
 
     def _search_since_boot(self) -> str:
         """What the uniqueness guard has counted since the process started:
@@ -376,8 +412,12 @@ class TargetWiring:
                     ("unique", "not_unique", "blind", "crowded", "transport"))
         failed = dict(getattr(self.uniqueness, "failed_requests", None) or {})
         control = dict(getattr(self.uniqueness, "control", None) or {})
+        # candidates the last harvest could get no answer for, kept in
+        # memory for the next one (10/10) — a count, never what they are
+        waiting = self.finder.carried() if self.finder is not None else 0
+        kept = f" · à espera em memória: {waiting}" if waiting else ""
         if not asked and not failed:
-            return "  unicidade desde o arranque: nenhuma pergunta"
+            return "  unicidade desde o arranque: nenhuma pergunta" + kept
         text = (f"  unicidade desde o arranque: {asked} pergunta(s) · "
                 f"{sum(failed.values())} pedido(s) falhado(s)")
         if failed:
@@ -385,7 +425,37 @@ class TargetWiring:
         if control:
             text += (f" · controlo: respondeu {control.get('respondeu', 0)}, "
                      f"falhou {control.get('falhou', 0)}")
-        return text
+        return text + kept
+
+    def _retry_carried(self, larder: Larder) -> str:
+        """O INÍCIO de uma colheita (10/10): voltar a perguntar pelos
+        candidatos que a corrida anterior deixou sem resposta — estão na
+        memória do finder, nunca escritos. O que entrar agora grava-se JÁ,
+        mesmo que a pergunta seguinte rebente: uma colheita que a seguir
+        recuse (canário cego, RPC em baixo) não os pode levar consigo.
+        Devolve a linha do relatório ('' se não havia ninguém à espera) —
+        contagens."""
+        if self.finder is None or not self.finder.carried():
+            return ""
+        if self.notify is not None:
+            self.notify(f"harvest: {self.finder.carried()} candidato(s) da corrida "
+                        "anterior sem resposta da pesquisa — pergunto outra vez "
+                        "antes de começar")
+        before = larder.size()
+        try:
+            rep = self.finder.retry_carried(larder)
+        finally:
+            if larder.size() > before:
+                self.larder_store.save(larder)      # o que entrou, fica
+        return rep.render()
+
+    def _waiting_tail(self) -> str:
+        """Ao lado do total da despensa, quantos ficam à espera em memória
+        no fim da corrida — o total, sem repetidos: a linha "da corrida
+        anterior" e a do depósito contam cada uma os seus, e a mesma peça
+        pode estar nas duas."""
+        waiting = self.finder.carried() if self.finder is not None else 0
+        return f" · à espera em memória: {waiting}" if waiting else ""
 
     def larder_spread(self) -> dict:
         """A forma da despensa, em contagens (ver Larder.spread)."""
@@ -490,6 +560,9 @@ class TargetWiring:
         lines: list[str] = []
         run_start = self._meta_snapshot()
         try:
+            carried = self._retry_carried(larder)
+            if carried:
+                lines.append(carried)
             for chain, harvester in self.harvesters.items():
                 if only is not None and chain != only:
                     continue
@@ -545,7 +618,8 @@ class TargetWiring:
         finally:
             self.larder_store.save(larder)
         added = larder.size() - before
-        tail = f"\ndespensa {before} → {larder.size()} (+{added})"
+        tail = (f"\ndespensa {before} → {larder.size()} (+{added})"
+                + self._waiting_tail())
         if self.dedicated_gateway and run_start is not None:
             tail += self._dedicated_spend(run_start, self._meta_snapshot())
         head = "harvest:" if only is None else f"harvest (só {only}):"
@@ -583,6 +657,9 @@ class TargetWiring:
         before = larder.size()
         run_start = self._meta_snapshot()
         ar_start = self._arweave_snapshot()
+        # os que a corrida anterior deixou sem resposta, antes de mais nada
+        carried = self._retry_carried(larder)
+        head = f"{carried}\n" if carried else ""
         try:
             refs, rep = harvester.harvest(
                 n, notify=self.notify,
@@ -590,16 +667,18 @@ class TargetWiring:
                 full=lambda contract: (larder.count_of(chain, contract)
                                        >= MAX_TARGETS_PER_CONTRACT))
         except HarvestBlind as e:
-            return f"harvest {source}: ⛔ {e} — nada foi varrido"
+            return f"{head}harvest {source}: ⛔ {e} — nada foi varrido"
         except Exception as e:  # noqa: BLE001 — NOSSO: só o tipo, nunca um URL
-            return (f"harvest {source}: NÃO MEDIDA — o RPC falhou "
+            return (f"{head}harvest {source}: NÃO MEDIDA — o RPC falhou "
                     f"({type(e).__name__}); nada foi concluído sobre a fonte")
         seen_harvest = self._meta_snapshot()
         ar_harvest = self._arweave_snapshot()
         try:
             dep = self.finder.deposit(
                 larder, refs, chain_ok=lambda c: c in self.deposit_chains,
-                known_reads=rep.reads)
+                known_reads=rep.reads,
+                # a regra dos dois por contrato segue com quem ficar à espera
+                larder_cap=MAX_TARGETS_PER_CONTRACT)
         finally:
             self.larder_store.save(larder)          # o que entrou, fica
         line = f"{rep.render()} → depósito: {dep.render()}"
@@ -613,10 +692,11 @@ class TargetWiring:
             ar_start, ar_after, sep=" · ")
         # medido, não estimado: é o que diz se o sorteio está caro
         line += f" · RPC do sorteio: {rep.rpc_calls} chamada(s)"
-        tail = f"\ndespensa {before} → {larder.size()} (+{larder.size() - before})"
+        tail = (f"\ndespensa {before} → {larder.size()} (+{larder.size() - before})"
+                + self._waiting_tail())
         if self.dedicated_gateway and run_start is not None:
             tail += self._dedicated_spend(run_start, self._meta_snapshot())
-        return f"harvest {source}:\n{line}{tail}"
+        return f"harvest {source}:\n{head}{line}{tail}"
 
     @staticmethod
     def _dedicated_spend(start: dict, end: dict) -> str:

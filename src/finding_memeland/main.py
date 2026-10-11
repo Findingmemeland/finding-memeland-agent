@@ -1039,6 +1039,12 @@ def build_agent(settings: Settings | None = None) -> Agent:
         That's a step further down the chain, so it also catches secrets that
         never synced, a deploy that didn't restart, or a stale cache. Read it
         before every /launch.
+
+        Runs OFF the admin loop (10/10; `OFF_LOOP_COMMANDS` in
+        telegram/approval_queue.py): it asks the network — the X API for the
+        anchor, the marketplace search — and no other command may wait for
+        that, the brake least of all. So it only READS: anything it changed
+        would change at the same time as the command that comes next.
         """
         # Headline from the DB, not this process's memory: after a restart the
         # resumed hunt is invisible to hunt_flag (post-mortem bonus finding A).
@@ -1182,10 +1188,11 @@ def build_agent(settings: Settings | None = None) -> Agent:
                     lines.append(target_wiring.exposed_line())
                 except Exception as e:  # noqa: BLE001
                     lines.append(f"lista de queimados: ilegível ({type(e).__name__})")
-                # The marketplace search, asked NOW (10/10): a control
-                # search with what it answered and how long it took. A
-                # /launch is refused while it does not answer, and a hunt in
-                # its puzzle phase goes on hold — read it before every hunt.
+                # The marketplace search, asked NOW (10/10): control
+                # searches in both shapes the game asks in — unfiltered (the
+                # uniqueness of a name) and by chain (the clues, the
+                # /launch) — each with what it answered, in how long and
+                # with how many results. Read it before every hunt.
                 try:
                     lines.append(target_wiring.search_line())
                 except Exception as e:  # noqa: BLE001
