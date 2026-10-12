@@ -1,28 +1,31 @@
-"""A pesquisa do mercado responde AGORA? — a linha do /status, e o que o
-/launch diz quando ela não responde.
+"""Em que estado está a pesquisa do mercado AGORA? — a linha do /status, e o
+que o /launch diz quando ela não responde.
 
 10/10. Duas colheitas perderam candidatos para rajadas de 503 na pesquisa do
 OpenSea — na segunda, 15 pedidos em 15, todos lentos, com o controlo a falhar
 também, durante mais de seis minutos — e a página de estado deles dizia
 "operational". Sem chave a pesquisa responde 401 à porta, por isso não há
-como a testar de fora. O Pedro quer VER, antes de cada hunt:
-
-  · uma pesquisa de controlo, com o que respondeu e em quanto tempo — pelo
-    transporte das pesquisas a sério, com o tempo limite delas (25 s);
-  · se falhar, a mesma com página de 1, na mesma linha: se ESSA responder,
-    é a forma do nosso pedido que pesa;
-  · os contadores da guarda de unicidade desde o arranque.
+como a testar de fora. O Pedro quer VER, antes de cada hunt, pesquisas de
+controlo com o que responderam e em quanto tempo — pelo transporte das
+pesquisas a sério, com o tempo limite delas (25 s) — e os contadores da
+guarda de unicidade desde o arranque.
 
 Corrigido no mesmo dia, depois de medir com a pesquisa em baixo (12:12–12:17
 UTC): (1) a Cloudflare guarda as respostas boas — o mesmo pedido, repetido um
 minuto depois, voltou em 0,1 s sem tocar na pesquisa — por isso o controlo
 passa a furar a cache; (2) a linha dizia "um /launch seria recusado; uma hunt
 no puzzle ficava em hold" sem o ter medido: o /launch e as pistas perguntam
-POR CADEIA, e essa forma estava a responder. A linha mede agora as duas
-formas, cada resposta com a contagem de resultados ao lado (com a mesma
-página de 50, filtrada por uma cadeia, a pesquisa respondeu a um texto sem
-resultados e deu 503 a um texto com a página cheia), e não diz o que não
+POR CADEIA, e essa forma estava a responder. A linha mede as duas formas,
+cada resposta com a contagem de resultados ao lado, e não diz o que não
 mediu.
+
+11/10 — DOIS CONTROLOS. O texto do controlo era uma pergunta PESADA: deu "⚠️
+503" dois dias seguidos, e nesse segundo dia um /prepare selou um alvo à
+primeira. Medido com três nomes já revelados, sem filtro: dois deram 503 e um
+respondeu em 1,7 s; por cadeia responderam os três. A linha "sem filtro"
+passa a mostrar o controlo LEVE e o PESADO, pedidos ao mesmo tempo (leve
+falha = em baixo; só a pesada falha = degradada; as duas respondem = boa), a
+"página de 1" sai, e por cadeia pergunta-se com o texto leve.
 
 E o texto do /launch: quando a pesquisa não respondia, a recusa mandava
 correr /prepare outra vez — o conselho de "a peça tornou-se pesquisável".
@@ -35,6 +38,8 @@ from __future__ import annotations
 import inspect
 import threading
 import urllib.error
+from collections import Counter
+from urllib.parse import quote
 
 import pytest
 from test_creator_harvest import _built
@@ -45,7 +50,8 @@ from finding_memeland.target.dryrun import TargetWorld
 from finding_memeland.target.hunt import LaunchRefused
 from finding_memeland.target.integration import LAUNCH_SEARCH_SILENT
 from finding_memeland.target.search_guard import (
-    SEARCH_CONTROL_QUERY,
+    SEARCH_HEAVY_QUERY,
+    SEARCH_LIGHT_QUERY,
     MarketNameUniqueness,
     OpenSeaSearch,
     SearchProbe,
@@ -54,6 +60,7 @@ from finding_memeland.target.search_guard import (
 from finding_memeland.target.wiring import TargetWiring
 
 SECRET = "Quiet+Lantern+Above"
+LIGHT, HEAVY = SEARCH_LIGHT_QUERY, SEARCH_HEAVY_QUERY
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:
@@ -83,23 +90,27 @@ class Clock:
 
 class Search:
     """Uma pesquisa de mentira: cada pedido demora `takes` segundos (no
-    relógio de mentira) e responde, ou levanta `fails`. Perguntada de várias
-    threads ao mesmo tempo: nada aqui muda a meio de um pedido."""
+    relógio de mentira) e responde, ou levanta `fails`. O texto PESADO pode
+    ter um comportamento só dele — `heavy=dict(takes=…, fails=…, rows=…)` —
+    e sem isso responde como qualquer outro. Perguntada de várias threads
+    ao mesmo tempo: nada aqui muda a meio de um pedido."""
 
     def __init__(self, clock: Clock | None = None, *, takes: float = 0.0, fails=None,
-                 rows=()):
+                 rows=(), heavy: dict | None = None):
         self.clock, self.takes, self.fails, self.rows = clock, takes, fails, list(rows)
+        self.heavy = heavy
         self.asked: list[str] = []
         self.chains: list[str] = []          # one per chain-filtered question
 
     def _answer(self, text, *, takes=None, fails=None):
         self.asked.append(text)
+        own = self.heavy if text == HEAVY and self.heavy is not None else {}
         if self.clock is not None:
-            self.clock.now += self.takes if takes is None else takes
-        fails = self.fails if fails is None else fails
+            self.clock.now += own.get("takes", self.takes) if takes is None else takes
+        fails = own.get("fails", self.fails) if fails is None else fails
         if fails is not None:
             raise fails
-        return list(self.rows)
+        return list(own.get("rows", self.rows))
 
     def named_items(self, text):
         return self._answer(text)
@@ -116,7 +127,7 @@ def wiring(**kw) -> TargetWiring:
 
 
 # --------------------------------------------------------------------------- #
-# 1. A pesquisa de controlo                                                     #
+# 1. Uma pesquisa de controlo                                                   #
 # --------------------------------------------------------------------------- #
 
 
@@ -126,7 +137,12 @@ def test_a_control_that_answers_says_so_and_how_long_it_took():
     got = probe_search(search, clock=clock)
     assert got == SearchProbe(ok=True, kind="", seconds=pytest.approx(0.64), results=0)
     assert got.render() == "respondeu em 0,6 s (0 resultados)"
-    assert search.asked == [SEARCH_CONTROL_QUERY]            # one request, the fixed text
+    assert search.asked == [LIGHT]                           # one request: the light text
+
+
+def test_the_heavy_text_is_asked_when_it_is_the_one_wanted():
+    search = Search()
+    assert probe_search(search, query=HEAVY).ok and search.asked == [HEAVY]
 
 
 @pytest.mark.parametrize("n, text", [(0, "(0 resultados)"), (1, "(1 resultado)"),
@@ -143,7 +159,7 @@ def test_the_control_can_be_asked_by_chain_as_the_clues_and_the_launch_ask():
     search = Search(rows=[("BASE:0xbbb:1", "x")])
     got = probe_search(search, chain="base")
     assert got.ok and got.results == 1
-    assert search.chains == ["base"] and search.asked == [SEARCH_CONTROL_QUERY]
+    assert search.chains == ["base"] and search.asked == [LIGHT]
 
 
 @pytest.mark.parametrize("exc, takes, text", [
@@ -161,7 +177,7 @@ def test_a_control_that_fails_says_how_and_how_long_it_took(exc, takes, text):
     search = Search(clock, takes=takes, fails=exc)
     got = probe_search(search, clock=clock)                 # never raises
     assert got.ok is False and got.render() == text
-    assert search.asked == [SEARCH_CONTROL_QUERY]            # never retried
+    assert search.asked == [LIGHT]                           # never retried
     assert SECRET not in got.render() and "api.example" not in got.render()
 
 
@@ -175,14 +191,14 @@ def _recording():
     return get, seen
 
 
-def test_the_real_adapter_is_asked_the_control_with_the_page_it_was_built_with():
+def test_the_real_adapter_is_asked_each_control_with_the_page_of_fifty():
     get, seen = _recording()
-    assert probe_search(OpenSeaSearch(http_get=get, api_key="k", size=50)).ok
-    assert probe_search(OpenSeaSearch(http_get=get, api_key="k", size=1)).ok
-    big, small = seen
-    assert "query=finding%20memeland" in big and "&limit=50&cb=" in big
-    assert "query=finding%20memeland" in small and "&limit=1&cb=" in small
-    assert "chains=" not in big                              # unfiltered, as the harvest asks
+    search = OpenSeaSearch(http_get=get, api_key="k", size=50)
+    assert probe_search(search).ok and probe_search(search, query=HEAVY).ok
+    light, heavy = seen
+    assert f"query={quote(LIGHT)}" in light and "&limit=50&cb=" in light
+    assert "query=finding%20memeland" in heavy and "&limit=50&cb=" in heavy
+    assert "chains=" not in light + heavy                    # unfiltered, as the harvest asks
 
 
 def test_no_cache_can_answer_a_control():
@@ -191,13 +207,12 @@ def test_no_cache_can_answer_a_control():
     que a API não conhece faz de cada controlo um pedido novo."""
     get, seen = _recording()
     search = OpenSeaSearch(http_get=get, api_key="k", size=50)
-    for _ in range(3):
-        probe_search(search)
+    for query in (LIGHT, LIGHT, HEAVY):
+        probe_search(search, query=query)
     probe_search(search, chain="base")
     nonces = [u.rsplit("&cb=", 1)[1] for u in seen]
     assert len(set(nonces)) == 4 and all(n and n.isalnum() for n in nonces)
     assert "&chains=base&cb=" in seen[3]                     # filtered, and still no cache
-    assert all(SEARCH_CONTROL_QUERY.replace(" ", "%20") in u for u in seen)
 
 
 def test_a_real_search_stays_cacheable():
@@ -210,9 +225,9 @@ def test_a_real_search_stays_cacheable():
     assert seen[0].endswith("&limit=50") and seen[1].endswith("&chains=base")
 
 
-def test_the_guard_s_own_control_cannot_come_from_a_cache_either():
-    """Na colheita, o controlo decide "é o nome" ou "é o momento": vindo de
-    uma cache, dizia "é o nome" de uma pesquisa em baixo."""
+def test_the_guard_s_own_controls_cannot_come_from_a_cache_either():
+    """Na colheita, os controlos dizem o estado da pesquisa: vindos de uma
+    cache, diziam "boa" de uma pesquisa em baixo."""
     seen: list[str] = []
 
     def get(url, headers):
@@ -224,10 +239,11 @@ def test_the_guard_s_own_control_cannot_come_from_a_cache_either():
     g = MarketNameUniqueness(search=OpenSeaSearch(http_get=get, api_key="k", size=50),
                              page_size=50, sleep_s=0.0)
     assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
-    question, control = seen
+    question, light, heavy = seen
     assert "cb=" not in question and "query=Salt%20Harbor" in question
-    assert "query=finding%20memeland" in control and "&cb=" in control
-    assert g.last_control is True
+    assert f"query={quote(LIGHT)}" in light and "&cb=" in light
+    assert "query=finding%20memeland" in heavy and "&cb=" in heavy
+    assert g.last_state == "boa"
 
 
 def test_a_chain_this_surface_cannot_search_fails_the_probe_and_asks_nothing():
@@ -243,32 +259,60 @@ def test_a_chain_this_surface_cannot_search_fails_the_probe_and_asks_nothing():
 
 CHAINS = frozenset({"ethereum", "base"})
 ROWS3 = [(f"ZORA:0xbbb:{i}", "x") for i in range(3)]
+ROWS10 = [(f"ZORA:0xbbb:{i}", "x") for i in range(10)]
+NO_QUESTION = "  unicidade desde o arranque: nenhuma pergunta"
 
 
-def test_one_request_and_one_plain_line_when_the_search_answers():
+def test_both_controls_and_one_plain_line_when_the_search_is_good():
     clock = Clock()
-    market, small = Search(clock, takes=0.6, rows=ROWS3), Search(clock, takes=0.4)
-    line = wiring(market=market, market_small=small).search_line(clock=clock)
-    assert line == ("pesquisa OpenSea, sem filtro: respondeu em 0,6 s (3 resultados)\n"
-                    "  unicidade desde o arranque: nenhuma pergunta")
-    assert len(market.asked) == 1 and small.asked == []      # the page of 1 is not spent
+    market = Search(clock, takes=0.6, rows=ROWS3, heavy={"takes": 4.4, "rows": ROWS10})
+    line = wiring(market=market).search_line(clock=clock)
+    assert line == ("pesquisa OpenSea, sem filtro: leve respondeu em 0,6 s (3 resultados) · "
+                    "pesada respondeu em 4,4 s (10 resultados)\n" + NO_QUESTION)
+    assert Counter(market.asked) == {LIGHT: 1, HEAVY: 1}     # two requests, no more
+
+
+def test_a_degraded_search_reads_as_the_light_answering_and_the_heavy_not():
+    """O estado de 11/10: a pesquisa responde ao controlo leve e dá 503 ao
+    pesado — está viva, e há nomes para os quais não tem resposta."""
+    clock = Clock()
+    market = Search(clock, takes=1.7, rows=ROWS10,
+                    heavy={"takes": 10.3, "fails": _http_error(503)})
+    first, counters = wiring(market=market).search_line(clock=clock).split("\n")
+    assert first == ("pesquisa OpenSea, sem filtro: leve respondeu em 1,7 s (10 resultados) · "
+                     "pesada ⚠️ 503 em 10,3 s")
+    assert counters == NO_QUESTION
+    assert Counter(market.asked) == {LIGHT: 1, HEAVY: 1}     # failing costs no extra request
+
+
+def test_a_search_that_is_down_reads_as_both_failing():
+    clock = Clock()
+    market = Search(clock, takes=25.0, fails=TimeoutError("timed out"),
+                    heavy={"takes": 10.1, "fails": _http_error(503)})
+    lines = wiring(market=market, deposit_chains=frozenset({"base"})).search_line(
+        clock=clock).split("\n")
+    assert lines[0] == ("pesquisa OpenSea, sem filtro: leve ⚠️ sem resposta em 25,0 s "
+                        "(timeout) · pesada ⚠️ 503 em 10,1 s")
+    assert lines[1] == "  por cadeia: base ⚠️ sem resposta em 25,0 s (timeout)"
 
 
 def test_the_line_measures_the_search_by_chain_too_one_question_per_chain():
     """A forma em que as pistas e o /launch perguntam: uma cadeia de cada
     vez, pelas cadeias em que o jogo guarda alvos — sempre as mesmas, por
-    ordem, seja qual for a cadeia do alvo preparado."""
+    ordem, seja qual for a cadeia do alvo preparado. Com o texto LEVE."""
     clock = Clock()
     market = Search(clock, takes=0.5)
-    lines = wiring(market=market, market_small=Search(),
-                   deposit_chains=CHAINS).search_line(clock=clock).split("\n")
+    lines = wiring(market=market, deposit_chains=CHAINS).search_line(
+        clock=clock).split("\n")
     assert lines == [
-        "pesquisa OpenSea, sem filtro: respondeu em 0,5 s (0 resultados)",
+        "pesquisa OpenSea, sem filtro: leve respondeu em 0,5 s (0 resultados) · "
+        "pesada respondeu em 0,5 s (0 resultados)",
         "  por cadeia: base respondeu em 0,5 s (0 resultados) · "
         "ethereum respondeu em 0,5 s (0 resultados)",
-        "  unicidade desde o arranque: nenhuma pergunta",
+        NO_QUESTION,
     ]
-    assert sorted(market.chains) == ["base", "ethereum"] and len(market.asked) == 3
+    assert sorted(market.chains) == ["base", "ethereum"]
+    assert Counter(market.asked) == {LIGHT: 3, HEAVY: 1}     # the heavy one: unfiltered only
     # the line reads by name, whatever order the set holds them in and
     # whichever answered first
     line = wiring(market=Search(), deposit_chains=frozenset(
@@ -278,48 +322,36 @@ def test_the_line_measures_the_search_by_chain_too_one_question_per_chain():
         == ["arbitrum", "base", "ethereum", "optimism", "polygon", "zora"]
 
 
-def test_a_failed_control_is_followed_by_the_page_of_one_on_the_same_line():
-    clock = Clock()
-    market = Search(clock, takes=10.2, fails=_http_error(503))
-    small = Search(clock, takes=4.8, rows=ROWS3[:1])
-    first, counters = wiring(market=market, market_small=small).search_line(
-        clock=clock).split("\n")
-    assert first == ("pesquisa OpenSea, sem filtro: ⚠️ 503 em 10,2 s · "
-                     "página de 1: respondeu em 4,8 s (1 resultado)")
-    assert counters == "  unicidade desde o arranque: nenhuma pergunta"
-    assert market.asked == [SEARCH_CONTROL_QUERY] and small.asked == [SEARCH_CONTROL_QUERY]
-
-
-def test_what_was_measured_on_10_10_reads_as_it_was():
-    """Sem filtro, a página de 50 dava 503 aos 10 s e a de 1 respondia; por
-    cadeia, o controlo (sem resultados) respondia. A linha diz as três
-    coisas — e mais nada."""
+def test_what_was_measured_on_11_10_reads_as_it_was():
+    """Sem filtro, o nome leve respondeu em 1,7 s com dez resultados e o
+    texto pesado deu 503 aos 10 s; por cadeia, o nome leve respondeu em 1 s
+    com dois resultados em ethereum. A linha diz isso — e mais nada."""
     clock = Clock()
 
     class Split(Search):
-        def named_items(self, text):
-            return self._answer(text, takes=10.2, fails=_http_error(503))
-
         def item_ids(self, text, *, chain):
             self.chains.append(chain)
-            return set(self._answer(text, takes=0.7 if chain == "ethereum" else 3.6))
+            if chain == "ethereum":
+                self._answer(text, takes=1.0)
+                return {"ETHEREUM:0xaaa:1", "ETHEREUM:0xaaa:2"}
+            return set(self._answer(text, takes=2.0)) - set(ROWS10)
 
-    text = wiring(market=Split(clock), market_small=Search(clock, takes=4.8, rows=ROWS3[:1]),
-                  deposit_chains=CHAINS).search_line(clock=clock)
+    market = Split(clock, takes=1.7, rows=ROWS10,
+                   heavy={"takes": 10.3, "fails": _http_error(503)})
+    text = wiring(market=market, deposit_chains=CHAINS).search_line(clock=clock)
     assert text.split("\n")[:2] == [
-        "pesquisa OpenSea, sem filtro: ⚠️ 503 em 10,2 s · "
-        "página de 1: respondeu em 4,8 s (1 resultado)",
-        "  por cadeia: base respondeu em 3,6 s (0 resultados) · "
-        "ethereum respondeu em 0,7 s (0 resultados)",
+        "pesquisa OpenSea, sem filtro: leve respondeu em 1,7 s (10 resultados) · "
+        "pesada ⚠️ 503 em 10,3 s",
+        "  por cadeia: base respondeu em 2,0 s (0 resultados) · "
+        "ethereum respondeu em 1,0 s (2 resultados)",
     ]
 
 
-def test_every_shape_is_measured_at_the_same_time():
-    """O /status demora o que demorar a medição mais lenta, não a soma: com
-    duas cadeias e tudo a esgotar os 25 s eram 100 s em fila. Aqui cada
-    pedido só responde quando os TRÊS estão em curso — em fila nunca se
-    encontravam, e a linha dizia três falhas."""
-    together = threading.Barrier(3, timeout=10)
+def test_every_measurement_is_made_at_the_same_time():
+    """O /status demora o que demorar a medição mais lenta, não a soma. Aqui
+    cada pedido só responde quando os QUATRO estão em curso (leve, pesada e
+    duas cadeias) — em fila nunca se encontravam, e a linha dizia falhas."""
+    together = threading.Barrier(4, timeout=10)
 
     class Meeting(Search):
         def _answer(self, text, **kw):
@@ -327,31 +359,20 @@ def test_every_shape_is_measured_at_the_same_time():
             return super()._answer(text, **kw)
 
     market = Meeting()
-    lines = wiring(market=market, market_small=Search(),
-                   deposit_chains=CHAINS).search_line().split("\n")
-    assert "⚠️" not in "".join(lines) and len(market.asked) == 3
-    assert lines[0].startswith("pesquisa OpenSea, sem filtro: respondeu em ")
+    lines = wiring(market=market, deposit_chains=CHAINS).search_line().split("\n")
+    assert "⚠️" not in "".join(lines) and len(market.asked) == 4
+    assert lines[0].startswith("pesquisa OpenSea, sem filtro: leve respondeu em ")
     assert lines[1].startswith("  por cadeia: base respondeu em ")
 
 
-def test_the_page_of_one_waits_for_the_page_of_fifty_to_fail():
-    """As duas vão em fila, na mesma thread: a de 1 só se pede se a de 50
-    falhar — pedi-la ao mesmo tempo era gastá-la sempre."""
-    order: list[str] = []
-
-    class Noting(Search):
-        def __init__(self, label, **kw):
-            super().__init__(**kw)
-            self.label = label
-
-        def _answer(self, text, **kw):
-            order.append(f"{self.label}@{threading.get_ident()}")
-            return super()._answer(text, **kw)
-
-    wiring(market=Noting("50", fails=_http_error(503)),
-           market_small=Noting("1")).search_line()
-    (big, big_thread), (small, small_thread) = (o.split("@") for o in order)
-    assert (big, small) == ("50", "1") and big_thread == small_thread
+def test_there_is_no_page_of_one_any_more():
+    """A "página de 1" media se era o tamanho do pedido que pesava; o
+    controlo leve diz mais com o mesmo pedido. A linha não a pede nem a
+    escreve, falhe o que falhar."""
+    market = Search(fails=_http_error(503))
+    text = wiring(market=market, deposit_chains=CHAINS).search_line()
+    assert "página de 1" not in text and len(market.asked) == 4
+    assert not hasattr(wiring(), "market_small")
 
 
 def test_a_measurement_that_blows_up_is_one_failed_measurement_not_a_lost_line():
@@ -368,49 +389,40 @@ def test_a_measurement_that_blows_up_is_one_failed_measurement_not_a_lost_line()
 
 def test_the_line_never_says_what_it_did_not_measure():
     """"um /launch seria recusado; uma hunt no puzzle ficava em hold" saiu
-    daqui a 10/10 sem ter sido medido — e era falso naquele momento."""
+    daqui a 10/10 sem ter sido medido — e era falso naquele momento. Nem um
+    controlo sabe se um nome concreto vai ter resposta (11/10): a linha
+    mostra medições, não previsões."""
     down = Search(fails=_http_error(503))
-    for text in (wiring(market=down, market_small=down, deposit_chains=CHAINS).search_line(),
-                 wiring(market=Search(), deposit_chains=CHAINS).search_line()):
-        for claim in ("/launch", "hold", "recusad", "puzzle"):
+    degraded = Search(heavy={"fails": _http_error(503)})
+    for market in (down, degraded, Search()):
+        text = wiring(market=market, deposit_chains=CHAINS).search_line()
+        for claim in ("/launch", "/prepare", "hold", "recusad", "puzzle", "sela"):
             assert claim not in text, claim
-
-
-def test_both_failing_reads_as_both_failing():
-    clock = Clock()
-    market = Search(clock, takes=25.0, fails=TimeoutError("timed out"))
-    small = Search(clock, takes=9.8, fails=_http_error(503))
-    lines = wiring(market=market, market_small=small,
-                   deposit_chains=frozenset({"base"})).search_line(clock=clock).split("\n")
-    assert lines[0] == ("pesquisa OpenSea, sem filtro: ⚠️ sem resposta em 25,0 s (timeout) · "
-                        "página de 1: 503 em 9,8 s")
-    assert lines[1] == "  por cadeia: base ⚠️ sem resposta em 25,0 s (timeout)"
-
-
-def test_without_a_page_of_one_the_line_still_says_what_failed():
-    clock = Clock()
-    market = Search(clock, takes=1.0, fails=_http_error(503))
-    first = wiring(market=market).search_line(clock=clock).split("\n")[0]
-    assert first == "pesquisa OpenSea, sem filtro: ⚠️ 503 em 1,0 s"
 
 
 def test_the_surface_is_named_and_a_wiring_without_a_search_says_so():
     assert wiring(market=Search(), market_surface="rarible").search_line().startswith(
-        "pesquisa Rarible, sem filtro: respondeu em ")
+        "pesquisa Rarible, sem filtro: leve respondeu em ")
     assert wiring().search_line() == "pesquisa: não ligada"
 
 
-def _guard_after(*outcomes) -> MarketNameUniqueness:
+def _guard_after(*outcomes, states=("boa", "em-baixo", "degradada")) -> MarketNameUniqueness:
     """A guarda verdadeira, depois de umas perguntas: cada `outcome` é uma
-    excepção (a pergunta falha) ou None (responde, e o alvo lá está)."""
+    excepção (a pergunta falha) ou None (responde, e o alvo lá está). A
+    pesquisa é encontrada, depois de cada falha, no estado seguinte de
+    `states` (em roda)."""
     class Scripted:
         def __init__(self):
             self.steps = list(outcomes)
-            self.control_fails = False
+            self.state = "boa"
 
         def named_items(self, text):
-            if text == SEARCH_CONTROL_QUERY:
-                if self.control_fails:
+            if text == LIGHT:
+                if self.state == "em-baixo":
+                    raise _http_error(503)
+                return []
+            if text == HEAVY:
+                if self.state == "degradada":
                     raise _http_error(503)
                 return []
             step = self.steps.pop(0)
@@ -422,9 +434,7 @@ def _guard_after(*outcomes) -> MarketNameUniqueness:
     g = MarketNameUniqueness(search=search, page_size=50, sleep_s=0.0)
     failures = 0
     for outcome in outcomes:
-        # the control answers after the 1st failed question, fails after the
-        # 2nd, answers after the 3rd…
-        search.control_fails = failures % 2 == 1
+        search.state = states[failures % len(states)]
         g("Salt Harbor", "ethereum", "0xaaa", 7)
         if outcome is not None:
             failures += 1
@@ -433,10 +443,16 @@ def _guard_after(*outcomes) -> MarketNameUniqueness:
 
 
 def test_the_counters_since_the_start_cost_nothing_and_add_up():
-    g = _guard_after(None, _http_error(503), None, _http_error(503))
+    g = _guard_after(None, _http_error(503), None, _http_error(503), _http_error(503))
     line = wiring(market=Search(), uniqueness=g).search_line().split("\n")[-1]
-    assert line == ("  unicidade desde o arranque: 4 pergunta(s) · 2 pedido(s) falhado(s) "
-                    "(503 2) · controlo: respondeu 1, falhou 1")
+    assert line == ("  unicidade desde o arranque: 5 pergunta(s) · 3 pedido(s) falhado(s) "
+                    "(503 3) · estado nas falhas: boa 1, degradada 1, em baixo 1")
+
+
+def test_only_the_states_that_were_found_are_named():
+    g = _guard_after(_http_error(503), _http_error(503), states=("degradada",))
+    line = wiring(market=Search(), uniqueness=g).search_line().split("\n")[-1]
+    assert line.endswith("(503 2) · estado nas falhas: degradada 2")
 
 
 def test_questions_that_all_answered_read_as_no_failed_request():
@@ -450,26 +466,28 @@ def test_looking_does_not_move_what_the_guard_has_counted():
     — e o que ela guarda da ÚLTIMA pergunta de uma colheita a correr —
     ficam como estavam."""
     g = _guard_after(_http_error(503))
-    before = (dict(g.stats), dict(g.failed_requests), dict(g.control),
-              g.last_transport, g.last_control)
+    before = (dict(g.stats), dict(g.failed_requests), dict(g.search_states),
+              g.last_transport, g.last_state)
     market = Search(fails=_http_error(503))
-    w = wiring(market=market, market_small=Search(), uniqueness=g)
+    w = wiring(market=market, uniqueness=g)
     w.search_line()
     w.search_line()
-    assert (dict(g.stats), dict(g.failed_requests), dict(g.control),
-            g.last_transport, g.last_control) == before
-    assert len(market.asked) == 2                            # one per look, no more
+    assert (dict(g.stats), dict(g.failed_requests), dict(g.search_states),
+            g.last_transport, g.last_state) == before
+    assert len(market.asked) == 4                            # two per look, no more
 
 
 def test_the_line_shows_words_and_numbers_and_nothing_it_was_answered():
+    """Nem os resultados nem os textos dos controlos: o leve é o nome de um
+    alvo — já revelado, mas um nome — e a linha só diz "leve" e "pesada"."""
     rows = [("ETHEREUM:0xbbb:1", "Quiet Lantern Above")]
-    ok = wiring(market=Search(rows=rows)).search_line()
+    ok = wiring(market=Search(rows=rows), deposit_chains=CHAINS).search_line()
     down = wiring(market=Search(fails=_http_error(503)),
-                  market_small=Search(rows=rows)).search_line()
+                  deposit_chains=CHAINS).search_line()
     for text in (ok, down):
-        for leak in ("Quiet", "Lantern", "0xbbb", SECRET, "api.example",
-                     SEARCH_CONTROL_QUERY):
-            assert leak not in text, leak
+        for leak in ("Quiet", "Lantern", "0xbbb", SECRET, "api.example", LIGHT, HEAVY,
+                     *LIGHT.split(), *HEAVY.split()):
+            assert leak.lower() not in text.lower(), leak
 
 
 # --------------------------------------------------------------------------- #
@@ -477,28 +495,28 @@ def test_the_line_shows_words_and_numbers_and_nothing_it_was_answered():
 # --------------------------------------------------------------------------- #
 
 
-def test_production_wires_the_search_its_page_of_one_and_the_guard():
+def test_production_wires_the_search_and_the_guard_with_both_controls():
     w = _built(opensea_api_key="k")
-    assert isinstance(w.market, OpenSeaSearch) and isinstance(w.market_small, OpenSeaSearch)
-    assert (w.market._size, w.market_small._size) == (50, 1)            # noqa: SLF001
+    assert isinstance(w.market, OpenSeaSearch) and w.market._size == 50   # noqa: SLF001
     assert isinstance(w.uniqueness, MarketNameUniqueness)
     assert w.uniqueness._search is w.market                              # noqa: SLF001
+    assert (w.uniqueness._light_query, w.uniqueness._heavy_query) == (LIGHT, HEAVY)  # noqa: SLF001
     assert w.finder._name_is_unique is w.uniqueness                      # noqa: SLF001
     # `_built` answers every GET with "{}": no results list → an unreadable body
     lines = w.search_line().split("\n")
-    assert lines[0].startswith("pesquisa OpenSea, sem filtro: ⚠️ corpo-ilegível em ")
-    assert " · página de 1: corpo-ilegível em " in lines[0]
+    assert lines[0].startswith("pesquisa OpenSea, sem filtro: leve ⚠️ corpo-ilegível em ")
+    assert " · pesada ⚠️ corpo-ilegível em " in lines[0]
     assert lines[1].startswith("  por cadeia: ")
     assert [part.split(" ")[0] for part in lines[1][len("  por cadeia: "):].split(" · ")] \
         == sorted(w.deposit_chains)
-    assert lines[-1] == "  unicidade desde o arranque: nenhuma pergunta"
+    assert lines[-1] == NO_QUESTION
 
 
 def test_the_other_surface_gets_the_same_line_under_its_own_name():
     w = _built()                                             # no OpenSea key: Rarible
-    assert w.market_surface == "rarible" and w.market_small._size == 1   # noqa: SLF001
+    assert w.market_surface == "rarible"
     assert w.uniqueness._search is w.market                              # noqa: SLF001
-    assert w.search_line().startswith("pesquisa Rarible, sem filtro: ")
+    assert w.search_line().startswith("pesquisa Rarible, sem filtro: leve ")
 
 
 def test_status_reads_the_line_and_survives_it_blowing_up():

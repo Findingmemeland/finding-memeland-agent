@@ -152,7 +152,7 @@ def test_the_brake_can_be_pulled_again_and_again_under_the_same_status():
 
 
 def test_a_search_that_never_answers_cannot_hold_the_brake():
-    """De ponta a ponta com a linha verdadeira: as três medições presas
+    """De ponta a ponta com a linha verdadeira: as quatro medições presas
     dentro da pesquisa, ao mesmo tempo — e o /silence responde."""
     stuck = threading.Event()
     inside: list[int] = []
@@ -169,13 +169,13 @@ def test_a_search_that_never_answers_cannot_hold_the_brake():
 
     async def scenario():
         await chat.send("/status")
-        await until(lambda: len(inside) == 3)           # unfiltered, base, ethereum
+        await until(lambda: len(inside) == 4)           # light, heavy, base, ethereum
         await chat.send("/silence")
-        assert chat.replies == [PAUSED] and len(set(inside)) == 3
+        assert chat.replies == [PAUSED] and len(set(inside)) == 4
         stuck.set()
         await tg.drain()
         lines = chat.replies[1].split("\n")
-        assert lines[0].startswith("pesquisa OpenSea, sem filtro: respondeu em ")
+        assert lines[0].startswith("pesquisa OpenSea, sem filtro: leve respondeu em ")
         assert lines[1].startswith("  por cadeia: base respondeu em ")
 
     asyncio.run(scenario())

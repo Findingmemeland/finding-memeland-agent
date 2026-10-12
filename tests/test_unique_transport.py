@@ -52,7 +52,8 @@ from finding_memeland.target.prepare import (
 from finding_memeland.target.probe import ContractProbe
 from finding_memeland.target.refresh import TokenRead
 from finding_memeland.target.search_guard import (
-    SEARCH_CONTROL_QUERY,
+    SEARCH_HEAVY_QUERY,
+    SEARCH_LIGHT_QUERY,
     SLOW_FAILURE_S,
     MarketNameUniqueness,
     OpenSeaSearch,
@@ -84,23 +85,35 @@ class Search:
     gasta-se antes de tudo, seja qual for a peça; depois o guião da peça
     (pela chave: o tokenId ou o contrato); depois `then`."""
 
-    def __init__(self, script=None, *, first=(), then="ok", control=()):
+    def __init__(self, script=None, *, first=(), then="ok", control=(), heavy=()):
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.first = list(first)
         self.then = then
         self.asking = ""           # "chain:contract:tokenId", posto pela guarda
         self.tids: list[int] = []            # um por pedido
         self.contracts: list[str] = []       # idem
-        # a pesquisa de controlo (10/10): o seu guião (excepções a levantar,
-        # uma por pedido; depois responde) e quantas vezes foi feita
+        # as pesquisas de controlo, cada uma com o seu guião (excepções a
+        # levantar, uma por pedido; depois responde) e quantas vezes foi
+        # feita. `control` é a LEVE (10/10: era a única; se falha, a pesquisa
+        # está em baixo); `heavy` é a PESADA (11/10: se só ela falha, a
+        # pesquisa está degradada).
         self.control = list(control)
         self.control_then = None
         self.controls = 0
+        self.heavy = list(heavy)
+        self.heavy_then = None
+        self.heavies = 0
 
     def named_items(self, base):
-        if base == SEARCH_CONTROL_QUERY:
+        if base == SEARCH_LIGHT_QUERY:
             self.controls += 1
             step = self.control.pop(0) if self.control else self.control_then
+            if isinstance(step, BaseException):
+                raise step
+            return []
+        if base == SEARCH_HEAVY_QUERY:
+            self.heavies += 1
+            step = self.heavy.pop(0) if self.heavy else self.heavy_then
             if isinstance(step, BaseException):
                 raise step
             return []
@@ -131,11 +144,13 @@ class Guard(MarketNameUniqueness):
         return super().__call__(base, chain, contract, token_id)
 
 
-def guard(script=None, *, first=(), then="ok", retries=2, control=(), **kw) -> Guard:
+def guard(script=None, *, first=(), then="ok", retries=2, control=(), heavy=(),
+          **kw) -> Guard:
     """Três pedidos por pergunta, como em produção; sem esperar entre eles.
-    `control`: o que a pesquisa de controlo faz, pedido a pedido (por
-    omissão, responde sempre)."""
-    return Guard(search=Search(script, first=first, then=then, control=control),
+    `control` / `heavy`: o que a pesquisa de controlo leve / pesada faz,
+    pedido a pedido (por omissão, respondem sempre: a pesquisa está boa)."""
+    return Guard(search=Search(script, first=first, then=then, control=control,
+                               heavy=heavy),
                  page_size=50, retries=retries, sleep_s=0.0, **kw)
 
 
@@ -479,7 +494,7 @@ def test_the_window_is_the_one_measured_and_production_does_not_shorten_it():
     for f in (w.finder, probe_finder):
         assert f._retry_gap == 60.0 and f._sleep is time.sleep       # noqa: SLF001
         assert isinstance(f._name_is_unique, MarketNameUniqueness)   # noqa: SLF001
-        assert f.search_counters() == {"failed": {}, "speed": {}, "control": {}}
+        assert f.search_counters() == {"failed": {}, "speed": {}, "states": {}}
 
 
 def test_the_operator_is_told_once_in_counts():
@@ -559,7 +574,7 @@ def test_a_recovered_request_shows_in_the_report_without_a_second_pass():
     assert larder.size() == 2 and rep.search.second_asked == 0
     assert rep.render().endswith(
         "pesquisa do único: 1 pedido(s) falhado(s) (429 1) — rápidos 1, lentos 0")
-    assert rep.search.control == {}                    # the question was answered: no control
+    assert rep.search.states == {}                     # the question was answered: no control
 
 
 def test_each_run_reports_its_own_failures_not_the_process_s():
@@ -568,8 +583,8 @@ def test_each_run_reports_its_own_failures_not_the_process_s():
     first = f.deposit(Larder(), [ref(1)], chain_ok=lambda c: True)
     second = f.deposit(Larder(), [ref(2)], chain_ok=lambda c: True)
     assert first.search.failed == {"timeout": 3} and second.search.failed == {}
-    # the same for what the control answered and for how fast the requests failed
-    assert first.search.control == {"respondeu": 1} and second.search.control == {}
+    # the same for the state the search was found in and for how fast they failed
+    assert first.search.states == {"boa": 1} and second.search.states == {}
     assert first.search.speed == {"rápidos": 3} and second.search.speed == {}
     assert second.search == SearchPasses()
 
@@ -642,7 +657,7 @@ def test_the_probe_asks_again_at_the_end_and_the_columns_still_add_up():
     out = rep.render()
     assert out.splitlines()[-1] == (
         "pesquisa do único: 3 pedido(s) falhado(s) (timeout 3) — rápidos 3, lentos 0"
-        " · controlo: respondeu 1, falhou 0 · 2.ª volta: 1 repetido(s), 1 salvo(s)")
+        " · estado da pesquisa nas falhas: boa 1 · 2.ª volta: 1 repetido(s), 1 salvo(s)")
     (line,) = [m for m in said if "volto a perguntar" in m]
     assert line.startswith("probe manifold: 1 peça(s) sem resposta da pesquisa do nome")
     assert not ADDRESS.search(out + line) and "Grease" not in out + line
@@ -669,7 +684,7 @@ def test_the_probe_names_what_failed_three_times_with_its_kind():
     out = rep.render()
     assert "com Arweave: passariam 2 de 3 — único 1 (rede-NOSSO:429 1)" in out
     assert "2.ª volta: 1 repetido(s), 0 salvo(s) · 3.ª volta: 1 repetido(s), 0 salvo(s)" in out
-    assert "controlo: respondeu 2, falhou 1" in out
+    assert "estado da pesquisa nas falhas: boa 2, em baixo 1" in out
     (third,) = [m for m in said if "3.ª e última volta" in m]
     assert third.startswith("probe manifold: 1 peça(s) sem resposta outra vez")
 
@@ -759,19 +774,21 @@ def test_the_guard_s_pauses_are_not_spent_on_a_5xx(monkeypatch):
     assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and slept == [2.0, 4.0]
 
 
-def test_the_control_is_asked_once_after_a_question_that_failed():
+def test_the_controls_are_asked_once_each_after_a_question_that_failed():
     g = guard(then=_http_error(503))
     assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
-    assert g._search.controls == 1 and g.last_control is True         # it answered: the name
-    assert g.control == {"respondeu": 1}
-    assert g.failed_requests == {"503": 1}                            # the control is not a failure
+    # both answered: the search is good, the name is failing on its own
+    assert (g._search.controls, g._search.heavies) == (1, 1) and g.last_state == "boa"
+    assert g.search_states == {"boa": 1}
+    assert g.failed_requests == {"503": 1}                            # a control is not a failure
 
 
-def test_a_control_that_fails_too_says_it_is_the_moment():
+def test_a_light_control_that_fails_too_says_the_search_is_down():
     g = guard(then=_http_error(503), control=[_http_error(503)])
     assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
-    assert g.last_control is False and g.control == {"falhou": 1}
-    assert g._search.controls == 1                                    # never retried
+    assert g.last_state == "em-baixo" and g.search_states == {"em-baixo": 1}
+    # never retried — and the heavy one is not even asked: it could add nothing
+    assert (g._search.controls, g._search.heavies) == (1, 0)
     assert g.failed_requests == {"503": 1}                            # only the name's request
 
 
@@ -779,26 +796,34 @@ def test_no_control_is_asked_when_the_question_was_answered():
     for then in ("ok", "namesake", "blind"):
         g = guard(then=then)
         g("Salt Harbor", "ethereum", "0xaaa", 7)
-        assert g._search.controls == 0 and g.last_control is None and g.control == {}
+        assert (g._search.controls, g._search.heavies) == (0, 0)
+        assert g.last_state is None and g.search_states == {}
     recovered = guard({7: [_http_error(429)]})
     assert recovered("Salt Harbor", "ethereum", "0xaaa", 7) is True
-    assert recovered._search.controls == 0 and recovered.last_control is None
+    assert recovered._search.controls == 0 and recovered.last_state is None
 
 
-def test_the_control_s_answer_is_about_the_last_question_only():
+def test_the_state_is_about_the_last_question_only():
     g = guard({7: [_http_error(503)]})
-    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and g.last_control is True
-    assert g("Salt Harbor", "ethereum", "0xaaa", 8) is True and g.last_control is None
+    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None and g.last_state == "boa"
+    assert g("Salt Harbor", "ethereum", "0xaaa", 8) is True and g.last_state is None
 
 
-def test_a_guard_without_a_control_asks_nothing():
-    g = guard(then=_http_error(503), control_query=None)
-    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
-    assert g._search.controls == 0 and g.last_control is None and g.control == {}
+def test_the_controls_work_as_a_pair_or_not_at_all():
+    """O pesado sozinho não distingue "em baixo" de "degradada" (o erro de
+    10/10); o leve sozinho não distingue "degradada" de "boa" — e "boa" é o
+    estado que pode custar um candidato. Sem os dois, não há estado."""
+    for kw in ({"light_query": None}, {"heavy_query": None},
+               {"light_query": None, "heavy_query": None}):
+        g = guard(then=_http_error(503), **kw)
+        assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+        assert (g._search.controls, g._search.heavies) == (0, 0)
+        assert g.last_state is None and g.search_states == {} and g.search_state() is None
 
 
-def test_the_control_is_a_fixed_text_and_nobody_s_name():
-    assert SEARCH_CONTROL_QUERY == "finding memeland"
+def test_the_controls_are_fixed_public_texts_asked_light_first():
+    assert SEARCH_HEAVY_QUERY == "finding memeland"
+    assert SEARCH_LIGHT_QUERY and SEARCH_LIGHT_QUERY != SEARCH_HEAVY_QUERY
     asked: list[str] = []
 
     class Recording(Search):
@@ -808,14 +833,16 @@ def test_the_control_is_a_fixed_text_and_nobody_s_name():
 
     g = Guard(search=Recording(then=_http_error(503)), page_size=50, sleep_s=0.0)
     g("Quiet Lantern Above", "ethereum", "0xaaa", 7)
-    assert asked == ["Quiet Lantern Above", SEARCH_CONTROL_QUERY]
+    assert asked == ["Quiet Lantern Above", SEARCH_LIGHT_QUERY, SEARCH_HEAVY_QUERY]
 
 
 def test_a_control_that_blows_up_never_breaks_the_verdict_nor_leaks():
-    g = guard(then=_http_error(503), control=[KeyError(SECRET)])
-    assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
-    shown = repr(g.stats) + repr(g.control) + repr(g.failed_requests) + repr(g.failed_speed)
-    assert g.last_control is False and SECRET not in shown
+    for kw in ({"control": [KeyError(SECRET)]}, {"heavy": [KeyError(SECRET)]}):
+        g = guard(then=_http_error(503), **kw)
+        assert g("Salt Harbor", "ethereum", "0xaaa", 7) is None
+        shown = (repr(g.stats) + repr(g.search_states) + repr(g.failed_requests)
+                 + repr(g.failed_speed))
+        assert g.last_state in ("em-baixo", "degradada") and SECRET not in shown
 
 
 def test_a_failed_request_is_counted_as_fast_or_slow():
@@ -844,13 +871,13 @@ def test_three_failures_with_the_control_answering_is_the_name_a_blind_index():
     g = guard({2: [_http_error(503)] * 3})
     rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
     assert larder.size() == 2 and g._search.tids == [1, 2, 3, 2, 2]
-    assert g._search.controls == 3
+    assert (g._search.controls, g._search.heavies) == (3, 3)
     assert rep.rejected.unique_kinds == {"índice-cego:pesquisa-503": 1}
     out = rep.render()
     assert "único 1 (índice-cego:pesquisa-503 1)" in out and "rede-NOSSO" not in out
     assert out.endswith(
         "pesquisa do único: 3 pedido(s) falhado(s) (503 3) — rápidos 3, lentos 0 · "
-        "controlo: respondeu 3, falhou 0 · 2.ª volta: 1 repetido(s), 0 salvo(s) · "
+        "estado da pesquisa nas falhas: boa 3 · 2.ª volta: 1 repetido(s), 0 salvo(s) · "
         "3.ª volta: 1 repetido(s), 0 salvo(s)")
 
 
@@ -860,7 +887,7 @@ def test_three_failures_with_the_control_answering_is_the_name_a_blind_index():
     [None, None, _http_error(503)],            # …after the 3rd
     [_timeout(), _timeout(), _timeout()],      # every time
 ])
-def test_one_failed_control_is_enough_to_keep_it_ours(control):
+def test_one_failed_light_control_is_enough_to_keep_it_ours(control):
     """Se a pesquisa esteve em baixo para todos em qualquer das três, nada
     se soube sobre a peça: fica nosso."""
     g = guard({2: [_http_error(503)] * 3}, control=control)
@@ -871,10 +898,10 @@ def test_one_failed_control_is_enough_to_keep_it_ours(control):
 
 
 def test_without_a_control_nothing_ever_becomes_a_blind_index():
-    g = guard({2: [_http_error(503)] * 3}, control_query=None)
+    g = guard({2: [_http_error(503)] * 3}, light_query=None)
     rep, _larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
     assert rep.rejected.unique_kinds == {"rede-NOSSO:503": 1}
-    assert "controlo" not in rep.render()
+    assert "estado da pesquisa" not in rep.render()
 
 
 def test_a_candidate_rescued_on_the_third_pass_is_no_blind_index():
@@ -882,7 +909,7 @@ def test_a_candidate_rescued_on_the_third_pass_is_no_blind_index():
     rep, larder, _calls, _clock, _said = deposit(g, [1, 2, 3])
     assert larder.size() == 3 and rep.rejected.unique == 0
     assert (rep.search.third_asked, rep.search.third_rescued) == (1, 1)
-    assert rep.search.control == {"respondeu": 2}
+    assert rep.search.states == {"boa": 2}
 
 
 def test_a_verdict_on_the_third_pass_is_the_verdict_it_is():
@@ -915,7 +942,8 @@ def test_the_gaps_are_the_ones_decided_and_production_does_not_shorten_them():
     w = _built()
     for f in (w.finder, w.probes["manifold"]._finder):               # noqa: SLF001
         assert (f._retry_gap, f._third_gap) == (60.0, 300.0)         # noqa: SLF001
-        assert f._name_is_unique._control_query == SEARCH_CONTROL_QUERY   # noqa: SLF001
+        assert f._name_is_unique._light_query == SEARCH_LIGHT_QUERY  # noqa: SLF001
+        assert f._name_is_unique._heavy_query == SEARCH_HEAVY_QUERY  # noqa: SLF001
 
 
 def test_the_operator_is_told_of_each_pass_in_counts():
@@ -929,17 +957,17 @@ def test_the_operator_is_told_of_each_pass_in_counts():
     assert not ADDRESS.search(" ".join(said)) and "Name" not in " ".join(said)
 
 
-def test_what_waits_carries_what_the_control_said_and_still_shows_nothing():
+def test_what_waits_carries_the_state_of_the_search_and_still_shows_nothing():
     g = guard(then=_http_error(503), control=[None, _http_error(503)])
     f, _calls, _clock = finder(g)
     src = Source("deposit", "ethereum", A)
     tally = Tally()
     read, base = f.named_token(src, 5, tally)
     first = f.verify(src, 5, read, base, tally, defer=True)
-    assert (first.passes, first.controls, first.how) == (1, (True,), "503")
+    assert (first.passes, first.states, first.how) == (1, ("boa",), "503")
     second = f.ask_again(first, tally, last=False)
     assert isinstance(second, Pending)
-    assert (second.passes, second.controls) == (2, (True, False))
+    assert (second.passes, second.states) == (2, ("boa", "em-baixo"))
     assert tally.unique == 0                                 # still no cause
     assert f.ask_again(second, tally, last=True) is None
     assert tally.unique_kinds == {"rede-NOSSO:503": 1}       # one control failed: ours
@@ -993,7 +1021,7 @@ def test_the_probe_gives_each_waiting_piece_its_own_outcome():
     assert rep.with_arweave.causes == {("único", "índice-cego:pesquisa-503"): 1}
     assert (rep.search.second_asked, rep.search.second_rescued) == (3, 1)
     assert (rep.search.third_asked, rep.search.third_rescued) == (2, 1)
-    assert rep.search.failed == {"503": 6} and rep.search.control == {"respondeu": 6}
+    assert rep.search.failed == {"503": 6} and rep.search.states == {"boa": 6}
     assert sum(rep.today.causes.values()) + rep.today.passed == rep.tested == 3
 
 

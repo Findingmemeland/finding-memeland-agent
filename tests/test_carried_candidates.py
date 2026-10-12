@@ -18,9 +18,11 @@ O que isto fixa:
     memória";
   · a corrida seguinte começa por eles: SÓ a pesquisa, uma pergunta a cada
     um; único → despensa; veredicto → fora;
-  · sem resposta outra vez e o controlo TAMBÉM falhou: a pesquisa não está a
-    responder — os de trás nem se perguntam, e ninguém se perde;
-  · sem resposta três vezes seguidas com o controlo a responder: é o nome
+  · antes de perguntar por alguém, vê-se o ESTADO da pesquisa (11/10, dois
+    controlos — ver test_search_states.py): em baixo, ninguém se pergunta
+    e ninguém se perde; degradada, só os que ficaram à espera com ela em
+    baixo; boa, todos;
+  · sem resposta três vezes seguidas com a pesquisa BOA: é o nome
     (índice-cego), como nas voltas de uma corrida;
   · a mesma peça nunca duas vezes; cinquenta no máximo, os mais antigos
     saem primeiro — e o relatório diz quantos saíram;
@@ -63,7 +65,7 @@ HEAD = "da corrida anterior: "
 
 
 def down(g) -> None:
-    """A pesquisa não responde a ninguém — nem ao controlo (o momento)."""
+    """A pesquisa não responde a ninguém — nem ao controlo leve (em baixo)."""
     g._search.then = _http_error(503)                  # noqa: SLF001
     g._search.control_then = _http_error(503)          # noqa: SLF001
 
@@ -191,20 +193,21 @@ def test_with_nobody_waiting_nothing_is_asked_and_nothing_is_said():
 # --------------------------------------------------------------------------- #
 
 
-def test_a_search_that_is_still_down_is_asked_once_and_nobody_is_lost():
+def test_a_search_that_is_still_down_costs_one_control_and_nobody_is_lost():
     """Cada um custava uma pergunta falhada e um controlo falhado (~20 s ao
-    que se mediu a 10/10). O primeiro chega para saber; os outros esperam."""
+    que se mediu a 10/10). Um controlo leve chega para saber: ninguém é
+    perguntado, e todos esperam."""
     g, f, larder, _rep, _calls = world(1, 2, 3)
-    questions, controls = len(asked(g)), g._search.controls   # noqa: SLF001
+    s = g._search                                             # noqa: SLF001
+    questions, controls, heavies = len(asked(g)), s.controls, s.heavies
     rep = f.retry_carried(larder)
-    assert rep == CarryReport(total=3, asked=1, waiting=1, unasked=2)
-    assert len(asked(g)) - questions == 1                     # one question…
-    assert g._search.controls - controls == 1                 # noqa: SLF001 — …one control
+    assert rep == CarryReport(total=3, unasked_down=3)
+    assert len(asked(g)) == questions                         # no question at all…
+    assert (s.controls - controls, s.heavies - heavies) == (1, 0)   # …one light control
     assert f.carried() == 3 and larder.size() == 0
     assert rep.render() == (
-        HEAD + "3 candidato(s) em memória — 1 perguntado(s) outra vez: 0 guardado(s), "
-        "1 sem resposta outra vez · 2 nem perguntado(s): o controlo também falhou · "
-        "ficam em memória: 3")
+        HEAD + "3 candidato(s) em memória — 3 nem perguntado(s): a pesquisa não "
+        "responde · ficam em memória: 3")
     # …and when it answers they all come back, in the order they were set aside
     up(g)
     assert f.retry_carried(larder) == CarryReport(total=3, asked=3, rescued=3)
@@ -212,21 +215,23 @@ def test_a_search_that_is_still_down_is_asked_once_and_nobody_is_lost():
 
 
 def test_it_stops_where_the_search_stops_not_before():
+    """A pesquisa estava boa no início e caiu a meio: quem vinha atrás já
+    não é perguntado."""
     g, f, larder, _rep, _calls = world(1, 2, 3)
     up(g)
     g._search.script = {2: [_http_error(503)]}               # noqa: SLF001
-    g._search.control = [_http_error(503)]                   # noqa: SLF001
+    g._search.control = [None, _http_error(503)]             # noqa: SLF001 — good, then down
     rep = f.retry_carried(larder)
-    assert rep == CarryReport(total=3, asked=2, rescued=1, waiting=1, unasked=1)
+    assert rep == CarryReport(total=3, asked=2, rescued=1, waiting=1, unasked_down=1)
     assert larder.size() == 1 and f.carried() == 2
     assert rep.render() == (
         HEAD + "3 candidato(s) em memória — 2 perguntado(s) outra vez: 1 guardado(s), "
-        "1 sem resposta outra vez · 1 nem perguntado(s): o controlo também falhou · "
+        "1 sem resposta outra vez · 1 nem perguntado(s): a pesquisa não responde · "
         "ficam em memória: 2")
 
 
-def test_no_answer_with_the_control_answering_goes_on_to_the_next_one():
-    """O controlo respondeu: a pesquisa está a funcionar — o problema pode
+def test_no_answer_with_the_search_good_goes_on_to_the_next_one():
+    """Os dois controlos responderam: a pesquisa está boa — o problema pode
     ser deste nome, e os outros não têm de esperar por ele."""
     g, f, larder, _rep, _calls = world(1, 2, 3)
     up(g)
@@ -240,8 +245,8 @@ def test_no_answer_with_the_control_answering_goes_on_to_the_next_one():
 
 
 def test_a_guard_without_a_control_never_stops_the_others():
-    """Outra superfície, ou uma guarda de mentira: sem controlo não há quem
-    diga "é o momento" — pergunta-se a todos."""
+    """Outra superfície, ou uma guarda de mentira: sem controlos não há
+    estado nenhum — pergunta-se a todos."""
     class Mute:
         def __init__(self):
             self.stats = {"transport": 0}
@@ -268,10 +273,10 @@ def test_a_guard_without_a_control_never_stops_the_others():
 # --------------------------------------------------------------------------- #
 
 
-def test_three_failures_in_a_row_with_the_control_answering_are_the_name():
+def test_three_failures_in_a_row_with_the_search_good_are_the_name():
     assert NAME_BOUND_AFTER == 3                             # the passes' own three
-    g, f, larder, _rep, _calls = world(1)                    # the control failed: kept
-    g._search.control_then = None                            # noqa: SLF001 — it answers now
+    g, f, larder, _rep, _calls = world(1)                    # the search was down: kept
+    g._search.control_then = None                            # noqa: SLF001 — it is good now
     reports = [f.retry_carried(larder) for _ in range(3)]
     assert reports[0] == reports[1] == CarryReport(total=1, asked=1, waiting=1)
     assert reports[2] == CarryReport(total=1, asked=1, blind=1)
@@ -281,17 +286,30 @@ def test_three_failures_in_a_row_with_the_control_answering_are_the_name():
         "1 que a pesquisa não procura (índice-cego)")
 
 
-def test_one_failed_control_in_between_and_the_count_starts_again():
+def test_one_failure_with_the_search_down_and_the_count_starts_again():
     g, f, larder, _rep, _calls = world(1)
     s = g._search                                            # noqa: SLF001
     s.control_then = None
     f.retry_carried(larder)
     f.retry_carried(larder)                                  # two in a row…
-    s.control = [_http_error(503)]
+    s.control = [None, _http_error(503)]                     # good, asked, and then down
     assert f.retry_carried(larder).waiting == 1              # …and the moment again
     assert f.retry_carried(larder).waiting == 1
     assert f.retry_carried(larder).waiting == 1
     assert f.retry_carried(larder) == CarryReport(total=1, asked=1, blind=1)
+
+
+def test_a_run_with_the_search_down_does_not_count_against_the_name():
+    """Uma corrida em que ninguém foi perguntado não é uma falha do nome:
+    a conta das três seguidas fica onde estava."""
+    g, f, larder, _rep, _calls = world(1)
+    s = g._search                                            # noqa: SLF001
+    s.control_then = None
+    f.retry_carried(larder)
+    f.retry_carried(larder)                                  # two in a row
+    s.control = [_http_error(503)]
+    assert f.retry_carried(larder) == CarryReport(total=1, unasked_down=1)
+    assert f.retry_carried(larder) == CarryReport(total=1, asked=1, blind=1)   # the third
 
 
 # --------------------------------------------------------------------------- #
@@ -504,7 +522,8 @@ def test_harvest_manifold_starts_by_those_the_last_run_left_waiting(monkeypatch)
     assert store.saves >= saves + 2                          # saved at once, and at the end
     (note,) = [m for m in said if "corrida anterior" in m]
     assert note == ("harvest: 1 candidato(s) da corrida anterior sem resposta da "
-                    "pesquisa — pergunto outra vez antes de começar")
+                    "pesquisa — vejo como ela está e pergunto por quem fizer sentido, "
+                    "antes de começar")
     assert not ADDRESS.search(first + second + note)
     assert "Some Two Words" not in first + second + note
 
@@ -525,7 +544,7 @@ def test_what_it_rescues_is_saved_even_if_the_harvest_then_refuses(monkeypatch):
     assert refusal.startswith("harvest manifold: NÃO MEDIDA — o RPC falhou (TimeoutError)")
 
 
-def test_a_search_still_down_costs_the_next_run_one_question_and_says_so(monkeypatch):
+def test_a_search_still_down_costs_the_next_run_one_control_and_says_so(monkeypatch):
     tw, store, g, _said = _manifold(monkeypatch)
     down(g)
     first = tw.harvest_source("manifold", 60)
@@ -534,9 +553,8 @@ def test_a_search_still_down_costs_the_next_run_one_question_and_says_so(monkeyp
     saves = store.saves
     second = tw.harvest_source("manifold", 60)
     assert second.split("\n")[1] == (
-        HEAD + "4 candidato(s) em memória — 1 perguntado(s) outra vez: 0 guardado(s), "
-        "1 sem resposta outra vez · 3 nem perguntado(s): o controlo também falhou · "
-        "ficam em memória: 4")
+        HEAD + "4 candidato(s) em memória — 4 nem perguntado(s): a pesquisa não "
+        "responde · ficam em memória: 4")
     # the harvest found the same four again: still four waiting, not eight —
     # and the last line says the total, so two "4" are not read as eight
     assert tw.finder.carried() == 4 and store.larder.size() == 0

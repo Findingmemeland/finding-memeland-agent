@@ -487,17 +487,37 @@ def search_failure_kind(e: BaseException) -> str:
     return f"outro:{type(e).__name__}"
 
 
-# THE CONTROL SEARCH (10/10). When a name's search fails on every attempt,
-# one more search is made for this fixed text — nobody's name, cheap for the
-# marketplace to answer. It says which of two things happened:
-#   · it answers  → the search works right now: the failure is about THAT
-#                   name's query ("the name");
-#   · it fails    → the search is down for everyone ("the moment").
-# Measured on 10/10 (/harvest manifold 150): 25 failed requests, all 503, 24
-# of them in 8 questions that failed three times out of three — and nothing
-# in the counts could tell the name from the moment. A control that never
-# answers reads as "the moment", which is the side that keeps a candidate.
-SEARCH_CONTROL_QUERY = "finding memeland"
+# THE CONTROL SEARCHES. When a name's search fails, the search is asked about
+# fixed public texts instead — nobody's secret — to learn what STATE it is
+# in, because no control can say whether one particular name would be
+# answered.
+#
+# ONE control was not enough (10–11/10). The first one ("finding memeland",
+# 10/10) turned out to be a HEAVY question: it failed on two days running
+# (503 at ~10 s) — days on which three targets entered the larder and a
+# /prepare sealed one at the first attempt. Measured 11/10, 11:55 UTC, with
+# the names of three targets already revealed, unfiltered, page of 50: two
+# got a 503 at 10.3 s and one was answered in 1.7 s with ten results — and
+# filtered by their chain all three were answered in 1–2 s. Unfiltered,
+# whether a question is answered depends on the NAME. So there are two, and
+# together they say one of three things:
+#   · the LIGHT one fails                   → DOWN: the search answers nobody;
+#   · the light one answers, the HEAVY not  → DEGRADED: it is alive and cannot
+#                                             answer some names;
+#   · both answer                           → GOOD: a name that still fails is
+#                                             failing on its own.
+# The light text is the name of the target of hunt #16 — public since its
+# reveal, and the one of the three that was answered that day. The heavy one
+# is the text that failed.
+SEARCH_LIGHT_QUERY = "Akari Haruto"
+SEARCH_HEAVY_QUERY = "finding memeland"
+SEARCH_GOOD, SEARCH_DEGRADED, SEARCH_DOWN = "boa", "degradada", "em-baixo"
+SEARCH_STATES = (SEARCH_GOOD, SEARCH_DEGRADED, SEARCH_DOWN)
+# A heavy control that FAILED is not asked again for this long: it costs its
+# ten seconds every time, and it failed on two days running (10–11/10). One
+# that answered is always asked again — "good" is the state that can cost a
+# candidate, and it is never taken from memory.
+HEAVY_FAILURE_TTL_S = 300.0
 
 # A failed request that took this long was the marketplace's own search timing
 # out; under it, the request was turned away at the door. Counted apart
@@ -510,12 +530,11 @@ def is_server_error(kind: str) -> bool:
     return len(kind) == 3 and kind.isdigit() and kind.startswith("5")
 
 
-def control_results(search, query: str = SEARCH_CONTROL_QUERY, *,
-                    chain: str | None = None) -> int:
-    """Ask `search` the control question — unfiltered, or filtered by
-    `chain` — and return how many results came back. Through the adapter's
-    own `control` when it has one (OpenSea: never from a cache); otherwise
-    by its ordinary search. Raises what the search raises."""
+def control_results(search, query: str, *, chain: str | None = None) -> int:
+    """Ask `search` a control question — unfiltered, or filtered by `chain`
+    — and return how many results came back. Through the adapter's own
+    `control` when it has one (OpenSea: never from a cache); otherwise by
+    its ordinary search. Raises what the search raises."""
     fresh = getattr(search, "control", None)
     if callable(fresh):
         return int(fresh(query, chain=chain))
@@ -554,11 +573,12 @@ class SearchProbe:
         return f"{self.kind} em {took}"
 
 
-def probe_search(search, *, query: str = SEARCH_CONTROL_QUERY,
+def probe_search(search, *, query: str = SEARCH_LIGHT_QUERY,
                  chain: str | None = None,
                  clock: Callable[[], float] = time.monotonic) -> SearchProbe:
-    """Ask `search` the control query once — no retry, no cache, the
-    caller's own transport and its own time limit — and say what happened.
+    """Ask `search` a control query once — the light one unless told
+    otherwise — no retry, no cache, the caller's own transport and its own
+    time limit, and say what happened.
     For /status (10/10): after two harvests lost candidates to minutes-long
     bursts of 503 while the status page said "operational", the operator
     needs to see, before a launch, whether the search answers RIGHT NOW.
@@ -613,18 +633,27 @@ class MarketNameUniqueness:
         4 s) recovered at most one failing question in nine and cost sixteen
         requests in one harvest; what helps is waiting, and that is the
         caller's second and third pass;
-      · after a question that failed, the CONTROL search (above) is made;
-        `last_control` is True (it answered: the name), False (it failed:
-        the moment) or None (no control), and `control` counts both;
+      · after a question that failed, the CONTROL searches (above) say
+        what state the search is in: `last_state` is "boa", "degradada",
+        "em-baixo" or None (no controls), and `search_states` counts them,
+        one per failed question;
       · `failed_speed` counts failed requests as "rápidos" / "lentos"."""
 
     def __init__(self, *, search: NameSearch, page_size: int,
                  retries: int = 2, sleep_s: float = 2.0,
                  item_status: Callable[[str, str, int], object] | None = None,
-                 control_query: str | None = SEARCH_CONTROL_QUERY,
+                 light_query: str | None = SEARCH_LIGHT_QUERY,
+                 heavy_query: str | None = SEARCH_HEAVY_QUERY,
                  clock: Callable[[], float] = time.monotonic):
         self._search = search
-        self._control_query = control_query
+        # The controls work as a PAIR or not at all. The heavy one alone
+        # cannot tell "down" from "degraded" (the mistake of 10/10), and the
+        # light one alone cannot tell "degraded" from "good" — and "good" is
+        # the state that can cost a candidate.
+        paired = bool(light_query and heavy_query)
+        self._light_query = light_query if paired else None
+        self._heavy_query = heavy_query if paired else None
+        self._heavy_failed_at: float | None = None
         self._clock = clock
         # "blind" split by ASKING the marketplace for the item itself (30/09,
         # measurement only — the answer stays None): does it not know the
@@ -656,16 +685,16 @@ class MarketNameUniqueness:
                       "blind_clean_noname": 0}
         self.failed_requests: dict[str, int] = {}
         self.failed_speed: dict[str, int] = {}
-        self.control: dict[str, int] = {}
+        self.search_states: dict[str, int] = {}
         self.last_transport: tuple[str, ...] = ()
-        self.last_control: bool | None = None
+        self.last_state: str | None = None
 
     def __call__(self, base: str, chain: str, contract: str,
                  token_id: int) -> bool | None:
         from .selector import normalize_name
         want = _canonical(f"{chain}:{contract}:{token_id}")
         self.last_transport = ()
-        self.last_control = None
+        self.last_state = None
         kinds: list[str] = []
         for attempt in range(self._retries + 1):
             started = self._clock()
@@ -687,7 +716,10 @@ class MarketNameUniqueness:
                     continue
                 self.stats["transport"] += 1
                 self.last_transport = tuple(kinds)
-                self.last_control = self._ask_control()
+                self.last_state = self.search_state()
+                if self.last_state is not None:
+                    self.search_states[self.last_state] = (
+                        self.search_states.get(self.last_state, 0) + 1)
                 return None
         ids = {_canonical(i): n for i, n in rows}
         key = base.casefold()
@@ -707,18 +739,31 @@ class MarketNameUniqueness:
         return not others
 
 
-    def _ask_control(self) -> bool | None:
-        """The control search, after a question that failed. True = it
-        answered (any answer, even an empty one); False = it failed too.
-        Never raises, never retried: one request."""
-        if not self._control_query:
+    def search_state(self) -> str | None:
+        """What state the search is in NOW, by the control searches: "boa",
+        "degradada", "em-baixo" — or None without the two controls. The
+        light one first; the heavy one only when the light one answered
+        (and not again within `HEAVY_FAILURE_TTL_S` of failing). Never
+        raises, never retried: one request each, never from a cache."""
+        if not self._light_query:
             return None
+        if not self._answers(self._light_query):
+            return SEARCH_DOWN
+        failed_at = self._heavy_failed_at
+        if failed_at is not None and self._clock() - failed_at < HEAVY_FAILURE_TTL_S:
+            return SEARCH_DEGRADED
+        if self._answers(self._heavy_query):
+            return SEARCH_GOOD
+        self._heavy_failed_at = self._clock()
+        return SEARCH_DEGRADED
+
+    def _answers(self, query: str) -> bool:
+        """One control search: did it answer (any answer, even an empty
+        one)?"""
         try:
-            control_results(self._search, self._control_query)   # never a cache
+            control_results(self._search, query)
         except Exception:  # noqa: BLE001 — a measurement never breaks a verdict
-            self.control["falhou"] = self.control.get("falhou", 0) + 1
             return False
-        self.control["respondeu"] = self.control.get("respondeu", 0) + 1
         return True
 
     def _split_blind(self, base: str, chain: str, contract: str,

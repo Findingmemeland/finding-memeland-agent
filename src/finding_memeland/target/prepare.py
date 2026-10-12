@@ -490,11 +490,20 @@ THIRD_PASS_GAP_S = 300.0
 # oldest go first, and the same piece is never there twice — so a search
 # that stays down for days cannot grow it without end.
 CARRY_MAX = 50
-# How many failures IN A ROW, each with the control search answering right
-# after it, say "the name" and not "the moment": the marketplace searches,
-# and cannot search this — nor can a player. The same three the passes of one
-# run use (`ask_again`); a carried candidate reaches them across runs.
+# How many failures IN A ROW, each with the search found GOOD right after it
+# (both control searches answering), say "the name" and not "the moment":
+# the marketplace answers even its heavy questions, and cannot answer this
+# one — nor can a player. The same three the passes of one run use
+# (`ask_again`); a carried candidate reaches them across runs.
 NAME_BOUND_AFTER = 3
+# THE SEARCH'S STATE AFTER A FAILED QUESTION (11/10) — the guard's words
+# (search_guard.SEARCH_STATES), repeated here so that the larder does not
+# import the guard: "boa" (the name is failing on its own), "degradada" (the
+# search is alive and cannot answer some names), "em-baixo" (it answers
+# nobody). What each one does to a candidate is in `ask_again`.
+SEARCH_GOOD, SEARCH_DEGRADED, SEARCH_DOWN = "boa", "degradada", "em-baixo"
+_STATE_WORDS = {SEARCH_GOOD: "boa", SEARCH_DEGRADED: "degradada",
+                SEARCH_DOWN: "em baixo"}
 
 
 def _transport_how(guard) -> str:
@@ -509,14 +518,14 @@ def _transport_how(guard) -> str:
 
 
 _SEARCH_COUNTERS = (("failed", "failed_requests"), ("speed", "failed_speed"),
-                    ("control", "control"))
+                    ("states", "search_states"))
 
 
 def _search_counters(guard) -> dict:
     """What the uniqueness guard has counted about its own requests so far —
-    failed ones by kind, by speed, and what the control search answered —
-    copied, so the difference between two moments is one run's. Empty
-    counters for a guard that does not count."""
+    failed ones by kind, by speed, and the state the search was found in
+    after each failed question — copied, so the difference between two
+    moments is one run's. Empty counters for a guard that does not count."""
     out = {}
     for name, attr in _SEARCH_COUNTERS:
         got = getattr(guard, attr, None)
@@ -524,12 +533,24 @@ def _search_counters(guard) -> dict:
     return out
 
 
-def _last_control(guard) -> bool | None:
-    """What the control search said after the guard's last failed question:
-    True (it answered — the name), False (it failed too — the moment), None
-    (no control, or a guard that has none)."""
-    got = getattr(guard, "last_control", None)
-    return got if isinstance(got, bool) else None
+def _last_state(guard) -> str | None:
+    """The state the search was found in after the guard's last failed
+    question — "boa", "degradada", "em-baixo" — or None (no controls, or a
+    guard that has none)."""
+    got = getattr(guard, "last_state", None)
+    return got if got in _STATE_WORDS else None
+
+
+def _name_bound(states: tuple) -> bool:
+    """The last `NAME_BOUND_AFTER` failures all found the search GOOD."""
+    return (len(states) >= NAME_BOUND_AFTER
+            and all(s == SEARCH_GOOD for s in states[-NAME_BOUND_AFTER:]))
+
+
+def _degraded_label(how: str) -> str:
+    """The cause of a candidate the DEGRADED search could not answer: ours,
+    never the piece's — with how the request failed."""
+    return "pesquisa-degradada" + (f":{how}" if how else "")
 
 
 def _moved(before: dict, after: dict) -> dict:
@@ -597,9 +618,9 @@ class Pending:
     how: str = ""             # "503", "429+timeout"; "" = the guard does not say
     at: float = 0.0           # the finder's clock when the search gave up
     passes: int = 1           # passes in which the search did not answer it
-    # what the control search said after each of them: True = it answered
-    # (the name), False = it failed too (the moment), None = no control
-    controls: tuple = ()
+    # the state the search was found in after each of them ("boa",
+    # "degradada", "em-baixo"; None = no controls)
+    states: tuple = ()
     # the "at most this many per contract IN THE LARDER" rule of the harvest
     # that found it (0 = none): it still holds when it is asked again later
     cap: int = 0
@@ -607,6 +628,12 @@ class Pending:
     def ref(self) -> str:
         """The piece, as the larder names it — to compare, never to show."""
         return f"{self.src.chain}:{self.src.contract.lower()}:{self.tid}"
+
+    def degraded(self) -> bool:
+        """Set aside while the search was DEGRADED: alive, and unable to
+        answer this name. Asking again before it recovers is asking for the
+        same silence."""
+        return bool(self.states) and self.states[-1] == SEARCH_DEGRADED
 
     def __repr__(self) -> str:
         return "Pending(<candidate>)"
@@ -621,15 +648,14 @@ class SearchPasses:
                     retry recovered from; `speed` — the same requests as
                     "rápidos" (turned away) / "lentos" (their search timed
                     out);
-      · `control` — what the control search answered after each question
-                    that failed: "respondeu" (the name) / "falhou" (the
-                    moment);
+      · `states`  — the state the search was found in after each question
+                    that failed: "boa" / "degradada" / "em-baixo";
       · the second pass and the third: how many candidates were asked again
         and how many turned out unique."""
 
     failed: dict = field(default_factory=dict)
     speed: dict = field(default_factory=dict)
-    control: dict = field(default_factory=dict)
+    states: dict = field(default_factory=dict)
     second_asked: int = 0
     second_rescued: int = 0
     third_asked: int = 0
@@ -647,9 +673,10 @@ class SearchPasses:
                 line += (f" — rápidos {self.speed.get('rápidos', 0)}, "
                          f"lentos {self.speed.get('lentos', 0)}")
             parts.append(line)
-        if self.control:
-            parts.append(f"controlo: respondeu {self.control.get('respondeu', 0)}, "
-                         f"falhou {self.control.get('falhou', 0)}")
+        if self.states:
+            parts.append("estado da pesquisa nas falhas: " + ", ".join(
+                f"{word} {self.states[s]}" for s, word in _STATE_WORDS.items()
+                if self.states.get(s)))
         if self.second_asked:
             parts.append(f"2.ª volta: {self.second_asked} repetido(s), "
                          f"{self.second_rescued} salvo(s)")
@@ -673,14 +700,15 @@ class CarryReport:
     asked: int = 0            # the search was asked about it again
     rescued: int = 0          # unique now: in the larder
     verdict: int = 0          # the search answered, and it was not "unique"
-    blind: int = 0            # the NAME: the control answers, this never does
+    blind: int = 0            # the NAME: the search is good, this never answers
     waiting: int = 0          # no answer again: still in memory
     duplicate: int = 0        # already in the larder: not asked
     full: int = 0             # its contract has its share by now: not asked
-    unasked: int = 0          # the control failed too: the rest were not asked
+    unasked_down: int = 0     # the search answers nobody: not asked
+    unasked_degraded: int = 0   # still degraded, and it was set aside for that
 
     def kept(self) -> int:
-        return self.waiting + self.unasked
+        return self.waiting + self.unasked_down + self.unasked_degraded
 
     def render(self) -> str:
         if not self.total:
@@ -699,8 +727,12 @@ class CarryReport:
             parts.append(f"{self.duplicate} já na despensa")
         if self.full:
             parts.append(f"{self.full} de contrato já cheio")
-        if self.unasked:
-            parts.append(f"{self.unasked} nem perguntado(s): o controlo também falhou")
+        if self.unasked_down:
+            parts.append(f"{self.unasked_down} nem perguntado(s): a pesquisa "
+                         "não responde")
+        if self.unasked_degraded:
+            parts.append(f"{self.unasked_degraded} nem perguntado(s): a pesquisa "
+                         "continua degradada")
         if self.kept():
             parts.append(f"ficam em memória: {self.kept()}")
         return (f"da corrida anterior: {self.total} candidato(s) em memória — "
@@ -1207,7 +1239,7 @@ class TargetFinder:
             if defer:
                 return Pending(src=src, tid=tid, read=read, base=base,
                                how=ours, at=self._clock(),
-                               controls=(_last_control(self._name_is_unique),))
+                               states=(_last_state(self._name_is_unique),))
         tally.unique += 1
         tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
         return None
@@ -1279,7 +1311,7 @@ class TargetFinder:
         now = self.search_counters()
         report.failed = _moved(before["failed"], now["failed"])
         report.speed = _moved(before["speed"], now["speed"])
-        report.control = _moved(before["control"], now["control"])
+        report.states = _moved(before["states"], now["states"])
 
     def ask_again(self, pending: Pending, tally: Tally, *, last: bool,
                   unanswered: list | None = None) -> Candidate | Pending | None:
@@ -1288,17 +1320,22 @@ class TargetFinder:
         are not repeated. Not sooner than the pass's gap after the search
         gave up on it: a minute before the second, five before the third.
 
-        A verdict is tallied as the verdict it is. A failure of ours comes
-        back as a Pending to be asked again — unless this is the `last`
-        pass, and then it is final:
-          · "rede-NOSSO", with how it failed, when the control search failed
-            too at least once (the MOMENT: nothing was learnt about the
-            piece);
-          · "índice-cego:pesquisa-<how>" when the control answered after
-            EVERY one of the three failures (the NAME: the marketplace
-            searches, and cannot search this — nor can a player).
-        What ends as "rede-NOSSO" is also appended to `unanswered`, when the
-        caller gives one: it may be asked again in a later run."""
+        A verdict is tallied as the verdict it is. A failure of ours is
+        read by the STATE the search was found in right after it (11/10):
+          · "degradada" — alive, and unable to answer this name now. Final
+            for this run, whichever pass it is: "pesquisa-degradada" with
+            how it failed. Waiting a minute does not mend it: the heavy
+            control failed on two days running (10–11/10);
+          · "em-baixo", or no controls — comes back as a Pending to be
+            asked again; on the `last` pass it is "rede-NOSSO" with how it
+            failed (the MOMENT: nothing was learnt about the piece);
+          · "boa" — asked again too; on the `last` pass, if the search was
+            good after EVERY one of the three failures, it is
+            "índice-cego:pesquisa-<how>" (the NAME: the marketplace answers
+            everything else, and cannot answer this — nor can a player).
+        What ends as ours ("pesquisa-degradada", "rede-NOSSO") is also
+        appended to `unanswered`, when the caller gives one: it may be asked
+        again in a later run. What is the name's is not."""
         gap = self._retry_gap if pending.passes == 1 else self._third_gap
         wait = pending.at + gap - self._clock()
         if wait > 0:
@@ -1308,18 +1345,20 @@ class TargetFinder:
             return self._candidate(pending.src, pending.tid, pending.read,
                                    pending.base)
         if ours is not None:
-            controls = pending.controls + (_last_control(self._name_is_unique),)
-            if not last:
-                return Pending(src=pending.src, tid=pending.tid, read=pending.read,
-                               base=pending.base, how=ours, at=self._clock(),
-                               passes=pending.passes + 1, controls=controls)
-            if len(controls) >= NAME_BOUND_AFTER and all(c is True for c in controls):
+            state = _last_state(self._name_is_unique)
+            again = replace(pending, how=ours, at=self._clock(),
+                            passes=pending.passes + 1,
+                            states=pending.states + (state,))
+            if state == SEARCH_DEGRADED:
+                label = _degraded_label(ours)
+                if unanswered is not None:
+                    unanswered.append(again)
+            elif not last:
+                return again
+            elif _name_bound(again.states):
                 label = "índice-cego:pesquisa" + (f"-{ours}" if ours else "")
             elif unanswered is not None:
-                unanswered.append(Pending(
-                    src=pending.src, tid=pending.tid, read=pending.read,
-                    base=pending.base, how=ours, at=self._clock(),
-                    passes=pending.passes + 1, controls=controls))
+                unanswered.append(again)
         tally.unique += 1
         tally.unique_kinds[label] = tally.unique_kinds.get(label, 0) + 1
         return None
@@ -1334,17 +1373,42 @@ class TargetFinder:
         of a run, in memory, for the candidates the search did not answer.
         Returns, for each of `waiting` in order, the Candidate it turned out
         to be, or None; the final cause of a None is tallied in
-        `tally_for(i)`. Counts go to `report`. Nothing is kept."""
+        `tally_for(i)`. Counts go to `report`. Nothing is kept here: what
+        stays ours goes to `unanswered`, when the caller gives one.
+
+        NO PASS for what was set aside with the search DEGRADED (11/10): it
+        is tallied as "pesquisa-degradada" at once. Measured 10/10, in two
+        harvests in which the heavy control (the only one there was) kept
+        failing: the passes rescued 1 candidate in 10, and the third one
+        adds six minutes to a run."""
         note = notify or (lambda _t: None)
         results: list[Candidate | None] = [None] * len(waiting)
-        again: list[tuple[int, Pending]] = []
-        if waiting:
-            note(f"{label}: {len(waiting)} {what} sem resposta da pesquisa do "
+        second: list[tuple[int, Pending]] = []
+        degraded = 0
+        for i, pending in enumerate(waiting):
+            if not pending.degraded():
+                second.append((i, pending))
+                continue
+            degraded += 1
+            tally = tally_for(i)
+            cause = _degraded_label(pending.how)
+            tally.unique += 1
+            tally.unique_kinds[cause] = tally.unique_kinds.get(cause, 0) + 1
+            if unanswered is not None:
+                unanswered.append(pending)
+        if degraded:
+            note(f"{label}: {degraded} {what} sem resposta da pesquisa do nome "
+                 "— a pesquisa está degradada (responde a umas perguntas e "
+                 "não a estas): não volto a perguntar nesta corrida")
+        if second:
+            note(f"{label}: {len(second)} {what} sem resposta da pesquisa do "
                  "nome (falha nossa) — volto a perguntar agora, no fim; pode "
                  "demorar até um minuto")
-        for i, pending in enumerate(waiting):
+        again: list[tuple[int, Pending]] = []
+        for i, pending in second:
             report.second_asked += 1
-            got = self.ask_again(pending, tally_for(i), last=False)
+            got = self.ask_again(pending, tally_for(i), last=False,
+                                 unanswered=unanswered)
             if isinstance(got, Pending):
                 again.append((i, got))
             elif got is not None:
@@ -1382,22 +1446,38 @@ class TargetFinder:
         stayed = sum(1 for p in self._carried if p.ref() in mine)
         return stayed, len(everyone) - len(self._carried)
 
-    def retry_carried(self, larder: Larder) -> CarryReport:
-        """THE START OF A RUN: ask again, once each, the candidates the
-        previous run could get no answer for. The search only — they had
-        passed every other check when they were set aside, and /prepare
-        re-reads everything before it seals anyway.
+    def _search_state(self) -> str | None:
+        """The state of the search NOW, as the guard's control searches find
+        it — None for a guard that has none (a fake, another surface)."""
+        ask = getattr(self._name_is_unique, "search_state", None)
+        if not callable(ask):
+            return None
+        try:
+            got = ask()
+        except Exception:  # noqa: BLE001 — a measurement never breaks a run
+            return None
+        return got if got in _STATE_WORDS else None
 
+    def retry_carried(self, larder: Larder) -> CarryReport:
+        """THE START OF A RUN: the candidates the previous run could get no
+        answer for. The search only — they had passed every other check when
+        they were set aside, and /prepare re-reads everything before it
+        seals anyway.
+
+        FIRST the state of the search, by the control searches (11/10) — it
+        says whom it is worth asking about:
+          · "em-baixo"  → nobody: it answers no one;
+          · "degradada" → only those set aside while it was DOWN; the ones
+                          set aside as degraded wait until it is good again
+                          (the same names, the same silence);
+          · "boa", or no controls → everybody.
+        Then, one question each:
           · unique now: into the larder;
           · a verdict: gone;
-          · no answer again: back in memory, for the run after this one —
-            unless it is the NAME (`NAME_BOUND_AFTER` failures in a row with
-            the control answering): then it is gone, as "índice-cego";
-          · no answer AND the control failed too: the search is not
-            answering NOW, so the ones behind it are not asked at all — they
-            wait as they were. Nothing is lost by not asking, and a search
-            that is down is not hammered (each of them would cost a failed
-            question and a failed control: ~20 s at what was measured 10/10).
+          · no answer again: back in memory with the state found after this
+            failure — unless it is the NAME (`NAME_BOUND_AFTER` failures in
+            a row with the search good): then it is gone, as "índice-cego".
+            And that state is the one the ones behind it are judged by.
 
         Not asked either: what is in the larder by now, and a piece of a
         contract that has its share by now (`Pending.cap`).
@@ -1406,9 +1486,12 @@ class TargetFinder:
         only leave here."""
         waiting = list(self._carried)
         rep = CarryReport(total=len(waiting))
+        if not waiting:
+            return rep
         kept: list[Pending] = []
         reached = 0
         try:
+            state = self._search_state()
             for pending in waiting:
                 reached += 1
                 kept.append(pending)                # until it is settled
@@ -1420,6 +1503,12 @@ class TargetFinder:
                 if pending.cap and larder.count_of(src.chain, src.contract) >= pending.cap:
                     kept.pop()
                     rep.full += 1
+                    continue
+                if state == SEARCH_DOWN:
+                    rep.unasked_down += 1
+                    continue
+                if state == SEARCH_DEGRADED and pending.degraded():
+                    rep.unasked_degraded += 1
                     continue
                 rep.asked += 1
                 uniq, _label, ours = self._unique(src, tid, pending.base)
@@ -1434,22 +1523,19 @@ class TargetFinder:
                     kept.pop()
                     rep.verdict += 1
                     continue
-                control = _last_control(self._name_is_unique)
-                controls = pending.controls + (control,)
-                if (len(controls) >= NAME_BOUND_AFTER
-                        and all(c is True for c in controls[-NAME_BOUND_AFTER:])):
+                found = _last_state(self._name_is_unique)
+                states = pending.states + (found,)
+                if _name_bound(states):
                     kept.pop()
                     rep.blind += 1
                     continue
                 kept[-1] = replace(pending, how=ours, at=self._clock(),
-                                   passes=pending.passes + 1, controls=controls)
+                                   passes=pending.passes + 1, states=states)
                 rep.waiting += 1
-                if control is False:
-                    break                           # the moment: stop asking
+                if found is not None:
+                    state = found                   # the newest reading wins
         finally:
-            rest = waiting[reached:]
-            rep.unasked = len(rest)
-            self._carried = kept + rest
+            self._carried = kept + waiting[reached:]
         return rep
 
     def fill(self, larder: Larder, want: int, *, max_draws: int = 400,
@@ -1531,14 +1617,18 @@ class TargetFinder:
         pergunta-se outra vez (2.ª volta); se falhar de novo, uma última vez
         cinco minutos depois (3.ª). Só a pesquisa; as outras verificações
         não se repetem. O relatório diz quantos pedidos falharam e de que
-        tipo, o que a pesquisa de controlo respondeu, quantos candidatos se
-        repetiram em cada volta e quantos se salvaram. Nada disto se grava.
+        tipo, em que estado ficou a pesquisa depois de cada falha, quantos
+        candidatos se repetiram em cada volta e quantos se salvaram. Nada
+        disto se grava. SEM VOLTAS para quem falhou com a pesquisa
+        DEGRADADA (11/10): vai logo para a memória, como
+        "pesquisa-degradada".
 
-        O QUE NEM À TERCEIRA TEVE RESPOSTA (o momento, não o nome) fica na
-        memória do finder e volta a ser perguntado no início da corrida
-        seguinte do mesmo processo (`retry_carried`, que quem corre a
-        colheita chama antes de começar). Conta no relatório desta corrida
-        como "rede-NOSSO" — desta não entrou — e como "ficam em memória".
+        O QUE FICOU SEM RESPOSTA POR NOSSA CAUSA (o momento, não o nome)
+        fica na memória do finder e volta a ser perguntado no início de uma
+        corrida seguinte do mesmo processo (`retry_carried`, que quem corre
+        a colheita chama antes de começar). Conta no relatório desta corrida
+        como "rede-NOSSO" ou "pesquisa-degradada" — desta não entrou — e
+        como "ficam em memória".
         `larder_cap` é a regra "no máximo N por contrato NA DESPENSA" de
         quem colheu (a colheita de uma fonte; 0 = nenhuma): segue com o
         candidato, para valer também quando ele voltar a ser perguntado."""

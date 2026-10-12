@@ -105,6 +105,9 @@ from .probe import (
 )
 from .refresh import arweave_ref, uri_is_content_addressed
 from .search_guard import (
+    SEARCH_HEAVY_QUERY,
+    SEARCH_LIGHT_QUERY,
+    SEARCH_STATES,
     ClueSearchGuard,
     MarketNameUniqueness,
     OpenSeaSearch,
@@ -204,12 +207,10 @@ class TargetWiring:
     # which marketplace serves the search guard / uniqueness / chain probe
     # ('opensea' or 'rarible') — for /status, never for a public post
     market_surface: str = ""
-    # /status asks the marketplace search a control question (10/10): the
-    # search itself, the same one with a page of ONE (asked only when the
-    # first fails — it measures whether the SHAPE of our request matters),
-    # and the uniqueness guard, for its counters since the process started.
+    # /status asks the marketplace search its control questions (10/10):
+    # the search itself, and the uniqueness guard, for its counters since
+    # the process started.
     market: object = None
-    market_small: object = None
     uniqueness: object = None
     # the larder (17/09): targets verified in advance, one used per hunt.
     # THE NEXT THIRTY ANSWERS — encrypted, never rendered, counts only.
@@ -343,7 +344,7 @@ class TargetWiring:
                        else " · nenhum na despensa")
 
     def search_line(self, *, clock: Callable[[], float] = time.monotonic) -> str:
-        """Para o /status: a pesquisa do mercado responde AGORA?
+        """Para o /status: em que estado está a pesquisa do mercado AGORA?
 
         Pesquisas de controlo, cada uma com o que respondeu, em quanto tempo
         e com quantos resultados — pelo transporte das pesquisas a sério e
@@ -352,66 +353,64 @@ class TargetWiring:
         baixo; medido a 10/10):
 
           · SEM FILTRO de cadeia, página de 50 — a forma em que a colheita
-            e o /prepare perguntam pela unicidade. Se falhar, a mesma com
-            página de 1: mede se é o tamanho do pedido que pesa;
+            e o /prepare perguntam pela unicidade — com DOIS textos (11/10):
+            o LEVE e o PESADO (`search_guard`). Juntos dizem o estado:
+              leve falha                 → em baixo: não responde a ninguém;
+              leve responde, pesada não  → degradada: viva, e sem resposta
+                                           para alguns nomes;
+              as duas respondem          → boa.
+            Um só texto não chegava: o de 10/10 era o pesado e deu "⚠️ 503"
+            em dois dias seguidos — e no segundo um /prepare selou à primeira;
           · POR CADEIA, página de 50, uma por cadeia em que o jogo guarda
-            alvos — a forma em que as pistas e o /launch perguntam.
+            alvos — a forma em que as pistas e o /launch perguntam — com o
+            texto leve.
 
-        O QUE A LINHA NÃO DIZ, de propósito: se um /launch passava. Disse-o
-        durante umas horas a 10/10 ("um /launch seria recusado…"), sem o
-        ter medido — e a pesquisa por cadeia estava a responder. Nem o
-        contrário: medido no mesmo dia, com a mesma página de 50 e filtrada
-        por uma cadeia, a pesquisa respondeu a um texto sem resultados e
-        deu 503 a um texto com a página cheia. O controlo tem poucos
-        resultados ou nenhuns: uma pergunta a sério pode falhar onde ele
-        respondeu. Por isso cada resposta traz a contagem ao lado.
+        O QUE A LINHA NÃO DIZ, de propósito: se um /launch ou um /prepare
+        passavam. Nenhum controlo sabe se UM nome concreto vai ter resposta
+        (medido a 11/10 com três nomes já revelados, sem filtro: dois
+        deram 503 e um respondeu em 1,7 s). Por isso a linha mostra as
+        medições, cada uma com a contagem ao lado, e mais nada.
 
-        AO MESMO TEMPO (Pedro, 10/10): cada forma mede-se na sua thread. A
-        linha demora o que demorar a mais lenta — no pior caso os 25 s da
-        pesquisa sem filtro mais os 25 s da página de 1, 50 s — e não a soma
-        de todas (100 s com duas cadeias). A página de 1 só se pede depois
-        de a de 50 falhar, por isso essas duas vão em fila.
+        AO MESMO TEMPO (Pedro, 10/10): cada medição corre na sua thread. A
+        linha demora o que demorar a mais lenta — no pior caso os 25 s do
+        tempo limite — e não a soma de todas.
 
         E os contadores da guarda de unicidade desde o arranque, sem custo.
-        Nunca o nome de ninguém: o texto do controlo é fixo e os resultados
-        não se lêem — contam-se."""
+        Nunca o nome de ninguém: os textos dos controlos são fixos e
+        públicos, não saem daqui, e os resultados não se lêem — contam-se."""
         if self.market is None:
             return "pesquisa: não ligada"
         name = {"opensea": "OpenSea", "rarible": "Rarible"}.get(
             self.market_surface, self.market_surface or "?")
         chains = sorted(self.deposit_chains or ())
 
-        def unfiltered() -> str:
-            first = probe_search(self.market, clock=clock)
-            line = (f"pesquisa {name}, sem filtro: " + ("" if first.ok else "⚠️ ")
-                    + first.render())
-            if not first.ok and self.market_small is not None:
-                small = probe_search(self.market_small, clock=clock)
-                line += f" · página de 1: {small.render()}"
-            return line
+        def asked(query: str, chain: str | None = None) -> str:
+            got = probe_search(self.market, query=query, chain=chain, clock=clock)
+            return ("" if got.ok else "⚠️ ") + got.render()
 
-        def by_chain(chain: str) -> str:
-            got = probe_search(self.market, chain=chain, clock=clock)
-            return f"{chain} " + ("" if got.ok else "⚠️ ") + got.render()
-
-        with ThreadPoolExecutor(max_workers=1 + len(chains),
+        with ThreadPoolExecutor(max_workers=2 + len(chains),
                                 thread_name_prefix="search-probe") as pool:
-            first = pool.submit(unfiltered)
-            rest = [pool.submit(by_chain, chain) for chain in chains]
-            lines = [first.result()]
+            light = pool.submit(asked, SEARCH_LIGHT_QUERY)
+            heavy = pool.submit(asked, SEARCH_HEAVY_QUERY)
+            rest = [(chain, pool.submit(asked, SEARCH_LIGHT_QUERY, chain))
+                    for chain in chains]
+            lines = [f"pesquisa {name}, sem filtro: leve {light.result()} · "
+                     f"pesada {heavy.result()}"]
             if rest:
-                lines.append("  por cadeia: " + " · ".join(f.result() for f in rest))
+                lines.append("  por cadeia: " + " · ".join(
+                    f"{chain} {got.result()}" for chain, got in rest))
         lines.append(self._search_since_boot())
         return "\n".join(lines)
 
     def _search_since_boot(self) -> str:
         """What the uniqueness guard has counted since the process started:
-        questions, failed requests by kind, what the control answered."""
+        questions, failed requests by kind, and the state the search was
+        found in after each question that failed."""
         stats = getattr(self.uniqueness, "stats", None) or {}
         asked = sum(int(stats.get(k, 0)) for k in
                     ("unique", "not_unique", "blind", "crowded", "transport"))
         failed = dict(getattr(self.uniqueness, "failed_requests", None) or {})
-        control = dict(getattr(self.uniqueness, "control", None) or {})
+        states = dict(getattr(self.uniqueness, "search_states", None) or {})
         # candidates the last harvest could get no answer for, kept in
         # memory for the next one (10/10) — a count, never what they are
         waiting = self.finder.carried() if self.finder is not None else 0
@@ -422,9 +421,10 @@ class TargetWiring:
                 f"{sum(failed.values())} pedido(s) falhado(s)")
         if failed:
             text += " (" + ", ".join(f"{k} {n}" for k, n in sorted(failed.items())) + ")"
-        if control:
-            text += (f" · controlo: respondeu {control.get('respondeu', 0)}, "
-                     f"falhou {control.get('falhou', 0)}")
+        found = [f"{state.replace('-', ' ')} {states[state]}"
+                 for state in SEARCH_STATES if states.get(state)]
+        if found:
+            text += " · estado nas falhas: " + ", ".join(found)
         return text + kept
 
     def _retry_carried(self, larder: Larder) -> str:
@@ -439,8 +439,8 @@ class TargetWiring:
             return ""
         if self.notify is not None:
             self.notify(f"harvest: {self.finder.carried()} candidato(s) da corrida "
-                        "anterior sem resposta da pesquisa — pergunto outra vez "
-                        "antes de começar")
+                        "anterior sem resposta da pesquisa — vejo como ela está "
+                        "e pergunto por quem fizer sentido, antes de começar")
         before = larder.size()
         try:
             rep = self.finder.retry_carried(larder)
@@ -961,18 +961,12 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         market_surface = "opensea"
         market = OpenSeaSearch(http_get=http_get, api_key=s.opensea_api_key,
                                size=page)
-        # the same search with a page of ONE — only /status uses it, and
-        # only when the control search fails (TargetWiring.search_line)
-        market_small = OpenSeaSearch(http_get=http_get,
-                                     api_key=s.opensea_api_key, size=1)
         chain_probe = OpenSeaChainProbe(http_get=http_get,
                                         api_key=s.opensea_api_key)
     else:
         market_surface = "rarible"
         market = RaribleSearch(http_post=http_post, api_key=s.rarible_api_key,
                                size=page)
-        market_small = RaribleSearch(http_post=http_post,
-                                     api_key=s.rarible_api_key, size=1)
         chain_probe = RaribleChainProbe(http_get=http_get,
                                         api_key=s.rarible_api_key)
     search_guard = ClueSearchGuard(search=market)
@@ -1535,7 +1529,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         sample_per_stratum=int(s.target_sample_per_stratum),
                         fetch_artwork=fetch_artwork,
                         market_surface=market_surface,
-                        market=market, market_small=market_small,
+                        market=market,
                         uniqueness=uniqueness)
 
 
