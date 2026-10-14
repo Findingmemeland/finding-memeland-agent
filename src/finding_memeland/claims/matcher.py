@@ -116,7 +116,9 @@ class TargetClaimMatcher:
                  format_reply: str, unresolved_reply: str, one_token_reply: str,
                  collection_reply: str = "",
                  bad_address_reply: Callable[..., str] | None = None,
-                 other_chain_reply: str = ""):
+                 other_chain_reply: str = "",
+                 unknown_chain_reply: str = "",
+                 larder_chains: frozenset = frozenset()):
         self._judge = judge
         self._resolve = resolve_link
         self._format_reply = format_reply
@@ -129,6 +131,18 @@ class TargetClaimMatcher:
         # caught it. `bad_address_reply(bad_chars, length)` builds the text.
         self._bad_address_reply = bad_address_reply
         self._other_chain_reply = other_chain_reply
+        # 14/10 (Pedro): chain:contract:tokenId with a chain word NOBODY here
+        # knows — it may be ours written another way: a format reply of its own
+        self._unknown_chain_reply = unknown_chain_reply
+        # THE CHAINS THE LARDER CAN PRODUCE (Pedro, 14/10). A claim on a chain
+        # this game knows and the larder can NOT produce — Solana, Tezos,
+        # Bitcoin, a 0x chain it never reads — is a WRONG GUESS like any
+        # other: the treasure is never there. The set is derived from what the
+        # larder draws and harvests, never a list, so a chain added to it is
+        # never told "wrong". Empty = not known: those posts keep the format
+        # reply, as before.
+        from ..target.claim import chain_name
+        self._larder_chains = frozenset(chain_name(c) for c in larder_chains)
         self._readable_memo: dict[str, bool] = {}
         self._format_last: tuple[str, tuple[str, str] | None] | None = None
 
@@ -156,9 +170,22 @@ class TargetClaimMatcher:
             return False
         if ext.refs:
             return True
+        if self.never_ours(text):
+            return True
         if not ext.unresolved_links:
             return False
         return self._readable(text)
+
+    def never_ours(self, text: str) -> str | None:
+        """The chain, when the post claims a token on a chain this game knows
+        and the larder can NOT produce — a wrong guess, never a format slip.
+        None otherwise, and always None while the larder's chains are not
+        known (14/10)."""
+        if not self._larder_chains:
+            return None
+        from ..target.claim import foreign_chain
+        chain = foreign_chain(text)
+        return chain if chain and chain not in self._larder_chains else None
 
     def _readable(self, text: str) -> bool:
         """Can the resolver turn this post's links into a token? Memoised
@@ -176,12 +203,19 @@ class TargetClaimMatcher:
         return ok
 
     def matches(self, text: str) -> bool:
+        if self.never_ours(text) and not self._extract(text).refs:
+            return False             # the treasure is never there: nothing to read
         return self._judge.judge(text, resolve_link=self._resolve).matched
 
     def submitted_label(self, text: str) -> str | None:
         ext = self._extract(text)
         if ext.refs:
             return ext.refs[0].id()
+        chain = self.never_ours(text)
+        if chain:
+            # OUR label, never the post's id — and never a canonical id, so
+            # the spray detector does not count it (integration._spray_key_of)
+            return f"outra-cadeia:{chain}"
         if ext.unresolved_links:
             return ext.unresolved_links[0][:120]
         return None
@@ -246,6 +280,9 @@ class TargetClaimMatcher:
             if near is not None:
                 return ("bad_address",
                         self._bad_address_reply(near.bad_chars, near.length))
+        # since 14/10 only a chain the larder CAN produce and the parser does
+        # not read gets here — ours to fix, never the player's (a chain it
+        # can never produce left `_classify_format` as a guess)
         if self._other_chain_reply and other_chain(text):
             return ("other_chain", self._other_chain_reply)
         return None
@@ -257,6 +294,8 @@ class TargetClaimMatcher:
             return ("one_token", self._one_token_reply)
         if ext.refs:
             return None
+        if self.never_ours(text):
+            return None              # a wrong guess, not a format slip (14/10)
         if ext.unresolved_links:
             v = self._judge.judge(text, resolve_link=self._resolve)
             if v.checked == 0 and v.unresolved:
@@ -281,6 +320,10 @@ class TargetClaimMatcher:
         named = self._unreadable(text)
         if named is not None:
             return named
+        if self._unknown_chain_reply:
+            from ..target.claim import unknown_chain_word
+            if unknown_chain_word(text):           # a chain name we do not know
+                return ("unknown_chain", self._unknown_chain_reply)
         if claim_shaped(text):                     # contract:tokenId, no chain
             return ("no_chain", self._format_reply)
         if contract_paste_like(text):

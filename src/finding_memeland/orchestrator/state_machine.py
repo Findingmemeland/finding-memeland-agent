@@ -24,7 +24,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from ..content.clue_engine import PersonaContext, clue_slot_for, next_clue_due
+from ..content.clue_engine import (
+    ClueRoundRefused,
+    PersonaContext,
+    clue_slot_for,
+    next_clue_due,
+)
 from ..content.integrity import compute_integrity_hash, generate_claim_code, generate_salt
 from ..claims.parser import extract_wallet
 from ..content.templates import (
@@ -258,6 +263,9 @@ class Orchestrator:
         # Cadence hooks: defaults preserve production (1-3h between clues, 1h reveal).
         # The live-test harness injects short intervals so a rehearsal runs in minutes.
         self._clue_due_fn = clue_due_fn or next_clue_due
+        # (hunt id, clue index) → the attempts of each round the guards
+        # refused for that clue; emptied when the clue goes out (14/10)
+        self._refused_rounds: dict[tuple, list[int]] = {}
         self._cleanup_window_s = cleanup_window_s
         # DESIGN (Pedro, 2026-07-05): personas are single-use, so in REAL hunts
         # the profile is never undressed — it stays up as the hunt's historical
@@ -1282,10 +1290,13 @@ class Orchestrator:
                 from ..target.integration import clue_failed
                 if clue_failed(self, hunt, e):
                     return clue_index, self._clue_due_fn(self._clock.now())
+            if isinstance(e, ClueRoundRefused):
+                return clue_index, self._after_refused_round(hunt, e)
             self._notify(f"clue generation failed (skipping this round): {e}")
         else:
             # The clue IS on X now — bookkeeping failures must not make
             # us repeat it. Record best-effort.
+            self._refused_rounds.pop((getattr(hunt, "id", None), clue_index), None)
             hunt.clues.append(draft.text)
             if is_target:
                 from ..target.integration import clue_posted
@@ -1295,6 +1306,36 @@ class Orchestrator:
             except Exception as e:  # noqa: BLE001
                 self._notify(f"record_clue failed (non-fatal): {e!r}")
         return clue_index, self._clue_due_fn(self._clock.now())
+
+    # A CLUE ROUND THE GUARDS REFUSED is asked again at once, this many times
+    # per clue, before the loop waits for the next window (Pedro, 14/10: in
+    # hunt #20 clue #4 failed and the players waited a whole 6–26 min window
+    # for nothing). Only a round the GUARDS refused: a post that failed on X
+    # (it may have gone out — asking again could post it twice) and a guard
+    # of ours that could not judge (the hold) are left as they were.
+    _QUICK_CLUE_ROUNDS = 2
+
+    def _after_refused_round(self, hunt: PreparedHunt, e: ClueRoundRefused):
+        """When to try again a clue whose round the guards refused: on the
+        next turn of the loop (one poll, ~75 s) for the first
+        `_QUICK_CLUE_ROUNDS`, then the normal window. Counts only."""
+        key = (getattr(hunt, "id", None), e.clue_index)
+        rounds = self._refused_rounds.setdefault(key, [])
+        rounds.append(e.attempts)
+        done = len(rounds)
+        if done <= self._QUICK_CLUE_ROUNDS:
+            self._notify(
+                f"pista #{e.clue_index}: {e.attempts} tentativas recusadas — tento "
+                f"outra vez dentro de ~1 min (ronda {done + 1} de "
+                f"{self._QUICK_CLUE_ROUNDS + 1})")
+            return self._clock.now()
+        if done == self._QUICK_CLUE_ROUNDS + 1:
+            self._notify(
+                f"pista #{e.clue_index}: {done} rondas recusadas ({sum(rounds)} "
+                "tentativas) — fica para a janela seguinte")
+        else:
+            self._notify(f"clue generation failed (skipping this round): {e}")
+        return self._clue_due_fn(self._clock.now())
 
     def _record_clue_audited(
         self, hunt: PreparedHunt, clue_index: int, clue_text: str, tweet_id: str
@@ -1944,7 +1985,13 @@ class Orchestrator:
                         taunt_budget["used"] += 1
                     if first_jeer or left:
                         try:
-                            jeer = (self._taunt_engine.taunt(post.text, banned)
+                            # a guess on a chain the larder never produces
+                            # (14/10): the pool's jeer, never one that could
+                            # name that chain
+                            never = getattr(matcher, "never_ours", None)
+                            plain = bool(never(post.text)) if callable(never) else False
+                            jeer = (self._taunt_engine.taunt(post.text, banned,
+                                                             llm=not plain)
                                     if first_jeer else "")
                             line = f"{jeer} {left}".strip()
                             if line:

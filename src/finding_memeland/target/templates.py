@@ -45,7 +45,10 @@ TARGET_CLUE_ONE_EXPLAINER = (
     "first one wins the prize. the NFT stays with its owner."
 )
 
-CLAIM_FORMAT_EXAMPLE = "ethereum:0xabc…def:42"
+# The published example of the format (Pedro, 14/10): it names NO chain. The
+# old one ("ethereum:0xabc…def:42") could be read as "only Ethereum counts",
+# and the treasure can be anywhere onchain.
+CLAIM_FORMAT_EXAMPLE = "<chain>:0xabc…def:42"
 
 
 def target_clue_one(hunt_n: int, clue_text: str, prize: str, commitment: str,
@@ -437,10 +440,23 @@ def post_reply_bad_address(bad_chars, length: int) -> str:
 # CHAIN (Pedro, 09/10): the chain is part of the answer, and a public reply of
 # the oracle must never narrow it. The example is the published format
 # example, the same one every other reply carries.
+#
+# 14/10 (Pedro): a chain the LARDER can never produce is a wrong guess now —
+# the treasure is never there (claims.matcher). This reply is left for the
+# one case where "can't read" is still the truth: a chain the larder CAN
+# produce and the claim parser does not read yet. Ours to fix, never theirs.
 POST_REPLY_OTHER_CHAIN = (
     "i can't read that one — my side, not yours, and it cost you nothing. "
     f"reply with chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE}) or "
     "the marketplace link."
+)
+
+# chain:contract:tokenId with a chain NAME nobody here knows (14/10, Pedro's
+# text) — `arb`, `op`, `basechain`. It may be ours written another way: a
+# format reply, no guess spent, and it lists no chain.
+POST_REPLY_UNKNOWN_CHAIN = (
+    "almost — i don't know that chain name. write it out in full: "
+    f"chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE}). this one cost you nothing."
 )
 
 # Appended to the jeer when a reply named something but no token. It is the

@@ -530,6 +530,10 @@ def _search_counters(guard) -> dict:
     for name, attr in _SEARCH_COUNTERS:
         got = getattr(guard, attr, None)
         out[name] = dict(got) if isinstance(got, dict) else {}
+    # "unique" from a FULL page (14/10) — a number, measured only
+    stats = getattr(guard, "stats", None)
+    full = stats.get("unique_full", 0) if isinstance(stats, dict) else 0
+    out["full"] = full if isinstance(full, int) else 0
     return out
 
 
@@ -662,6 +666,9 @@ class SearchPasses:
     third_rescued: int = 0
     carried: int = 0          # still unanswered: kept in memory for the next run
     evicted: int = 0          # left memory to make room (CARRY_MAX), any run's
+    # "unique" from a page of 50 that was FULL (14/10): what lay past the 50
+    # was never seen. Measured only — the verdict is the same.
+    unique_full: int = 0
 
     def render(self) -> str:
         parts = []
@@ -688,6 +695,8 @@ class SearchPasses:
         if self.evicted:
             parts.append(f"saíram da memória, os mais antigos: {self.evicted} "
                          f"(cabem {CARRY_MAX})")
+        if self.unique_full:
+            parts.append(f"único com a página de 50 cheia: {self.unique_full}")
         return " · ".join(parts)
 
 
@@ -1312,6 +1321,7 @@ class TargetFinder:
         report.failed = _moved(before["failed"], now["failed"])
         report.speed = _moved(before["speed"], now["speed"])
         report.states = _moved(before["states"], now["states"])
+        report.unique_full = max(0, now["full"] - before["full"])
 
     def ask_again(self, pending: Pending, tally: Tally, *, last: bool,
                   unanswered: list | None = None) -> Candidate | Pending | None:

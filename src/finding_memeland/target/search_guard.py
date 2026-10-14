@@ -605,6 +605,20 @@ class MarketNameUniqueness:
     is absent the answer is None — unverifiable, which the callers fail
     closed on. Never True on an empty result set.
 
+    UNIQUE ONCHAIN (Pedro, 14/10). An item counts when it EXISTS on a chain.
+    A lazy listing — signed off-chain, minted only when someone buys it, as
+    Rarible sells them — is not an NFT yet: no index can see it, and it is
+    not a namesake. Measured 14/10, the "Halloween elf" a player found during
+    hunt #20 in Rarible's shared contract: `ownerOf` and `tokenURI` revert
+    with "nonexistent token"; the search for the name returned 25 items and
+    one with that name — the target.
+
+    A FULL PAGE is counted, not decided (14/10): when the target IS among
+    `page_size` results the verdict "unique" cannot see past them — a
+    namesake ranked lower is invisible. `stats["unique_full"]` counts how
+    often a "unique" came from a full page (a sub-count of "unique"), so the
+    report shows whether that ever happens before anything is changed.
+
     Two flavours of None, counted separately in `stats` (Opus, 06/09):
       · blind   — target absent from a NON-full page: the index cannot see
                   it (unindexed, key, request shape)
@@ -679,6 +693,7 @@ class MarketNameUniqueness:
         # the answer stays None either way.
         self.stats = {"unique": 0, "not_unique": 0, "blind": 0,
                       "crowded": 0, "crowded_same": 0, "transport": 0,
+                      "unique_full": 0,
                       "blind_unindexed": 0, "blind_flagged": 0,
                       "blind_clean": 0, "blind_unknown": 0,
                       "blind_clean_same": 0, "blind_clean_other": 0,
@@ -736,6 +751,8 @@ class MarketNameUniqueness:
         others = [i for i, n in ids.items()
                   if i != want and normalize_name(n or "").casefold() == key]
         self.stats["not_unique" if others else "unique"] += 1
+        if not others and len(rows) >= self._page:
+            self.stats["unique_full"] += 1      # measured only (14/10)
         return not others
 
 

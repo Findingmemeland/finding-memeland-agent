@@ -62,6 +62,7 @@ from .templates import (
     POST_REPLY_FORMAT,
     POST_REPLY_ONE_TOKEN,
     POST_REPLY_OTHER_CHAIN,
+    POST_REPLY_UNKNOWN_CHAIN,
     POST_REPLY_UNRESOLVED_LINK,
     TargetWinnerData,
     VoidRevealData,
@@ -115,6 +116,11 @@ class TargetPorts:
     # vouch for a "no"; either way such a preparation is never launched.
     is_exposed: Callable[[str, int], bool] | None = None
     clear_prepared: Callable[[], None] | None = None
+    # THE CHAINS THE LARDER CAN PRODUCE (Pedro, 14/10) — derived by the
+    # wiring from what the larder draws and harvests. A claim on a chain the
+    # game knows and these do not include is a wrong guess (claims.matcher).
+    # Empty = not known: such claims keep the format reply.
+    larder_chains: frozenset = frozenset()
     # THE ONE GUARD THAT MUST RUN AGAIN AT LAUNCH (Fable, 17/09): a clue
     # written yesterday can have become a search TODAY — the piece gets
     # listed, indexed, tweeted about. The judge and the solver are about
@@ -372,6 +378,12 @@ def claim_matcher_for(orch, hunt):
             collection_reply=POST_REPLY_COLLECTION_LINK,
             bad_address_reply=post_reply_bad_address,
             other_chain_reply=POST_REPLY_OTHER_CHAIN,
+            unknown_chain_reply=POST_REPLY_UNKNOWN_CHAIN,
+            # the sealed target's own chain is always one of them
+            larder_chains=(frozenset(orch._target.larder_chains)
+                           | {hunt.target.id().split(":", 1)[0]}
+                           if getattr(orch._target, "larder_chains", None)
+                           else frozenset()),
         )
     return CodeClaimMatcher(hunt.claim_code)
 

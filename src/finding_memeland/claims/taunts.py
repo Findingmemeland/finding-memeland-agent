@@ -126,7 +126,7 @@ class TauntEngine:
 
     # -- public API ------------------------------------------------------
     def taunt(self, player_text: str, banned_terms: tuple[str, ...], *,
-              kind: str = "wrong_guess") -> str:
+              kind: str = "wrong_guess", llm: bool = True) -> str:
         """A safe public jeer. Always returns something: LLM variation when
         available and valid, static pool otherwise.
 
@@ -140,11 +140,16 @@ class TauntEngine:
                         "wrong answer" by this engine, because the engine
                         was handed a premise that was false. It answered
                         correctly to a lie of ours.
+
+        `llm=False`: the pool only (14/10) — for a guess on a chain the
+        larder never produces. The model sees the player's text, and a jeer
+        like "solana? wrong pond" would tell everyone where the treasure is
+        NOT; the pool names no chain.
         """
         no_token = kind == "no_token"
         system = _NO_TOKEN_SYSTEM if no_token else _VARIATION_SYSTEM
         pool = NO_TOKEN_POOL if no_token else TAUNT_POOL
-        if self._client is not None:
+        if self._client is not None and llm:
             try:
                 raw = self._complete(system, player_text[:400])
                 cand = self._validate(raw, banned_terms)

@@ -425,6 +425,9 @@ class TargetWiring:
                  for state in SEARCH_STATES if states.get(state)]
         if found:
             text += " · estado nas falhas: " + ", ".join(found)
+        full = int(stats.get("unique_full", 0) or 0)
+        if full:
+            text += f" · único com a página cheia: {full}"
         return text + kept
 
     def _retry_carried(self, larder: Larder) -> str:
@@ -1503,6 +1506,13 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             canary_creation=MANIFOLD_BASE_CANARY_CREATION,
             counters=(draw_node, draw_call, draw_uri), rng=rng)
 
+    # THE CHAINS THE LARDER CAN PRODUCE (Pedro, 14/10): what it draws from
+    # (the snapshot's sources and the larder's), where it deposits, and what
+    # it harvests. The claim matcher reads them — a claim on a chain the game
+    # knows and the larder can NOT produce is a wrong guess. Derived, never
+    # a list: a chain added to any of these is never told "wrong".
+    ports.larder_chains = (_chains_we_read() | deposit_chains | frozenset(harvesters)
+                           | frozenset(h.chain for h in creator_harvesters.values()))
     return TargetWiring(finder=finder, larder_store=larder_store,
                         probes=probes,
                         creator_harvesters=creator_harvesters,

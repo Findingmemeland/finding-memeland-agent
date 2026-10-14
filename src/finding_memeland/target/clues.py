@@ -835,7 +835,11 @@ on purpose", "drop a letter from what you'd expect"). A sly hint is NOT enough.
 For clue #1 only, set taunt to "". For clue #2 and later, also write a short, \
 varying jeer that pokes fun at players for not solving it yet. If the jeer \
 mentions how many clues are out, the number is exactly {index} — this one \
-included. Never call a clue "final" or "last": the ramp may continue.
+included. Clue counts and jeering belong in the taunt ONLY: the clue text never \
+opens with "N clues in…" or any jab — it is the puzzle and nothing else. The \
+taunt is a sentence of its own: it never repeats the clue, never starts it, and \
+never ends hanging on a dash. Never call a clue "final" or "last": the ramp may \
+continue.
 
 DECLARE WHAT YOU DID (it is verified mechanically; a mismatch rejects the clue):
 - "angle": for a NAME piece, the label of the angle you were assigned (e.g. \

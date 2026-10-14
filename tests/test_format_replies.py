@@ -14,6 +14,13 @@
       que NÃO lista cadeias. A cadeia faz parte da resposta, e uma resposta
       pública do oráculo nunca a pode estreitar.
 
+      MUDOU A 14/10 (Pedro, depois da #20: um "solana:…:1" ouviu "não
+      consigo ler, falha minha", como se pudesse estar certo). Uma cadeia
+      que o jogo conhece e a DESPENSA NÃO PODE PRODUZIR passa a palpite
+      errado normal — ver test_foreign_chain_claims.py. Aqui ficam o
+      reconhecimento, a resposta antiga para o único caso que lhe resta, e
+      o nome de cadeia desconhecido, que continua a ser formato.
+
 Nada aqui diz a um jogador que está errado: não se julga o que não se
 conseguiu ler.
 """
@@ -53,6 +60,7 @@ from finding_memeland.target.templates import (
     POST_REPLY_FORMAT,
     POST_REPLY_ONE_TOKEN,
     POST_REPLY_OTHER_CHAIN,
+    POST_REPLY_UNKNOWN_CHAIN,
     POST_REPLY_UNRESOLVED_LINK,
     post_reply_bad_address,
 )
@@ -223,7 +231,9 @@ def test_production_wires_both_new_replies():
     hunt = w.launch()
     m = claim_matcher_for(w.orch, hunt)
     assert m.format_kind(TYPO) == "bad_address"
-    assert m.format_hint(f"tezos:{KT1}:5") == POST_REPLY_OTHER_CHAIN
+    assert m.format_hint(f"arb:{GOOD}:5") == POST_REPLY_UNKNOWN_CHAIN
+    # 14/10: Tezos is a chain the larder can never produce — a guess now
+    assert m.looks_like_claim(f"tezos:{KT1}:5") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -235,7 +245,8 @@ def test_production_wires_both_new_replies():
     ("no_chain", "missing"), ("no_token_id", "missing"),     # the same words
     ("collection_link", "collection_link"), ("unreadable_link", "unreadable_link"),
     ("one_token", "one_token"), ("bad_address", "bad_address"),
-    ("other_chain", "other_chain"), (None, "format"), ("", "format"),
+    ("other_chain", "other_chain"), ("unknown_chain", "unknown_chain"),
+    (None, "format"), ("", "format"),
 ])
 def test_the_type_is_the_reply_the_player_reads(kind, key):
     assert format_type_of(kind) == key
@@ -280,13 +291,13 @@ def test_three_replies_to_one_profile_and_not_one_more():
     hunt = w.launch()
     _thread(w, hunt, (6001, "42", COLLECTION), (6002, "42", GOOD),
             (6003, "42", TYPO), (6004, "42", SLUG_LINK),
-            (6005, "42", f"tezos:{KT1}:5"),
+            (6005, "42", f"arb:{GOOD}:5"),
             (6006, "43", SLUG_LINK))                       # somebody else
     _run(w, hunt)
     answered = [len(replies_to(w.rig, t)) for t in range(6001, 6006)]
     assert answered == [1, 1, 1, 0, 0]
     assert [_row(w, t)["submitted_claim_code"] for t in (6004, 6005)] == [
-        "unreadable_link", "other_chain"]                  # logged all the same
+        "unreadable_link", "unknown_chain"]                # logged all the same
     assert replies_to(w.rig, 6006) == [POST_REPLY_UNRESOLVED_LINK]
     assert Orchestrator._MAX_FORMAT_REPLIES == 3
 
@@ -314,7 +325,7 @@ def test_the_ceiling_survives_a_restart():
     _thread(w, hunt, (6001, "42", COLLECTION), (6002, "42", GOOD), (6003, "42", TYPO))
     _run(w, hunt)
     rebuilt = _restart(w, hunt)
-    _thread(w, rebuilt, (6010, "42", SLUG_LINK), (6011, "42", f"tezos:{KT1}:5"))
+    _thread(w, rebuilt, (6010, "42", SLUG_LINK), (6011, "42", f"arb:{GOOD}:5"))
     _run(w, rebuilt)
     assert replies_to(w.rig, 6010) == [] and replies_to(w.rig, 6011) == []
 
@@ -382,13 +393,22 @@ def test_what_is_ours_or_is_chatter_is_not(text):
 def test_the_reply_is_the_approved_text_word_for_word():
     assert POST_REPLY_OTHER_CHAIN == (
         "i can't read that one — my side, not yours, and it cost you nothing. "
-        "reply with chain:contract:tokenId (like ethereum:0xabc…def:42) or the "
+        "reply with chain:contract:tokenId (like <chain>:0xabc…def:42) or the "
         "marketplace link.")
     assert CLAIM_FORMAT_EXAMPLE in POST_REPLY_OTHER_CHAIN
 
 
+def test_the_unknown_chain_reply_is_the_approved_text_word_for_word():
+    """Pedro, 14/10."""
+    assert POST_REPLY_UNKNOWN_CHAIN == (
+        "almost — i don't know that chain name. write it out in full: "
+        "chain:contract:tokenId (like <chain>:0xabc…def:42). this one cost you nothing.")
+
+
 @pytest.mark.parametrize("text", OTHER)
-def test_one_reply_for_all_three_cases_and_no_guess(text):
+def test_without_the_larder_s_chains_these_keep_the_format_reply(text):
+    """Sem saber que cadeias a despensa pode produzir, nada se dá por
+    errado: fica a resposta de formato, como até 14/10."""
     m = _matcher()
     assert m.looks_like_claim(text) is False
     assert m.format_kind(text) == "other_chain"
@@ -408,7 +428,7 @@ def test_what_these_posts_used_to_hear():
 @pytest.mark.parametrize("text, kind", [
     (SLUG_LINK, "unreadable_link"),                    # a link of ours we could not read
     (COLLECTION, "collection_link"),
-    (f"{GOOD}:12", "no_chain"), (f"answer:{GOOD}:12", "no_token_id"),
+    (f"{GOOD}:12", "no_chain"), (GOOD, "no_token_id"),
     (f"https://magiceden.io/item-details/ethereum/{GOOD}/5", None),   # a claim
     ("bitcoin: still king", None),                     # chatter
 ])
@@ -427,16 +447,16 @@ def test_a_link_to_a_market_without_0x_contracts(url, yes):
     assert non_evm_link(url) is yes
 
 
-def test_in_the_thread_it_gets_the_reply_a_row_and_no_guess():
+def test_in_the_thread_an_unknown_chain_name_gets_its_reply_a_row_and_no_guess():
     w = World()
     hunt = w.launch()
-    _thread(w, hunt, (6001, "42", f"tezos:{KT1}:123456"), (6002, "43", f"bsc:{GOOD}:12"))
+    _thread(w, hunt, (6001, "42", f"arb:{GOOD}:12"), (6002, "43", f"basechain:{GOOD}:7"))
     _run(w, hunt)
     for tid in (6001, 6002):
-        assert replies_to(w.rig, tid) == [POST_REPLY_OTHER_CHAIN]
+        assert replies_to(w.rig, tid) == [POST_REPLY_UNKNOWN_CHAIN]
         row = _row(w, tid)
-        assert (row["outcome"], row["submitted_claim_code"]) == ("format", "other_chain")
-        assert KT1 not in repr(row) and GOOD not in repr(row)
+        assert (row["outcome"], row["submitted_claim_code"]) == ("format", "unknown_chain")
+        assert GOOD not in repr(row)
     assert w.orch._rebuild_claim_state(hunt)[1] == {}        # nobody spent a guess
 
 
@@ -467,9 +487,9 @@ def test_there_are_replies_to_check():
 
 @pytest.mark.parametrize("name", sorted(_public_replies()))
 def test_no_public_reply_lists_the_chains_we_read(name):
-    """A cadeia faz parte da resposta (Pedro, 09/10). O exemplo publicado do
-    formato é o único sítio onde uma resposta escreve o nome de uma cadeia —
-    e escreve UMA, sempre a mesma, em todas as hunts.
+    """A cadeia faz parte da resposta (Pedro, 09/10). Desde 14/10 nem o
+    exemplo publicado do formato escreve o nome de uma cadeia
+    ("<chain>:0xabc…def:42").
 
     A única outra menção é a da CARTEIRA DO PRÉMIO: "a valid Base wallet". O
     prémio é sempre na Base, é público e está na Clue 1; não diz nada sobre
@@ -490,6 +510,10 @@ def test_the_prize_wallet_is_the_only_other_place_a_chain_is_named():
     assert named == {"POST_REPLY_INVALID_WALLET"}
 
 
-def test_the_format_example_names_one_chain_and_never_changes_with_the_hunt():
-    assert CLAIM_FORMAT_EXAMPLE == "ethereum:0xabc…def:42"
+def test_the_format_example_names_no_chain_and_never_changes_with_the_hunt():
+    """14/10 (Pedro): o "ethereum:0xabc…def:42" podia fazer crer que só
+    Ethereum conta. O tesouro pode estar em qualquer cadeia."""
+    assert CLAIM_FORMAT_EXAMPLE == "<chain>:0xabc…def:42"
+    words = set(re.findall(r"[a-z0-9]+", CLAIM_FORMAT_EXAMPLE.lower()))
+    assert not (words & READ_CHAINS) and not (words & OTHER_CHAIN_WORDS)
     assert "hunt" not in inspect.signature(post_reply_bad_address).parameters

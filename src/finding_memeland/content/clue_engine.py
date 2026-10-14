@@ -463,6 +463,16 @@ _LEADING_COUNT_RE = re.compile(
     rf"^\s*(?:[a-z']+[,.]?\s+){{0,4}}?{_NUM}\s+clues\b[^.?!\n]*[.?!]\s*",
     re.IGNORECASE,
 )
+# The same habit with the count JOINED to the clue by a dash or a colon (hunt
+# #20, 13/10: "3 clues deep and still lost — word two of the name is…"). The
+# rule above cuts at the first full stop, and here the full stop comes after
+# the real clue: it either left the whole thing or would have eaten the clue.
+# This one cuts at the dash — only when the dash comes before any full stop.
+_LEADING_COUNT_DASH_RE = re.compile(
+    rf"^\s*(?:[a-z']+[,.]?\s+){{0,4}}?{_NUM}\s+clues\b[^.?!\n—–:]*?"
+    r"(?:\s*[—–]\s*|\s+-\s+|\s*:\s*)",
+    re.IGNORECASE,
+)
 _LEADING_FINAL_RE = re.compile(
     r"^\s*(?:ok(?:ay)?[,.]?\s*|fine[,.]?\s*)?"
     r"(?:the\s+)?(?:final|last)\s+(?:clue|one|resort|answer)(?:\s+time)?\s*[:.,!—-]+\s*",
@@ -474,7 +484,7 @@ def _strip_leading_meta(clue: str) -> str:
     """Drop a leading clue-count sentence and/or a leading 'final clue:' tag.
     Never empties the clue: if the whole text was the preamble, keep it as is."""
     out = clue
-    for rx in (_LEADING_COUNT_RE, _LEADING_FINAL_RE):
+    for rx in (_LEADING_COUNT_DASH_RE, _LEADING_COUNT_RE, _LEADING_FINAL_RE):
         m = rx.match(out)
         if m and m.end() < len(out):
             out = out[m.end():]
@@ -500,6 +510,19 @@ def _parse_clue(text: str) -> ClueDraft:
     if not clue:
         raise ValueError("empty clue text")
     return ClueDraft(text=clue, taunt=taunt or None)
+
+
+class ClueRoundRefused(RuntimeError):
+    """Every attempt of a clue round was refused by the guards (14/10). The
+    loop asks again at once, twice, before it waits for the next window
+    (orchestrator `_after_refused_round`). Counts only: the reasons name
+    the answer and never travel with it."""
+
+    def __init__(self, message: str, *, clue_index: int, attempts: int, reasons: int):
+        super().__init__(message)
+        self.clue_index = clue_index
+        self.attempts = attempts
+        self.reasons = reasons
 
 
 class MalformedAnswer(ValueError):
@@ -650,10 +673,11 @@ class ClueEngine:
             # ...so the operator must not be sent to the logs for reasons
             # that are not there (hunt #17): what IS there is the tally.
             where = "a contagem por guarda está nos logs"
-        raise RuntimeError(
+        raise ClueRoundRefused(
             f"clue #{clue_index} failed guardrails after {max_attempts} attempts "
             f"({len(last_reasons)} razões — omitidas aqui porque nomeiam a "
-            f"resposta; {where})"
+            f"resposta; {where})",
+            clue_index=clue_index, attempts=max_attempts, reasons=len(last_reasons),
         )
 
     def generate_taunt(self) -> str:

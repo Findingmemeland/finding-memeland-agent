@@ -238,6 +238,8 @@ class TargetWorld:
             clear_prepared=self._clear_prepared,
             recheck_clue_one=lambda text, **kw: self.guard_verdict,
             used_hmac=lambda tid: "hmac:" + tid,
+            # as production derives them today (wiring.build_target)
+            larder_chains=frozenset({"ethereum", "base"}),
         )
         self.rig = build_simulation(poll_interval_s=60, verbose=verbose)
         self.orch = self.rig.orchestrator

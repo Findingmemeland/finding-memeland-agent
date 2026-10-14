@@ -494,7 +494,7 @@ def test_the_window_is_the_one_measured_and_production_does_not_shorten_it():
     for f in (w.finder, probe_finder):
         assert f._retry_gap == 60.0 and f._sleep is time.sleep       # noqa: SLF001
         assert isinstance(f._name_is_unique, MarketNameUniqueness)   # noqa: SLF001
-        assert f.search_counters() == {"failed": {}, "speed": {}, "states": {}}
+        assert f.search_counters() == {"failed": {}, "speed": {}, "states": {}, "full": 0}
 
 
 def test_the_operator_is_told_once_in_counts():

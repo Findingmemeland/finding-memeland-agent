@@ -287,6 +287,15 @@ OTHER_CHAIN_WORDS = frozenset({
     "flow", "cardano", "aptos", "sui", "tron", "starknet", "stacks",
     "stargaze", "xrpl", "algorand", "hedera",
 })
+# Every word above, as ONE name per chain — what a chain is called when it
+# is compared with the chains the larder can produce (14/10). A word that is
+# not here is its own name.
+OTHER_CHAIN_CANON = {
+    "bnb": "bsc", "binance": "bsc", "avax": "avalanche", "ftm": "fantom",
+    "xdai": "gnosis", "bera": "berachain", "imx": "immutable", "klaytn": "kaia",
+    "xtz": "tezos", "sol": "solana", "btc": "bitcoin", "ordinals": "bitcoin",
+    "ordinal": "bitcoin",
+}
 # The ones a player writes as a prefix to an id that is not a 0x address
 # (`tezos:KT1…:42`, `solana:<mint>`, `ordinals:<inscription>`). The id must be
 # long enough to be one: "bitcoin: still king" is chatter.
@@ -297,45 +306,88 @@ _TEZOS_CONTRACT_RE = re.compile(r"(?<![0-9A-Za-z])KT1[1-9A-HJ-NP-Za-km-z]{33}(?!
 # Marketplaces and explorers of chains without 0x contracts. A link there
 # that we could not read is not "a link we could not read": nothing on our
 # side would ever read it.
-_NON_EVM_HOSTS = (
-    "objkt.com", "teia.art", "versum.xyz", "akaswap.com", "tzkt.io",
-    "tensor.trade", "solscan.io", "solana.fm", "exchange.art",
-    "ordinals.com", "ord.io", "ordiscan.com",
-)
-_NON_EVM_SEGMENTS = frozenset({"tezos", "solana", "bitcoin", "ordinals", "runes"})
+_NON_EVM_HOSTS = {
+    "objkt.com": "tezos", "teia.art": "tezos", "versum.xyz": "tezos",
+    "akaswap.com": "tezos", "tzkt.io": "tezos",
+    "tensor.trade": "solana", "solscan.io": "solana", "solana.fm": "solana",
+    "exchange.art": "solana",
+    "ordinals.com": "bitcoin", "ord.io": "bitcoin", "ordiscan.com": "bitcoin",
+}
+_NON_EVM_SEGMENTS = {"tezos": "tezos", "solana": "solana", "bitcoin": "bitcoin",
+                     "ordinals": "bitcoin", "runes": "bitcoin"}
 _SOLANA_ITEM_RE = re.compile(r"^/item-details/[1-9A-HJ-NP-Za-km-z]{32,44}/?$")
+
+
+def _non_evm_chain_of_link(url: str) -> str | None:
+    """The chain without 0x contracts a link points into — by its host (a
+    marketplace or explorer of one), by a path that names such a chain, or by
+    Magic Eden's old Solana shape — or None."""
+    parts = urlsplit((url or "").strip())
+    host = parts.netloc.lower().split("@")[-1].split(":")[0]
+    for domain, chain in _NON_EVM_HOSTS.items():
+        if host == domain or host.endswith("." + domain):
+            return chain
+    for seg in parts.path.split("/"):
+        if seg.lower() in _NON_EVM_SEGMENTS:
+            return _NON_EVM_SEGMENTS[seg.lower()]
+    return "solana" if _SOLANA_ITEM_RE.match(parts.path) else None
 
 
 def non_evm_link(url: str) -> bool:
     """A link to a piece on a chain without 0x contracts: a marketplace or
     explorer of one, or any link whose path names such a chain. Only asked
     about links we already failed to read."""
-    parts = urlsplit((url or "").strip())
-    host = parts.netloc.lower().split("@")[-1].split(":")[0]
-    if any(host == d or host.endswith("." + d) for d in _NON_EVM_HOSTS):
-        return True
-    if any(seg.lower() in _NON_EVM_SEGMENTS for seg in parts.path.split("/")):
-        return True
-    return bool(_SOLANA_ITEM_RE.match(parts.path))     # Magic Eden's old Solana shape
+    return _non_evm_chain_of_link(url) is not None
 
 
-def other_chain(text: str) -> bool:
-    """Does the post name a token on a chain, or in a format, we do not read?
+def chain_name(word: str) -> str:
+    """One name per chain: ours by `CHAIN_ALIASES`, the others by
+    `OTHER_CHAIN_CANON`; any other word is its own name. What the claim
+    rules compare with the chains the larder can produce."""
+    w = (word or "").strip().lower()
+    return CHAIN_ALIASES.get(w) or OTHER_CHAIN_CANON.get(w, w)
+
+
+def foreign_chain(text: str) -> str | None:
+    """The chain a post names a token on, when it is a chain this game KNOWS
+    and does not read (one name per chain, `chain_name`) — or None.
 
       · chain:contract:tokenId, well formed, with a chain word we do not read
       · a Tezos contract (KT1…), or an id prefixed tezos: / solana: / btc: /
         ordinals:
       · a link to a marketplace of such a chain
 
-    Never a verdict: the same artwork may live on a chain we do read."""
+    Whether that makes the post a wrong guess is NOT decided here: only the
+    chains the larder can produce can say (claims.matcher, 14/10)."""
     raw = text or ""
-    if _TEZOS_CONTRACT_RE.search(raw) or _NON_EVM_PREFIX_RE.search(raw):
-        return True
-    urls = [u.rstrip(")>.,;!?'\"") for u in _URL_RE.findall(raw)]
-    if any(non_evm_link(u) for u in urls):
-        return True
+    if _TEZOS_CONTRACT_RE.search(raw):
+        return "tezos"
+    prefixed = _NON_EVM_PREFIX_RE.search(raw)
+    if prefixed:
+        return chain_name(prefixed.group(0).split(":", 1)[0])
+    for url in (u.rstrip(")>.,;!?'\"") for u in _URL_RE.findall(raw)):
+        chain = _non_evm_chain_of_link(url)
+        if chain:
+            return chain
     stripped = _URL_RE.sub(" ", raw)
-    return any(_canonical_chain(word) is None and word.lower() in OTHER_CHAIN_WORDS
+    for word, _addr, _tid in _EXPLICIT_RE.findall(stripped):
+        if _canonical_chain(word) is None and word.lower() in OTHER_CHAIN_WORDS:
+            return chain_name(word)
+    return None
+
+
+def other_chain(text: str) -> bool:
+    """Does the post name a token on a chain, or in a format, we do not read?
+    (`foreign_chain`, as a yes or no.)"""
+    return foreign_chain(text) is not None
+
+
+def unknown_chain_word(text: str) -> bool:
+    """chain:contract:tokenId with a chain word nobody here knows — neither
+    one we read nor one we know we do not (`arb`, `op`, `basechain`…). It
+    may be ours written another way: never a guess, a format reply."""
+    stripped = _URL_RE.sub(" ", text or "")
+    return any(_canonical_chain(word) is None and word.lower() not in OTHER_CHAIN_WORDS
                for word, _addr, _tid in _EXPLICIT_RE.findall(stripped))
 
 
