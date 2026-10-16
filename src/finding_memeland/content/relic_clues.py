@@ -69,6 +69,12 @@ RELATION_EARLIEST = 2          # RELATION never on clue 1 (the Hunt #7 rule; 09/
                                # "not before 4" tweak was tried and reverted — Pedro:
                                # the ramp that reached clue 7 twice is not touched
                                # on a simulation)
+STRUCTURE_EARLIEST = 4         # the LETTERS never on clues 1-3 (Pedro, 16/10, after
+                               # Hunt #22 opened on a letter fact: 28% interaction on
+                               # clue 1, 43% in #20, which opened on a meaning — live,
+                               # not a simulation). The July rule of the persona
+                               # engine, which this deck never had: on synthetic
+                               # names, one target puzzle in three opened on it.
 IMAGE_EASY_OBLIQUENESS = 0.25  # the plain-description art piece (reveal phase)
 REVEAL_IMAGE_SLOT = 3          # 3rd reveal clue = the plain art description
 # Every name word keeps at least this many puzzle pieces. A player needs BOTH
@@ -421,7 +427,9 @@ def angle_for(
     piece takes the first angle that is (a) unused on ITS word, (b) different
     from the previous name piece's angle, whichever word that was, and (c) if
     it is the first piece on its word, different from the other word's opening
-    angle; and clue 1 never takes RELATION (it needs the other word first).
+    angle; and clue 1 never takes RELATION (it needs the other word first),
+    nor does a clue before STRUCTURE_EARLIEST take STRUCTURE — not even as
+    the last resort, when every other angle is out (Hunt #22, 16/10).
     (a) is the 2026-08-22 rule (nine clues, three angles); (b) and (c)
     are the Hunt #7 fix: before, each word restarted the sequence at the same
     offset, so the first piece of word 1 and the first piece of word 2 always
@@ -432,6 +440,7 @@ def angle_for(
         return None
     seq = _angle_sequence(ctx, allow_anchor=allow_anchor)
     relation = {a for a in seq if a.startswith("RELATION")}
+    structure = {a for a in seq if a.startswith("STRUCTURE")}
     # ONE content word (10/10): RELATION is "how this word sits against the
     # OTHER word" — there is none. With the two name pieces a one-word
     # target gets, it is never used; a plan with more name pieces than there
@@ -456,8 +465,11 @@ def angle_for(
             # constraint nobody can use before the other word has had a piece
             # — and clue 1 is the most-read post (Opus, 27/08).
             avoid |= relation
+        # The letters wait for STRUCTURE_EARLIEST, in the last resort too.
+        early = structure if i < STRUCTURE_EARLIEST else set()
+        avoid |= early
         pick = next((a for a in seq if a not in avoid), None) or next(
-            (a for a in seq if a not in taken), seq[0]
+            (a for a in seq if a not in taken | early), seq[0]
         )
         used.setdefault(f, []).append(pick)
         prev = pick

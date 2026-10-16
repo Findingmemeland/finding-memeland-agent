@@ -489,22 +489,27 @@ def test_a_relic_s_phases_are_where_they_were():
 @pytest.mark.parametrize("name, direct, anchored", [
     ("Lantern",
      ["CULTURAL USE", "RELATION", "SEMANTIC FIELD", "-", "STRUCTURE", "RELATION", "-"],
-     ["STRUCTURE", "CONCRETE ANCHOR", "SEMANTIC FIELD", "-", "RELATION", "CULTURAL USE", "-"]),
+     ["CONCRETE ANCHOR", "SEMANTIC FIELD", "RELATION", "-", "STRUCTURE", "CULTURAL USE", "-"]),
     ("Harbor",
-     ["STRUCTURE", "CULTURAL USE", "-", "RELATION", "SEMANTIC FIELD", "-", "STRUCTURE"],
+     ["CULTURAL USE", "RELATION", "-", "STRUCTURE", "SEMANTIC FIELD", "-", "STRUCTURE"],
      ["SEMANTIC FIELD", "CULTURAL USE", "-", "CONCRETE ANCHOR", "RELATION", "-", "STRUCTURE"]),
     ("Uncle Pump",
      ["CULTURAL USE", "RELATION", "SEMANTIC FIELD", "-", "CULTURAL USE", "RELATION", "-"],
-     ["CULTURAL USE", "RELATION", "STRUCTURE", "-", "CULTURAL USE", "RELATION", "-"]),
+     ["CULTURAL USE", "RELATION", "SEMANTIC FIELD", "-", "CULTURAL USE", "RELATION", "-"]),
     ("Quiet Lantern Above",
-     ["CULTURAL USE", "SEMANTIC FIELD", "STRUCTURE", "-", "CULTURAL USE", "STRUCTURE",
+     ["CULTURAL USE", "SEMANTIC FIELD", "RELATION", "-", "CULTURAL USE", "STRUCTURE",
       "CULTURAL USE"],
      ["CULTURAL USE", "RELATION", "SEMANTIC FIELD", "-", "CULTURAL USE", "SEMANTIC FIELD",
       "RELATION"]),
 ])
 def test_a_relic_s_angles_are_exactly_what_they_were(name, direct, anchored):
     """Medidos no código de antes desta mudança (10/10), peça por peça —
-    com uma, duas e três palavras, com e sem o ângulo da âncora."""
+    com uma, duas e três palavras, com e sem o ângulo da âncora.
+
+    Re-medidos a 16/10 (Hunt #22): a regra das letras (nunca STRUCTURE
+    antes da pista 4) vale também para as relics — a função é a mesma. Só
+    mudaram as listas que tinham STRUCTURE nas pistas 1–3, e nessas o resto
+    é o que a regra gulosa dá a seguir."""
     c = relic_ctx(name)
     assert [(angle_for_unverifiable(i, c) or "-").split(":")[0] for i in range(1, 8)] == direct
     assert [(angle_for(i, c) or "-").split(":")[0] for i in range(1, 8)] == anchored

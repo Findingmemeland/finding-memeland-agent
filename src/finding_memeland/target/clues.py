@@ -18,9 +18,12 @@ the blind solver. What is target-specific lives here, and only this:
    description": both false now, and the first is a leak (decision: clues
    never state the chain — the chain is part of the answer).
 
-3. FOUR GUARDS in `_post_guardrail_reasons`, before the solver — three
+3. FIVE GUARDS in `_post_guardrail_reasons`, before the solver — four
    mechanical, one LLM (the consistency judge: clue + answer, must be true;
    the blind solver's inverted twin, see TRUTH_JUDGE_SYSTEM):
+   · NO LETTERS ON CLUES 1-3 (early_letter_errors): no declared claim and
+     no talk about the letters, the spelling or a count of the name before
+     clue 4 (Pedro, 16/10, after Hunt #22 opened on a letter fact).
    · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
      about the name's letters is tested against the string; what cannot
      be tested (compound/fused/portmanteau/hidden word) is refused. Born
@@ -65,6 +68,7 @@ from ..content.relic_clues import (
     PUZZLE_ANGLES,
     PUZZLE_PHASE_RULES,
     REVEAL_PHASE_RULES,
+    STRUCTURE_EARLIEST,
     RelicClueContext,
     RelicClueEngine,
     ClueGuardUnavailable,
@@ -471,6 +475,31 @@ def undeclared_prose_errors(text: str, claims) -> list[str]:
         if t not in declared:
             errs.append(f"the prose says '{m.group(0)}' but no '{t}' claim is declared")
     return errs
+
+
+# Clues 1-3 say nothing about the letters (Pedro, 16/10, after Hunt #22). The
+# deck no longer hands them STRUCTURE (relic_clues.STRUCTURE_EARLIEST), but
+# any angle can still state a letter fact by declaring it, and a true one
+# passes every check above. So on those clues ANY declared claim, and any
+# prose these detectors read as talk about the letters, is refused. Counts of
+# letters, syllables, vowels and consonants never get this far: the base text
+# rules refuse them on every clue (guardrails, rule 1c).
+_EARLY_LETTER_DETECTORS = (*(rx for rx, _t in _PROSE_DETECTORS), _FIRST_LETTER_RE,
+                           _UNVERIFIABLE_RE)
+
+
+def early_letter_errors(draft, clue_index: int) -> list[str]:
+    """Writer feedback when one of the first three clues talks about the
+    letters, the spelling or a count of the name, the word count included
+    (Pedro, 16/10). Empty from clue STRUCTURE_EARLIEST on."""
+    if clue_index >= STRUCTURE_EARLIEST:
+        return []
+    if not draft.claims and not any(rx.search(draft.text) for rx in _EARLY_LETTER_DETECTORS):
+        return []
+    return [f"clue #{clue_index} is one of the first three: it says NOTHING about the "
+            "letters, the spelling or any count of the name (word count included) — "
+            f"that starts at clue {STRUCTURE_EARLIEST}. Rewrite from the assigned angle "
+            'with "claims": []']
 
 
 def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
@@ -908,6 +937,16 @@ def small_words_for(ctx, clue_index: int) -> str | None:
     return name_skeleton(ctx.display_name)
 
 
+# What the writer reads on clues 1-3 (Pedro, 16/10, after Hunt #22); the guard
+# that holds it is early_letter_errors.
+FIRST_THREE_CLUES_RULE = (
+    "FIRST THREE CLUES: say NOTHING about the letters, the spelling or the length "
+    "of the name or its words — no first or last letter, no vowels, no doubled "
+    "letter, no word spelt inside, no count of any kind (word count included). "
+    f"\"claims\" must be []. Letters may come from clue {STRUCTURE_EARLIEST} on.\n"
+)
+
+
 def build_target_user_message(ctx: TargetClueContext, clue_index: int,
                               prior_clues: list[str]) -> str:
     """Mirrors build_relic_user_message on the DIRECT path (no anchor angle —
@@ -945,11 +984,14 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
            "DIFFERENT aspect; stay inside yours.\n" if aspect else "")
         + ("ALREADY SPENT on this word — do NOT repeat these angles: "
            + ", ".join(spent) + "\n" if spent else "")
+        + (FIRST_THREE_CLUES_RULE if clue_index < STRUCTURE_EARLIEST else "")
         + (
             "ENUMERABLE WORD(S) IN THIS NAME: " + ", ".join(ctx.enumerable_words)
             + ". These belong to a set a player can list out loud. NEVER let a "
             "clue gesture at the CATEGORY — attack these words ONLY by cultural "
-            "use, structure, or their relation to the other words.\n"
+            + ("use or their relation to the other words.\n"
+               if clue_index < STRUCTURE_EARLIEST else
+               "use, structure, or their relation to the other words.\n")
             if clue_index <= puzzle_clues_of(ctx) and ctx.enumerable_words else ""
         )
         + f"FACET for this clue: {vector} — {_treasure_wording(relic_guidance_for(vector, ctx, clue_index))}\n"
@@ -1248,7 +1290,15 @@ class TargetClueEngine(RelicClueEngine):
                     ", ".join(words) + ") — the chain and the platform are part "
                     "of the ANSWER; remove every such word and any allusion to "
                     "them"])
-        # 2. structural claims about the name's string — true, or gone
+        # 2. nothing about the letters on clues 1-3 (Pedro, 16/10, Hunt #22) —
+        #    before the structural check, so the writer hears "no letters"
+        #    and not "make the letter true"
+        early = early_letter_errors(draft, clue_index)
+        if early:
+            logging.getLogger(__name__).warning(
+                "clue #%s: letter talk before clue %s rejected", clue_index, STRUCTURE_EARLIEST)
+            return self._reject("early letters", early)
+        # 3. structural claims about the name's string — true, or gone
         #    (Opus, live test 09/09: "word two is a compound" — it was FUTURE)
         structural = structural_claim_errors(draft.text, persona.display_name)
         if structural:
@@ -1260,14 +1310,14 @@ class TargetClueEngine(RelicClueEngine):
                     "answer. " + " | ".join(structural) + ". Rewrite without any "
                     "false structural claim; if you cannot verify a claim on the "
                     "actual letters, do not make it"])
-        # 3. declare-and-verify: angle/aspect as assigned, every claim true,
+        # 4. declare-and-verify: angle/aspect as assigned, every claim true,
         #    every structural statement declared, no synonym lists
         decl = declaration_errors(draft, persona, clue_index)
         if decl:
             logging.getLogger(__name__).warning(
                 "clue #%s: declaration check rejected (%d)", clue_index, len(decl))
             return self._reject("declaration", ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)])
-        # 4. the consistency judge — clue + answer, must be TRUE (every phase)
+        # 5. the consistency judge — clue + answer, must be TRUE (every phase)
         if self._truth_judge is not None:
             facet, _ = relic_slot_for(clue_index, persona)
             word = None
@@ -1289,7 +1339,7 @@ class TargetClueEngine(RelicClueEngine):
                         "player who reasons correctly must arrive at the answer, not "
                         "be pushed off it. Rewrite so the clue is TRUE of the word "
                         "under a literal reading — hard is fine, wrong is not"])
-        # 5. the search guard, puzzle phase only
+        # 6. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= puzzle_clues_of(persona):
             v = self._search_guard.check(
                 draft.text, target_item_id=persona.target_id,
@@ -1307,7 +1357,7 @@ class TargetClueEngine(RelicClueEngine):
                         "any literal description of the picture or phrase that "
                         "could appear in a title; attack from the assigned angle "
                         "only"])
-        # 6. the blind solver (inherited)
+        # 7. the blind solver (inherited)
         solver = super()._post_guardrail_reasons(draft, persona, clue_index, prior_clues)
         return self._reject("solver", solver) if solver else solver
 
