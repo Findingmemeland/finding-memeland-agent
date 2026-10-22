@@ -75,6 +75,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Sequence
 
 from .commitment import compute_commitment_v2, generate_salt
+from .harvest import HARVEST_CHAINS
 from .refresh import (
     arweave_ref,
     content_id,
@@ -244,6 +245,11 @@ class Larder:
         return sum(1 for c in self.candidates
                    if (c.chain, c.contract.lower()) == key)
 
+    def count_chain(self, chain: str) -> int:
+        """How many targets WAITING here are on this chain — for
+        `/prepare <cadeia>` (22/10)."""
+        return sum(1 for c in self.candidates if c.chain == chain)
+
     def add(self, c: Candidate) -> bool:
         if self.has(c.id()):
             return False
@@ -261,7 +267,8 @@ class Larder:
         parts = self.used[-1].split(":")
         return f"{parts[0]}:{parts[1].lower()}" if len(parts) == 3 else ""
 
-    def take(self, rng: random.Random, *, avoid_contract: str = "") -> Candidate | None:
+    def take(self, rng: random.Random, *, avoid_contract: str = "",
+             chain: str | None = None) -> Candidate | None:
         """Um candidato ao calhas — evitando o contrato do hunt anterior.
 
         Os hunts #12 e #13 saíram do MESMO contrato e havia jogadores a
@@ -280,12 +287,18 @@ class Larder:
         aritmética. É a regra que o /fill já seguia entre fontes (22/09),
         aplicada ao balde: um contrato com UMA peça pesa o mesmo que um com
         vinte, porque a pergunta do jogo é "de que contrato sai o próximo
-        alvo?", não "que peça entre todas?"."""
-        if not self.candidates:
+        alvo?", não "que peça entre todas?".
+
+        UMA CADEIA SÓ, quando pedida (22/10, `/prepare base`): o balde passa
+        a ser só essa cadeia e tudo o resto acontece lá dentro — uniforme por
+        contrato, o contrato anterior evitado e, se for o único dessa cadeia,
+        repetido. Nunca se muda de cadeia: sem candidatos dela, None."""
+        pool = (self.candidates if chain is None
+                else [c for c in self.candidates if c.chain == chain])
+        if not pool:
             return None
-        pool = self.candidates
         if avoid_contract:
-            other = [c for c in self.candidates
+            other = [c for c in pool
                      if f"{c.chain}:{c.contract.lower()}" != avoid_contract]
             if other:
                 pool = other
@@ -931,6 +944,26 @@ class DepositReport:
 
 class PrepareRefused(RuntimeError):
     """Nothing was written or published. COUNTS ONLY in the message."""
+
+
+# `/prepare <cadeia>` (22/10, Pedro: a hunt especial do Base Meme Summit tem
+# de ter um alvo de Base). As cadeias de onde a despensa se enche — as do
+# /harvest. Sem cadeia, o /prepare de sempre.
+PREPARE_CHAINS = HARVEST_CHAINS
+PREPARE_USAGE = ("usage: /prepare [cadeia] — cadeias: " + ", ".join(PREPARE_CHAINS)
+                 + " (sem cadeia: todas)")
+
+
+def parse_prepare_args(arg: str) -> str | None:
+    """"/prepare [cadeia]" → a cadeia, ou None = todas. ValueError com o uso
+    em tudo o resto: uma cadeia que o jogo não conhece é recusada, nunca
+    ignorada — ignorá-la era sortear de todas quando se pediu uma."""
+    tokens = (arg or "").split()
+    if not tokens:
+        return None
+    if len(tokens) > 1 or tokens[0].lower() not in PREPARE_CHAINS:
+        raise ValueError(PREPARE_USAGE)
+    return tokens[0].lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -1888,13 +1921,33 @@ class TargetPreparer:
         self._rng = rng or random.SystemRandom()
         self._notify = notify or (lambda _t: None)
 
-    def prepare(self, larder: Larder) -> tuple[Prepared, Larder]:
+    @staticmethod
+    def _chain_or_refuse(larder: Larder, chain: str) -> None:
+        """`/prepare <cadeia>` with nothing of that chain waiting: a refusal
+        before anything is drawn — never a draw from another chain (22/10).
+        Counts by chain only, as /status shows them."""
+        if larder.count_chain(chain):
+            return
+        chains = ", ".join(f"{k} {v}" for k, v in larder.spread()["chains"].items())
+        raise PrepareRefused(
+            f"não há alvos de {chain} na despensa (despensa {larder.size()}"
+            + (f": {chains}" if chains else "") + ") — nada foi sorteado; "
+            f"nunca tiro de outra cadeia. Corre /harvest {chain}.")
+
+    def prepare(self, larder: Larder, *, chain: str | None = None
+                ) -> tuple[Prepared, Larder]:
         """Take one from the larder, RE-VERIFY it (pins expire, pieces get
         sold into contracts, names stop being unique), describe the artwork
         and write Clue 1. Returns the sealed hunt and the larder with that
-        candidate consumed."""
+        candidate consumed.
+
+        `chain` (22/10, `/prepare base`): only that chain is drawn, and
+        everything else is as it always was. With nothing of it in the
+        larder the answer is a refusal, never a target from another chain."""
         if larder.size() == 0:
             raise PrepareRefused("despensa vazia — corre /fill primeiro")
+        if chain is not None:
+            self._chain_or_refuse(larder, chain)    # before a single read
         self._finder.load_sizes()
 
         # A restored backup can resurrect a target this project already
@@ -1936,6 +1989,8 @@ class TargetPreparer:
                 raise PrepareRefused(
                     "todos os alvos da despensa estavam expostos em ficheiros "
                     "públicos do repositório — corre /harvest")
+        if chain is not None:
+            self._chain_or_refuse(larder, chain)    # the clean-up may have taken the last
         tally = Tally()
         # OUR outages are counted apart and NEVER consume a candidate (R8).
         # Enough of them in a row and the honest answer is "we are down",
@@ -1964,8 +2019,13 @@ class TargetPreparer:
         # exige distinguir as duas coisas no histórico.
         avoid = larder.last_contract()
         for attempt in range(1, self._max_attempts + 1):
-            cand = larder.take(self._rng, avoid_contract=avoid)
+            cand = larder.take(self._rng, avoid_contract=avoid, chain=chain)
             if cand is None:
+                if chain is not None:
+                    raise PrepareRefused(
+                        f"alvos de {chain} esgotados ao fim de {attempt - 1} "
+                        f"tentativa(s) — {tally.render()}; nunca tiro de outra "
+                        f"cadeia. Corre /harvest {chain}.")
                 raise PrepareRefused(
                     f"despensa esgotada ao fim de {attempt - 1} tentativa(s) — "
                     f"{tally.render()}; corre /fill")

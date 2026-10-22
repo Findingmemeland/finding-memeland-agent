@@ -1545,10 +1545,20 @@ def build_agent(settings: Settings | None = None) -> Agent:
         nothing left to do but a live check and a publish.
 
         Shares the target flag with /fill: two commands drawing from the same
-        larder at once would have one of them save over the other."""
-        if arg.strip():
-            return "usage: /prepare  (sem argumentos)"
-        return _target_job("prepare", lambda: target_wiring.prepare())
+        larder at once would have one of them save over the other.
+
+        `/prepare <cadeia>` (22/10, Pedro: a hunt especial do Base Meme
+        Summit tem de ter um alvo de Base): o sorteio só dessa cadeia, com
+        tudo o resto igual; sem alvos dela, recusa — nunca tira de outra.
+        Sem argumento, o /prepare de sempre."""
+        from .target.prepare import parse_prepare_args
+        try:
+            chain = parse_prepare_args(arg)
+        except ValueError as e:
+            return str(e)
+        if chain is None:
+            return _target_job("prepare", lambda: target_wiring.prepare())
+        return _target_job("prepare", lambda: target_wiring.prepare(chain))
 
     actions = {
         "launch": _launch,

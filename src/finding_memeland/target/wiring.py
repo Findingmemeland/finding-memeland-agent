@@ -298,14 +298,21 @@ class TargetWiring:
             return ""
         return p.commitment if p is not None else ""
 
-    def prepare(self) -> str:
+    def prepare(self, chain: str | None = None) -> str:
         """Draw one from the larder, re-verify it, write Clue 1, seal it to
-        the database. Replaces the whole snapshot+gate path."""
+        the database. Replaces the whole snapshot+gate path.
+
+        `chain` (22/10, `/prepare base`): that chain only — the preparer
+        refuses rather than fall back to another. Without it, the call is
+        the one it always was. The reply never names the sealed target's
+        chain: the operator sees the request applied in /status, where the
+        count of that chain goes down."""
         if self.larder_preparer is None or self.larder_store is None:
             return "preparação não configurada"
         larder: Larder = self.larder_store.load()
         try:
-            prepared, larder = self.larder_preparer.prepare(larder)
+            prepared, larder = (self.larder_preparer.prepare(larder) if chain is None
+                                else self.larder_preparer.prepare(larder, chain=chain))
         except PrepareRefused as e:
             # A REFUSAL IS A RESULT, NOT A CRASH. Its messages are written
             # leak-free by construction (counts and causes, never a name),
