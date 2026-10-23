@@ -569,6 +569,10 @@ def build_agent(settings: Settings | None = None) -> Agent:
         # script verifies THIS code path, not a copy of it. See
         # Settings.clue_min_gap_s for the constraint tying this to holding_hours.
         clue_due_fn=next_clue_due_factory(s.clue_min_gap_s, s.clue_max_gap_s),
+        # the reveal phase of a target hunt, from its first clue: a shorter
+        # band (Pedro, 23/10). A bad value refuses at boot, like the one above.
+        reveal_due_fn=next_clue_due_factory(
+            s.clue_reveal_min_gap_s, s.clue_reveal_max_gap_s),
         control=control,
         heartbeat=heartbeat,
         # Relic mode. All None with relic_launch=false, which is exactly today's
@@ -1084,7 +1088,9 @@ def build_agent(settings: Settings | None = None) -> Agent:
 
         # the worst case comes from the longest plan there is (10/10)
         lines.append(cadence_status_line(
-            s.clue_min_gap_s, s.clue_max_gap_s, s.holding_hours))
+            s.clue_min_gap_s, s.clue_max_gap_s, s.holding_hours,
+            reveal_min_gap_s=s.clue_reveal_min_gap_s,
+            reveal_max_gap_s=s.clue_reveal_max_gap_s))
         lines.append(
             f"prize min: {fmt_tokens(s.min_prize_fmml)} $FIND "
             f"(/launch {fmt_tokens(s.min_prize_fmml)}) | non-holder share: "

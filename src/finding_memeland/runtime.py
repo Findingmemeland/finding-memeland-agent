@@ -238,22 +238,31 @@ def hunt_status_line(repo, *, local_active: bool) -> str:
     return line
 
 
-def cadence_status_line(min_gap_s: int, max_gap_s: int, holding_hours: int) -> str:
+def cadence_status_line(min_gap_s: int, max_gap_s: int, holding_hours: int, *,
+                        reveal_min_gap_s: int | None = None,
+                        reveal_max_gap_s: int | None = None) -> str:
     """The /status line about the clue cadence: the gap band, the WORST CASE
     — how long a hunt can plausibly run — and whether the holding window
     still covers it (the rule behind "hold before the first clue").
 
     The worst case is the longest hunt the PLAN allows, at the longest gap
     (Pedro, 10/10): the biggest puzzle and the whole reveal ramp
-    (`relic_clues.longest_target_hunt_clues`). It used to assume ten clues."""
+    (`relic_clues.longest_target_hunt_clues`). It used to assume ten clues.
+
+    The reveal phase has its own, shorter band since 23/10: it is shown
+    next to the puzzle's, and the worst case keeps the LONGER of the two
+    maxima for every clue — an upper bound, as it always was."""
     from .content.clue_engine import holding_window_covers_hunt, worst_case_hunt_hours
     from .content.relic_clues import longest_target_hunt_clues
 
     clues = longest_target_hunt_clues()
-    worst = worst_case_hunt_hours(max_gap_s, clues)
-    ok = holding_window_covers_hunt(holding_hours, max_gap_s, clues)
+    longest = max(max_gap_s, reveal_max_gap_s or 0)
+    worst = worst_case_hunt_hours(longest, clues)
+    ok = holding_window_covers_hunt(holding_hours, longest, clues)
+    reveal = (f" · revelação {reveal_min_gap_s // 60}-{reveal_max_gap_s // 60}min"
+              if reveal_min_gap_s is not None and reveal_max_gap_s is not None else "")
     return (
-        f"clues: {min_gap_s // 60}-{max_gap_s // 60}min "
+        f"clues: {min_gap_s // 60}-{max_gap_s // 60}min{reveal} "
         f"→ worst case {worst:.1f}h ({clues} clues) "
         + (f"✅ (< {holding_hours}h)" if ok
            else f"❌ EXCEEDS the {holding_hours}h window — a mid-hunt buyer could win")

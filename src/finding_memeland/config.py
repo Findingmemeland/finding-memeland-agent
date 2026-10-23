@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     # holding_hours > (expected clues x max gap).
     clue_min_gap_s: int = Field(default=60 * 60)       # 1h
     clue_max_gap_s: int = Field(default=3 * 60 * 60)   # 3h
+    # The REVEAL PHASE of a target hunt — every clue after the end of its
+    # puzzle, from the first one on — runs on this shorter band (Pedro,
+    # 23/10, after hunts #24/#25). The puzzle keeps the band above.
+    clue_reveal_min_gap_s: int = Field(default=4 * 60)    # 4 min
+    clue_reveal_max_gap_s: int = Field(default=12 * 60)   # 12 min
     persona_register: str = Field(default="medium")
     # Daily oracle post: generates draft options once a day and sends them to
     # Telegram for approval (nothing publishes without it). Hour is UTC.

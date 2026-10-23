@@ -206,6 +206,7 @@ class Orchestrator:
         max_rounds: int = 100_000,
         avatar_writer=None,
         clue_due_fn=None,
+        reveal_due_fn=None,
         cleanup_window_s: int = CLEANUP_WINDOW_SECONDS,
         undress_on_retire: bool = False,
         control=None,
@@ -263,6 +264,9 @@ class Orchestrator:
         # Cadence hooks: defaults preserve production (1-3h between clues, 1h reveal).
         # The live-test harness injects short intervals so a rehearsal runs in minutes.
         self._clue_due_fn = clue_due_fn or next_clue_due
+        # the REVEAL PHASE of a target hunt (23/10): its own, shorter band;
+        # None = the same band as the puzzle (`_clue_due_for`)
+        self._reveal_due_fn = reveal_due_fn
         # (hunt id, clue index) → the attempts of each round the guards
         # refused for that clue; emptied when the clue goes out (14/10)
         self._refused_rounds: dict[tuple, list[int]] = {}
@@ -954,7 +958,7 @@ class Orchestrator:
         `since`/`clue_index` allow a crash-resumed hunt to re-enter the loop
         exactly where it stopped (see resume_hunts)."""
         clue_index = clue_index if clue_index is not None else max(1, len(hunt.clues))
-        next_due = self._clue_due_fn(self._clock.now())
+        next_due = self._clue_due_for(hunt, clue_index + 1)
         poll_failures = 0
         sub_retries: dict[str, int] = {}
         pause_notified = False
@@ -1249,6 +1253,22 @@ class Orchestrator:
 
         raise RuntimeError("hunt loop exceeded max rounds without a winner")
 
+    def _clue_due_for(self, hunt: PreparedHunt, next_clue: int):
+        """When clue `next_clue` is due — the ONE place every wait between
+        clues is drawn (after a clue, a hold, a refused round, a restart).
+
+        The REVEAL PHASE of a target hunt runs on its own, shorter band
+        (Pedro, 23/10, after hunts #24/#25): every clue after the end of
+        THIS hunt's puzzle — `puzzle_clues_of`, four, six or eight, never a
+        fixed "clue 8" — from the first one on. The puzzle, and every hunt
+        that is not a target hunt, keep the band they always had."""
+        now = self._clock.now()
+        if self._reveal_due_fn is not None and getattr(hunt, "target", None) is not None:
+            from ..content.relic_clues import puzzle_clues_of
+            if next_clue > puzzle_clues_of(getattr(hunt, "ctx", None)):
+                return self._reveal_due_fn(now)
+        return self._clue_due_fn(now)
+
     def _maybe_post_clue(
         self, hunt: PreparedHunt, clue_index: int, next_due, claim_hint: str | None = None
     ) -> tuple[int, object]:
@@ -1267,7 +1287,7 @@ class Orchestrator:
             if outcome == PRE_CLUE_ENDED:
                 return clue_index, None          # loop sees hunt.state VOIDED
             if outcome == PRE_CLUE_SKIP:
-                return clue_index, self._clue_due_fn(self._clock.now())
+                return clue_index, self._clue_due_for(hunt, clue_index + 1)
         clue_index += 1
         try:
             draft = self._engine_for(hunt).next_clue(hunt.ctx, clue_index, hunt.clues)
@@ -1289,7 +1309,7 @@ class Orchestrator:
             if is_target:
                 from ..target.integration import clue_failed
                 if clue_failed(self, hunt, e):
-                    return clue_index, self._clue_due_fn(self._clock.now())
+                    return clue_index, self._clue_due_for(hunt, clue_index + 1)
             if isinstance(e, ClueRoundRefused):
                 return clue_index, self._after_refused_round(hunt, e)
             self._notify(f"clue generation failed (skipping this round): {e}")
@@ -1305,7 +1325,7 @@ class Orchestrator:
                 self._record_clue_audited(hunt, clue_index, draft.text, tweet_id)
             except Exception as e:  # noqa: BLE001
                 self._notify(f"record_clue failed (non-fatal): {e!r}")
-        return clue_index, self._clue_due_fn(self._clock.now())
+        return clue_index, self._clue_due_for(hunt, clue_index + 1)
 
     # A CLUE ROUND THE GUARDS REFUSED is asked again at once, this many times
     # per clue, before the loop waits for the next window (Pedro, 14/10: in
@@ -1335,7 +1355,7 @@ class Orchestrator:
                 "tentativas) — fica para a janela seguinte")
         else:
             self._notify(f"clue generation failed (skipping this round): {e}")
-        return self._clue_due_fn(self._clock.now())
+        return self._clue_due_for(hunt, e.clue_index)
 
     def _record_clue_audited(
         self, hunt: PreparedHunt, clue_index: int, clue_text: str, tweet_id: str
@@ -1600,7 +1620,7 @@ class Orchestrator:
         LIVE, nothing transient may kill it — every phase is isolated, failures
         notify + retry. Only the winner path (or void deadline) exits."""
         clue_index = clue_index if clue_index is not None else max(1, len(hunt.clues))
-        next_due = self._clue_due_fn(self._clock.now())
+        next_due = self._clue_due_for(hunt, clue_index + 1)
         poll_failures = 0
         pause_notified = False
         cycle_n = 0

@@ -214,17 +214,31 @@ def extract_target_refs(text: str) -> ClaimExtraction:
     return ClaimExtraction(refs=tuple(refs), unresolved_links=tuple(unresolved))
 
 
+# A collection page named by its SLUG (Pedro, 23/10 — seen in hunt #23).
+# opensea.io/collection/<slug> carries no contract, so the rule below never
+# saw it, and a player who had pasted the collection heard "i can't read that
+# link". OpenSea only, by decision: the slug pages of other marketplaces were
+# not measured, and a token page read as a collection would tell the player
+# holding the right piece that it is one piece short.
+_OPENSEA_COLLECTION_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?opensea\.io/collection/[^/?#\s]+", re.IGNORECASE)
+
+
 def collection_link(url: str) -> bool:
     """O URL tem CONTRATO mas não tem tokenId — a página da colecção.
 
     Medido no hunt #12: dois jogadores colaram a colecção em vez da peça
-    (`rarible.com/base/collections/0x…`, `opensea.io/collection/…`). Nesse
-    caso sabemos exactamente o que falta, e responder "não consigo ler esse
-    link" é uma verdade inútil — manda a pessoa adivinhar o que já sabemos.
+    (`rarible.com/base/collections/0x…`). Nesse caso sabemos exactamente o
+    que falta, e responder "não consigo ler esse link" é uma verdade inútil
+    — manda a pessoa adivinhar o que já sabemos. Desde 23/10 também a
+    página do OpenSea pelo nome, `opensea.io/collection/<slug>`: sem
+    contrato, mas o caminho diz que é a colecção.
 
     Não é acusação nenhuma: continua a não gastar tentativa e continua a
     não dizer que está errado. Só é mais preciso."""
     u = (url or "").strip()
+    if _OPENSEA_COLLECTION_RE.match(u):
+        return True
     if not _ADDR_RE.search(u):
         return False
     return not (_ADDR_TID_RE.search(u) or _QUERY_TID_RE.search(u))
