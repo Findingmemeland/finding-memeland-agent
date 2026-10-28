@@ -74,6 +74,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Callable, Sequence
 
+from ..content.name_words import content_words
 from .commitment import compute_commitment_v2, generate_salt
 from .harvest import HARVEST_CHAINS
 from .refresh import (
@@ -954,6 +955,61 @@ PREPARE_USAGE = ("usage: /prepare [cadeia] — cadeias: " + ", ".join(PREPARE_CH
                  + " (sem cadeia: todas)")
 
 
+# THE RARITY ORDER (Pedro, 28/10). Measured that day over hunts #17–#26:
+# the three solved at clue 1 or 2 by a dictionary word (#19, #21, #26) had,
+# in their first two clues, a word whose search ALONE reaches the target.
+# So at /prepare each content word is searched on its own — without filter
+# and with the target's chain — and the ones that reach it go LAST in the
+# puzzle (relic_clues.target_ramp_plan). Never a refusal: a search that does
+# not answer leaves the order of before, and the report says so (D2).
+
+
+class RarityUnmeasured(RuntimeError):
+    """A word search that did not answer. `kind` is how it failed (the
+    search's own words: "503", "timeout"…) — never the message, which can
+    quote the URL and so the word."""
+
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
+
+
+def rare_last_from(reach: dict) -> tuple:
+    """{position: (position of the target WITHOUT filter or None, position
+    WITH the chain or None)} → the positions of the words that reach the
+    target alone, least findable first — the most findable LAST. A hit
+    without filter outranks one that needs the chain (D1: the hunter does
+    not know the chain); then the better position. Ties keep the order of
+    the name."""
+    hits = []
+    for pos, (free, chained) in sorted(reach.items()):
+        if free is not None:
+            hits.append(((1, -int(free)), pos))
+        elif chained is not None:
+            hits.append(((0, -int(chained)), pos))
+    hits.sort(key=lambda h: h[0])
+    return tuple(pos for _key, pos in hits)
+
+
+def rare_last_of(raw) -> tuple:
+    """A stored rarity order, read defensively: anything but a list of
+    positive ints is no order at all — the order of before, never an
+    unreadable preparation or hunt."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    try:
+        out = tuple(int(x) for x in raw)
+    except (TypeError, ValueError):
+        return ()
+    return out if all(x > 0 for x in out) else ()
+
+
+def _searched_as(word: str) -> str:
+    """The word as a player types it into a search: without the punctuation
+    around it (the name of hunt #24 carries quotes)."""
+    return re.sub(r"^\W+|\W+$", "", word or "")
+
+
 def parse_prepare_args(arg: str) -> str | None:
     """"/prepare [cadeia]" → a cadeia, ou None = todas. ValueError com o uso
     em tudo o resto: uma cadeia que o jogo não conhece é recusada, nunca
@@ -1749,6 +1805,12 @@ class Prepared:
     salt: str = ""
     commitment: str = ""
     prepared_at: str = ""
+    # THE RARITY ORDER (28/10): the words that reach the target alone, by
+    # position, least findable first (`rare_last_from`), and what the report
+    # says about it — counts only. A preparation sealed before 28/10 has
+    # neither and keeps the order of before.
+    rare_last: tuple = ()
+    rarity_note: str = ""
 
     def id(self) -> str:
         return self.target.id()
@@ -1785,6 +1847,9 @@ class PreparedStore:
             "attempts": p.attempts, "image_description": p.image_description,
             "clue_one": p.clue_one if isinstance(p.clue_one, (dict, str))
                         else getattr(p.clue_one, "__dict__", {}),
+            # optional since 28/10, under the SAME version: a preparation
+            # written before has no such keys and loads with the old order
+            "rare_last": list(p.rare_last or ()), "rarity_note": p.rarity_note,
             "target": {"chain": t.chain, "contract": t.contract,
                        "tokenId": t.token_id, "name": t.name,
                        "name_onchain": t.name_onchain,
@@ -1820,7 +1885,9 @@ class PreparedStore:
                 image_description=doc.get("image_description", ""),
                 attempts=int(doc.get("attempts", 1)),
                 salt=doc.get("salt", ""), commitment=doc.get("commitment", ""),
-                prepared_at=doc.get("prepared_at", ""))
+                prepared_at=doc.get("prepared_at", ""),
+                rare_last=rare_last_of(doc.get("rare_last")),
+                rarity_note=str(doc.get("rarity_note") or ""))
         except Exception as e:  # noqa: BLE001 — fail closed, no contents
             raise LarderIntegrityError(
                 f"prepared hunt unreadable ({type(e).__name__}) — wrong key "
@@ -1908,7 +1975,8 @@ class TargetPreparer:
                  used_hmacs: Callable[[], Sequence[str]] | None = None,
                  now_iso: Callable[[], str] | None = None,
                  rng: random.Random | None = None,
-                 notify: Callable[[str], None] | None = None):
+                 notify: Callable[[str], None] | None = None,
+                 word_reach: Callable | None = None):
         self._finder = finder
         self._fetch_image = fetch_image
         self._describe = describe
@@ -1920,6 +1988,35 @@ class TargetPreparer:
         self._now = now_iso or (lambda: "")
         self._rng = rng or random.SystemRandom()
         self._notify = notify or (lambda _t: None)
+        # word_reach(word, target) -> (position WITHOUT filter | None,
+        # position WITH the chain | None); raises RarityUnmeasured (28/10)
+        self._word_reach = word_reach
+
+    def _rarity_order(self, target: Target) -> tuple[tuple, str]:
+        """Which words of the name reach the target ALONE in a search, and
+        so go last in the puzzle (Pedro, 28/10) — and the report's words for
+        it. Never raises. COUNTS ONLY in the note: the words are the answer."""
+        words = [(w.position, _searched_as(w.text)) for w in content_words(target.name)]
+        words = [(pos, query) for pos, query in words if query]
+        if len(words) < 2:
+            return (), "uma palavra só — nada a ordenar"
+        if self._word_reach is None:
+            return (), "não medida (sem pesquisa com posições)"
+        reach = {}
+        for pos, query in words:
+            try:
+                reach[pos] = self._word_reach(query, target)
+            except RarityUnmeasured as e:
+                return (), f"não medida ({e.kind})"
+            except Exception as e:  # noqa: BLE001 — the type only: a message can quote the word
+                return (), f"não medida ({type(e).__name__})"
+        rare = rare_last_from(reach)
+        n, k = len(words), len(rare)
+        if not k:
+            return (), f"nenhuma das {n} palavras chega ao alvo sozinha — ordem de sempre"
+        if k == 1:
+            return rare, f"1 de {n} palavras chega ao alvo sozinha — vai para o fim"
+        return rare, f"{k} de {n} palavras chegam ao alvo sozinhas — vão para o fim"
 
     @staticmethod
     def _chain_or_refuse(larder: Larder, chain: str) -> None:
@@ -2133,8 +2230,12 @@ class TargetPreparer:
                 tally.blind += 1
                 larder.consume(cand.id())
                 continue
+            # the rarity order is decided BEFORE Clue 1, which is written in it
+            rare_last, rarity_note = self._rarity_order(target)
             try:
-                clue_one = self._write_clue_one(target, description)
+                clue_one = (self._write_clue_one(target, description) if not rare_last
+                            else self._write_clue_one(target, description,
+                                                      rare_last=rare_last))
             except Exception as e:  # noqa: BLE001
                 # THE SAME SPLIT AS THE VISION CALL, and it used to live at
                 # launch (5th --real-clues, 09/09): a GUARD OF OURS that
@@ -2177,7 +2278,8 @@ class TargetPreparer:
             return Prepared(target=target, clue_one=clue_one,
                             image_description=description,
                             attempts=attempt, salt=salt, commitment=commitment,
-                            prepared_at=self._now()), larder
+                            prepared_at=self._now(), rare_last=rare_last,
+                            rarity_note=rarity_note), larder
 
         # The tally is the diagnosis, so it has to name the RIGHT cause:
         # "sem-pista" (the guards refuse every draft for this target) and

@@ -92,7 +92,7 @@ from .hunt import (
 from .integration import ArtworkUnusable, TargetPorts
 from .prepare import (
     PREPARED_TTL_HOURS, SOURCES, Larder, LarderStore, Prepared,
-    PrepareRefused, PreparedStore, TargetFinder,
+    PrepareRefused, PreparedStore, RarityUnmeasured, TargetFinder,
     TargetPreparer as LarderPreparer, used_hmac,
 )
 from .pipeline import PipelineReport, SnapshotPipeline
@@ -113,6 +113,7 @@ from .search_guard import (
     OpenSeaSearch,
     RaribleSearch,
     probe_search,
+    search_failure_kind,
 )
 from .selector import CurationEpoch
 from .snapshot import Snapshot, SnapshotStore, StratumGateReport, stratum_gate
@@ -185,6 +186,31 @@ def _chains_we_read() -> frozenset[str]:
     A correcção é a união. Uma fonte nova passa a exigir o RPC dessa cadeia
     ANTES de o processo arrancar, e a mensagem diz qual falta."""
     return frozenset(EPOCH1_CHAINS) | frozenset(s.chain for s in SOURCES)
+
+
+def word_reach_for(market):
+    """The rarity order's port (28/10): `word_reach(word, target)` → where
+    the target sits when ONE word of its name is searched — (position
+    WITHOUT filter | None, position WITH its chain | None). Two requests,
+    the same the 28/10 measurement made. How a request failed travels as
+    RarityUnmeasured, never its message (it can quote the word). None for a
+    surface without ranked results (Rarible): nothing is measured, the
+    order of before."""
+    if not hasattr(market, "ranked_ids"):
+        return None
+
+    def word_reach(word: str, target) -> tuple[int | None, int | None]:
+        tid = target.id().strip().upper()
+        try:
+            free = market.ranked_ids(word)
+            chained = market.ranked_ids(word, chain=target.chain)
+        except Exception as e:  # noqa: BLE001
+            raise RarityUnmeasured(search_failure_kind(e)) from None
+
+        def at(ids):
+            return next((i for i, x in enumerate(ids, 1) if x == tid), None)
+        return at(free), at(chained)
+    return word_reach
 
 
 @dataclass
@@ -323,8 +349,10 @@ class TargetWiring:
             return f"⛔ prepare recusado — {e}"
         self.larder_store.save(larder)          # the target is spent
         self.prepared_store.save(prepared)
+        note = getattr(prepared, "rarity_note", "")
         return (f"prepare: alvo selado à {prepared.attempts}.ª tentativa · "
-                f"despensa {larder.size()} · válido {PREPARED_TTL_HOURS}h")
+                f"despensa {larder.size()} · válido {PREPARED_TTL_HOURS}h"
+                + (f" · ordem por raridade: {note}" if note else ""))
 
     def larder_size(self) -> int:
         if self.larder_store is None:
@@ -1374,17 +1402,19 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             raise ArtworkUnreadable(f"{len(data):,} bytes would not open")
         return shrunk
 
-    def write_clue_one(target, description: str):
+    def write_clue_one(target, description: str, rare_last=()):
         """Clue 1, written and put through every guard, ON THE DAY BEFORE.
 
         This is the slow half of a hunt — up to ten drafts, each judged by
         the consistency judge, the search guard and the blind solver — and
         moving it off launch day is the whole point of `/prepare`. The
         16/09 launch spent 10-25 minutes here with an audience waiting and
-        a prompt that promised "seconds"."""
+        a prompt that promised "seconds". Written in the rarity order the
+        preparer measured (28/10), the one the hunt will run on."""
         ctx = TargetClueContext.from_target(target, image_description=description,
-                                            metadata=None)
+                                            metadata=None, rare_last=rare_last or None)
         return clue_engine.next_clue(ctx, 1, [])
+
 
     # THE PREPARER MUST BE ABLE TO SPEAK (17/09). Every measured cause in
     # prepare.py — which candidate died of what, which read was ours — was
@@ -1397,7 +1427,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         write_clue_one=write_clue_one,
         epoch_id=s.target_epoch_id, key=s.target_pool_key,
         used_hmacs=lambda: repo.used_target_hmacs(),
-        now_iso=_now_iso, rng=rng, notify=say)
+        now_iso=_now_iso, rng=rng, notify=say,
+        # a surface without ranked results (Rarible) measures nothing:
+        # the order of before, and the report says so
+        word_reach=word_reach_for(market))
 
     # -- /harvest (28/09): colher da cadeia, não de catálogos ------------- #
     #

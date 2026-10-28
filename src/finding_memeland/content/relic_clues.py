@@ -308,7 +308,7 @@ def stretched_obliqueness(n: int) -> tuple:
     return tuple(out)
 
 
-def target_ramp_plan(name: str) -> list:
+def target_ramp_plan(name: str, *, rare_last=None) -> list:
     """The puzzle phase of a TARGET hunt, as (facet, obliqueness).
 
     PEDRO'S RULE (10/10): before the difficulty drops, the bot ALWAYS
@@ -324,7 +324,17 @@ def target_ramp_plan(name: str) -> list:
     one (stretched over the pieces there are), and the plan is SEEDED by the
     name — it is rebuilt on a crash-resume and must come out the same.
 
-    Relic hunts keep their seven (`relic_ramp_plan`)."""
+    Relic hunts keep their seven (`relic_ramp_plan`).
+
+    THE RARITY ORDER (Pedro, 28/10, after hunts #19, #21 and #26 were solved
+    at clue 1 or 2 by a word whose search ALONE reaches the target):
+    `rare_last` names, by TRUE position, the words measured at /prepare to
+    reach the target alone — least findable first, most findable last.
+    Their pieces take the LAST word slots, in that order; every other word
+    keeps its seeded slots, in the seeded order. The puzzle is the same
+    puzzle: the art pieces stay where the seed put them and every word keeps
+    its pieces. None or empty — or an order that does not fit THIS name —
+    is the order of before (a preparation sealed before 28/10)."""
     words = content_facets(name)
     if len(words) > MAX_NAME_WORDS:
         # COUNTS ONLY: this reaches the operator, and the name is the answer
@@ -333,8 +343,32 @@ def target_ramp_plan(name: str) -> list:
     slots = [w for w in words for _ in range(MIN_PIECES_PER_WORD)]
     slots += ["image"] * PUZZLE_IMAGE_PIECES
     slots = _placed(slots, random.Random(name))
+    rare = _rare_facets(words, rare_last)
+    if rare:
+        common = [f for f in slots if f != "image" and f not in rare]
+        fill = iter(common + [f for f in rare for _ in range(MIN_PIECES_PER_WORD)])
+        slots = [f if f == "image" else next(fill) for f in slots]
     curve = stretched_obliqueness(len(slots))
     return [(facet, curve[i]) for i, facet in enumerate(slots)]
+
+
+def _rare_facets(words: list, rare_last) -> list:
+    """`rare_last` as facets of THIS name, once each, in order — or [] when
+    it is absent or names a word the name does not have: an order that does
+    not fit the name is not half-applied."""
+    if not rare_last:
+        return []
+    out: list = []
+    for pos in rare_last:
+        try:
+            facet = f"name_word_{int(pos)}"
+        except (TypeError, ValueError):
+            return []
+        if facet not in words:
+            return []
+        if facet not in out:
+            out.append(facet)
+    return out
 
 
 def reveal_clues_to_floor() -> int:

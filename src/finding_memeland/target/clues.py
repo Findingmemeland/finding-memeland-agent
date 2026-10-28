@@ -613,7 +613,8 @@ class TargetClueContext(RelicClueContext):
 
     @classmethod
     def from_target(cls, target: Target, *, image_description: str,
-                    metadata: dict | None = None) -> "TargetClueContext":
+                    metadata: dict | None = None,
+                    rare_last=None) -> "TargetClueContext":
         """`image_description` comes from the vision step (see
         describe_image_batched); `metadata` (the full token metadata, if the
         caller has it) contributes the artist/creator name to the never-write
@@ -634,8 +635,10 @@ class TargetClueContext(RelicClueContext):
             solution_terms=sorted(set(terms)),
             enumerable_words=enumerable_words_in(target.name),
             # the puzzle of a TARGET hunt: two pieces a content word and two
-            # for the artwork — 4, 6 or 8 clues, not a fixed seven (10/10)
-            clue_facet_plan=target_ramp_plan(target.name),
+            # for the artwork — 4, 6 or 8 clues, not a fixed seven (10/10);
+            # in the rarity order measured at /prepare, when there is one
+            # (28/10 — None: the order of before)
+            clue_facet_plan=target_ramp_plan(target.name, rare_last=rare_last),
             angle_offset=sum(ord(c) for c in target.name) % len(PUZZLE_ANGLES),
             target_id=target.id(),
             name_onchain=target.name_onchain,

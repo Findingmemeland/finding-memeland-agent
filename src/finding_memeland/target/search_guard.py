@@ -360,6 +360,23 @@ class OpenSeaSearch:
                 out.append((ident, str(nft.get("name") or "")))
         return out
 
+    def ranked_ids(self, text: str, *, chain: str | None = None) -> list[str]:
+        """The ids a search for `text` returns, IN ORDER — without filter, or
+        filtered by `chain` (28/10: the rarity order of /prepare asks where
+        the target sits when ONE word of its name is searched). A chain
+        OpenSea has no slug for is unverifiable, never "absent"."""
+        slug = None
+        if chain is not None:
+            slug = OPENSEA_CHAIN.get(chain.lower())
+            if slug is None:
+                raise ValueError("chain not searchable on this surface")
+        out: list[str] = []
+        for nft in self._search(text, chains=slug):
+            ident = _opensea_id(nft, _opensea_chain_of(nft) or (chain or "unknown"))
+            if ident:
+                out.append(ident)
+        return out
+
     def control(self, text: str, *, chain: str | None = None) -> int:
         """A CONTROL search (10/10): the same request as a real one —
         unfiltered, or filtered by `chain` — that NO CACHE can answer, and
