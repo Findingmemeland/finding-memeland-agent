@@ -2643,11 +2643,34 @@ class Orchestrator:
                     self._clock.sleep(30)
         self._clock.sleep(self._cleanup_window_s)  # reveal window (1h prod; short in test)
 
-    def _retire(self, hunt: PreparedHunt) -> None:
-        self._transition(hunt, HuntState.RETIRING)
-        self._finish_retire(hunt)
+    # THE RETIRE TAIL NEVER KILLS A HUNT (Pedro, 26/10, after hunts #24 and
+    # #25: "HUNT DIED (ReadTimeout)" there, twice in a row). The winner is
+    # paid and announced by now; a timeout in this step left the hunt
+    # 'retiring' in the DB, blocking /prepare until SQL by hand, and "Hunt #N
+    # closed" never came out. Now: the closed post gets a few minutes and then
+    # never — a late "closed", hours after the hunt, is worse than none — and
+    # the hunt reaches DONE whatever happens to the post.
+    CLOSED_POST_WINDOW_S = 5 * 60      # after the retire was due
+    CLOSED_POST_WAITS_S = (60, 120)    # between the three attempts
+    DONE_WAITS_S = (30, 30)            # between the three writes of DONE
 
-    def _finish_retire(self, hunt: PreparedHunt) -> None:
+    def _retire(self, hunt: PreparedHunt, *, post_until=None) -> None:
+        try:
+            self._transition(hunt, HuntState.RETIRING)
+        except Exception as e:  # noqa: BLE001 — paid and announced: the tail still runs
+            self._notify(f"hunt #{hunt.number}: 'retiring' não ficou gravado "
+                         f"({type(e).__name__}) — sigo para o fecho.")
+        self._finish_retire(hunt, post_until=post_until)
+
+    def _closed_post_until(self, due) -> datetime:
+        """The last moment "Hunt #N closed" may go out after a RESTART: a few
+        minutes after the retire was due (`cleanup_due_at`). Without a due
+        time there is no window — the post is skipped, never sent late."""
+        if due is None:
+            return self._clock.now() - timedelta(seconds=1)
+        return due + timedelta(seconds=self.CLOSED_POST_WINDOW_S)
+
+    def _finish_retire(self, hunt: PreparedHunt, *, post_until=None) -> None:
         """The RETIRING -> DONE tail. Split out so a crash-resumed hunt that was
         already mid-retire can finish without an illegal re-transition.
 
@@ -2655,7 +2678,13 @@ class Orchestrator:
         dressed profile stays as the hunt's public artifact). When undressing IS
         enabled (live test), it's best-effort: at this point the winner is paid
         and announced — a flaky X profile endpoint (the known 500/131) must not
-        crash the hunt."""
+        crash the hunt.
+
+        Nothing here raises (26/10): the closed post until `post_until` (by
+        default a few minutes from now), then DONE — written again if the DB
+        does not answer."""
+        if post_until is None:
+            post_until = self._clock.now() + timedelta(seconds=self.CLOSED_POST_WINDOW_S)
         if self._undress_on_retire:
             try:
                 self._dresser.retire(
@@ -2668,22 +2697,79 @@ class Orchestrator:
                     "reset the profile manually; the hunt itself is complete."
                 )
         if getattr(hunt, "target", None) is None:
-            self._persona_source.mark_retired(hunt.persona.id)
-        log = self._repo.submissions_for_hunt(hunt.id)
-        # A format reply is not a submission (Pedro, 09/10): its row exists so
-        # a restart knows the post was handled, and it never spent a guess.
-        # The public count keeps meaning what it meant before those rows
-        # existed; the operator hears how many there were, apart.
-        format_rows = sum(1 for s in log if s.get("outcome") == "format")
-        self._publisher.post(
-            f"Hunt #{hunt.number} closed. {len(log) - format_rows} "
-            "submissions logged for public audit."
-        )
-        self._transition(hunt, HuntState.DONE)
+            try:
+                self._persona_source.mark_retired(hunt.persona.id)
+            except Exception as e:  # noqa: BLE001 — bookkeeping, the hunt is complete
+                self._notify(f"persona {hunt.persona.handle} not marked retired "
+                             f"({type(e).__name__}) — mark it by hand.")
+        format_rows = self._post_closed(hunt, post_until)
+        if not self._mark_done(hunt):
+            return
         self._notify(
             f"hunt #{hunt.number} done; persona {hunt.persona.handle} retired"
             + (f" · {format_rows} format reply row(s) logged apart (not in the "
                "public count)" if format_rows else ""))
+
+    def _post_closed(self, hunt: PreparedHunt, post_until) -> int | None:
+        """"Hunt #N closed" — up to three attempts, none after `post_until`.
+        Gives up with ONE calm line to the operator (Pedro, 26/10), never a
+        late post. Returns the format rows counted apart, or None."""
+        cause = "fora da janela de 5 min"
+        waits = list(self.CLOSED_POST_WAITS_S)
+        for attempt in range(len(waits) + 1):
+            if self._clock.now() > post_until:
+                break
+            try:
+                log = self._repo.submissions_for_hunt(hunt.id)
+                # A format reply is not a submission (Pedro, 09/10): its row
+                # exists so a restart knows the post was handled, and it never
+                # spent a guess. The public count keeps meaning what it meant
+                # before those rows existed; the operator hears how many there
+                # were, apart.
+                format_rows = sum(1 for s in log if s.get("outcome") == "format")
+                self._publisher.post(
+                    f"Hunt #{hunt.number} closed. {len(log) - format_rows} "
+                    "submissions logged for public audit."
+                )
+                return format_rows
+            except Exception as e:  # noqa: BLE001 — the hunt is complete; the post is not
+                if "duplicate" in str(e).lower():
+                    # a retry after a timeout whose post DID go out: X refuses
+                    # the same text twice — it is out, once
+                    return None
+                cause = type(e).__name__
+                if (attempt == len(waits) or self._clock.now()
+                        + timedelta(seconds=waits[attempt]) > post_until):
+                    break
+                self._clock.sleep(waits[attempt])
+        self._notify(f"hunt #{hunt.number}: o post 'closed' não saiu ({cause}) — "
+                     "desisti, não volto a tentar.")
+        return None
+
+    def _mark_done(self, hunt: PreparedHunt) -> bool:
+        """DONE, whatever the DB does for a moment: written up to three times.
+        `_transition` moves the state in memory before it writes, so the
+        repeats write the row directly — a second transition would be an
+        illegal DONE -> DONE. If the DB stays down the operator hears it,
+        and the next boot closes the hunt (without the post)."""
+        try:
+            self._transition(hunt, HuntState.DONE)
+            return True
+        except Exception as e:  # noqa: BLE001
+            cause = type(e).__name__
+        for wait in self.DONE_WAITS_S:
+            self._clock.sleep(wait)
+            try:
+                self._repo.set_hunt_state(hunt.id, HuntState.DONE.value)
+                hunt.state = HuntState.DONE
+                return True
+            except Exception as e:  # noqa: BLE001
+                cause = type(e).__name__
+        self._notify(
+            f"hunt #{hunt.number} está paga e anunciada, mas não consegui marcar "
+            f"DONE na base ({cause}) — fica 'retiring'; no próximo arranque fecha "
+            "sozinha, sem post.")
+        return False
 
     # ------------------------------------------------------------------
     # Crash recovery — called once at boot (main.py). Finds hunts the previous
@@ -2827,12 +2913,13 @@ class Orchestrator:
             if due is not None and due > now:
                 self._clock.sleep((due - now).total_seconds())
             self._notify(f"hunt #{hunt.number} resumed at cleanup — retiring the persona.")
-            self._retire(hunt)
+            self._retire(hunt, post_until=self._closed_post_until(due))
             return
 
         if state is HuntState.RETIRING:
             self._notify(f"hunt #{hunt.number} resumed mid-retire — finishing.")
-            self._finish_retire(hunt)
+            self._finish_retire(hunt, post_until=self._closed_post_until(
+                _as_dt(row.get("cleanup_due_at"))))
             return
 
     def _rebuild_hunt(self, row: dict, state: HuntState) -> PreparedHunt:
