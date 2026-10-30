@@ -58,6 +58,7 @@ from .hunt import (
 )
 from .selector import CurationEpoch
 from .templates import (
+    POST_REPLY_COIN_LINK,
     POST_REPLY_COLLECTION_LINK,
     POST_REPLY_FORMAT,
     POST_REPLY_ONE_TOKEN,
@@ -383,6 +384,7 @@ def claim_matcher_for(orch, hunt):
             unresolved_reply=POST_REPLY_UNRESOLVED_LINK,
             one_token_reply=POST_REPLY_ONE_TOKEN,
             collection_reply=POST_REPLY_COLLECTION_LINK,
+            coin_reply=POST_REPLY_COIN_LINK,
             bad_address_reply=post_reply_bad_address,
             other_chain_reply=POST_REPLY_OTHER_CHAIN,
             unknown_chain_reply=POST_REPLY_UNKNOWN_CHAIN,

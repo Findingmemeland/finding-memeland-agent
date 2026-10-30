@@ -244,6 +244,23 @@ def collection_link(url: str) -> bool:
     return not (_ADDR_TID_RE.search(u) or _QUERY_TID_RE.search(u))
 
 
+# A Zora COIN (Pedro, 29/10 — seen in hunt #27). zora.co/coin/<chain>:0x… is
+# an ERC-20: an address and no tokenId, so the rule above called it a
+# collection and the player heard "one piece short". A coin has no pieces.
+# Zora only, by decision: dexscreener, clanker and uniswap pages are coins too
+# but were not seen in a hunt, and basescan /token/ serves coins AND NFT
+# collections, so the link alone cannot tell which.
+_ZORA_COIN_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?zora\.co/coin/[^/?#\s]+", re.IGNORECASE)
+
+
+def coin_link(url: str) -> bool:
+    """A Zora coin page — never a token, so never a claim. Only asked about
+    links we could not read (claims.matcher): a link that already reads as
+    chain:contract:tokenId never gets here."""
+    return bool(_ZORA_COIN_RE.match((url or "").strip()))
+
+
 # --------------------------------------------------------------------------- #
 # What we could not read — and can say why (09/10, after Hunt #17)             #
 # --------------------------------------------------------------------------- #

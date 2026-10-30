@@ -393,6 +393,16 @@ POST_REPLY_COLLECTION_LINK = (
     f"{CLAIM_FORMAT_EXAMPLE}). this one cost you nothing."
 )
 
+# A Zora COIN link (Pedro, 29/10, after hunt #27): an ERC-20 has no pieces, so
+# the collection reply above taught the wrong thing. No "zora" in the text
+# (Pedro, 30/10): it is also the name of a chain we read, and no public reply
+# names one (09/10). The player knows where the link came from. No guess spent.
+POST_REPLY_COIN_LINK = (
+    "that's a coin, not an nft — the treasure is an nft. paste the piece's "
+    f"link, or reply with chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE}). "
+    "this one cost you nothing."
+)
+
 # More than one token in a reply (P0, 06/09): malformed — no guess spent,
 # never a match. Public rule: name one token per reply.
 POST_REPLY_ONE_TOKEN = (

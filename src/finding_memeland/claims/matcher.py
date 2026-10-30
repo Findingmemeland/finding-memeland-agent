@@ -14,7 +14,7 @@ marketplace link — so the loop now asks a matcher and stays shape-agnostic:
   · format_hint(text)       — a public system reply teaching the format
                               (target: a paste WITHOUT the chain, a link
                               nobody could resolve, an address that is not
-                              one, a chain we do not read) — replied, NOT
+                              one, a chain we do not read, a coin) — replied, NOT
                               counted as a guess: a format slip must not burn
                               one of the five attempts
   · format_kind(text)       — which format rule that was (our label, for the
@@ -115,6 +115,7 @@ class TargetClaimMatcher:
     def __init__(self, *, judge, resolve_link: Callable[[str], object] | None = None,
                  format_reply: str, unresolved_reply: str, one_token_reply: str,
                  collection_reply: str = "",
+                 coin_reply: str = "",
                  bad_address_reply: Callable[..., str] | None = None,
                  other_chain_reply: str = "",
                  unknown_chain_reply: str = "",
@@ -126,6 +127,9 @@ class TargetClaimMatcher:
         self._one_token_reply = one_token_reply
         # Opcional: sem ele, o caminho antigo ("não consigo ler") mantém-se.
         self._collection_reply = collection_reply
+        # Optional too (29/10, after hunt #27): without it a Zora coin keeps
+        # the collection reply it had.
+        self._coin_reply = coin_reply
         # Optional too (09/10): without them these posts go where they went —
         # a near address to the humour judge, another chain's id to whatever
         # caught it. `bad_address_reply(bad_chars, length)` builds the text.
@@ -306,7 +310,13 @@ class TargetClaimMatcher:
                 # falta — e "não consigo ler esse link" seria uma verdade
                 # inútil, a mandar a pessoa adivinhar o que já sabemos.
                 # Dois jogadores do hunt #12 pararam na página da colecção.
-                from ..target.claim import collection_link
+                from ..target.claim import coin_link, collection_link
+                # A Zora coin first (29/10, after hunt #27): to the rule below
+                # it IS a collection (an address, no tokenId), and "one piece
+                # short" told the player to look for a piece a coin never has.
+                if (self._coin_reply
+                        and all(coin_link(u) for u in ext.unresolved_links)):
+                    return ("coin_link", self._coin_reply)
                 if (self._collection_reply
                         and all(collection_link(u) for u in ext.unresolved_links)):
                     return ("collection_link", self._collection_reply)
