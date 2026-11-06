@@ -91,6 +91,7 @@ from .hunt import (
     TargetHuntPreparer,
 )
 from .integration import ArtworkUnusable, TargetPorts
+from .name_language import AnthropicNameLanguage
 from .prepare import (
     PREPARED_TTL_HOURS, SOURCES, Larder, LarderStore, Prepared,
     PrepareRefused, PreparedStore, RarityUnmeasured, TargetFinder,
@@ -352,10 +353,12 @@ class TargetWiring:
         self.prepared_store.save(prepared)
         note = getattr(prepared, "rarity_note", "")
         creators = getattr(prepared, "creator_note", "")
+        language = getattr(prepared, "language_note", "")
         return (f"prepare: alvo selado à {prepared.attempts}.ª tentativa · "
                 f"despensa {larder.size()} · válido {PREPARED_TTL_HOURS}h"
                 + (f" · ordem por raridade: {note}" if note else "")
-                + (f" · criador: {creators}" if creators else ""))
+                + (f" · criador: {creators}" if creators else "")
+                + (f" · pista de língua: {language}" if language else ""))
 
     def larder_size(self) -> int:
         if self.larder_store is None:
@@ -1433,6 +1436,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         now_iso=_now_iso, rng=rng, notify=say,
         # the same creator, a few hunts apart (06/11): owner() on the keyed RPCs
         owner_of=owner_reader(rpcs),
+        # the language of the name (06/11): one call, the name only
+        name_language=AnthropicNameLanguage(anthropic, s.target_judge_model),
         # a surface without ranked results (Rarible) measures nothing:
         # the order of before, and the report says so
         word_reach=word_reach_for(market))

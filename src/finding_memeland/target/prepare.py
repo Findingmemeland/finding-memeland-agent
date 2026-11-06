@@ -77,6 +77,7 @@ from typing import Callable, Sequence
 from ..content.name_words import content_words
 from .commitment import compute_commitment_v2, generate_salt
 from .harvest import HARVEST_CHAINS
+from .name_language import NameLanguage, language_note
 from .refresh import (
     arweave_ref,
     content_id,
@@ -1845,6 +1846,10 @@ class Prepared:
     # THE SAME CREATOR (06/11): what the draw avoided, for the /prepare
     # report only — counts, never sealed with the preparation
     creator_note: str = ""
+    # THE LANGUAGE OF THE NAME (06/11): a NameLanguage — sealed, the clues
+    # need it — or None (not measured); and the report's words for it
+    name_language: NameLanguage | None = None
+    language_note: str = ""
 
     def id(self) -> str:
         return self.target.id()
@@ -1884,6 +1889,9 @@ class PreparedStore:
             # optional since 28/10, under the SAME version: a preparation
             # written before has no such keys and loads with the old order
             "rare_last": list(p.rare_last or ()), "rarity_note": p.rarity_note,
+            # optional since 06/11, under the same version, like the order
+            **({"name_language": p.name_language.to_doc()}
+               if p.name_language is not None else {}),
             "target": {"chain": t.chain, "contract": t.contract,
                        "tokenId": t.token_id, "name": t.name,
                        "name_onchain": t.name_onchain,
@@ -1921,7 +1929,8 @@ class PreparedStore:
                 salt=doc.get("salt", ""), commitment=doc.get("commitment", ""),
                 prepared_at=doc.get("prepared_at", ""),
                 rare_last=rare_last_of(doc.get("rare_last")),
-                rarity_note=str(doc.get("rarity_note") or ""))
+                rarity_note=str(doc.get("rarity_note") or ""),
+                name_language=NameLanguage.from_doc(doc.get("name_language")))
         except Exception as e:  # noqa: BLE001 — fail closed, no contents
             raise LarderIntegrityError(
                 f"prepared hunt unreadable ({type(e).__name__}) — wrong key "
@@ -2120,7 +2129,8 @@ class TargetPreparer:
                  rng: random.Random | None = None,
                  notify: Callable[[str], None] | None = None,
                  word_reach: Callable | None = None,
-                 owner_of: Callable[[str, str], str | None] | None = None):
+                 owner_of: Callable[[str, str], str | None] | None = None,
+                 name_language: Callable[[str], NameLanguage] | None = None):
         self._finder = finder
         self._fetch_image = fetch_image
         self._describe = describe
@@ -2139,6 +2149,25 @@ class TargetPreparer:
         # is ours to have failed (adapters.owner_reader). None: no RPC — the
         # draw is the one of before (06/11)
         self._owner_of = owner_of
+        # name_language(name) -> NameLanguage; raises when it could not tell
+        # (name_language.AnthropicNameLanguage). None: the hint at the reveal
+        # becomes a condition (06/11)
+        self._name_language = name_language
+
+    def _language_of(self, target: Target) -> tuple[NameLanguage | None, str]:
+        """The language of the name — ONE call, the name only — and the
+        report's words for it. Never raises: unmeasured is never a reason
+        to refuse a preparation. The cause is a type, never a message (an
+        SDK error can echo the request — the name)."""
+        if self._name_language is None:
+            return None, language_note(None, "sem modelo")
+        try:
+            lang = self._name_language(target.name)
+        except Exception as e:  # noqa: BLE001
+            return None, language_note(None, getattr(e, "kind", "") or type(e).__name__)
+        if not isinstance(lang, NameLanguage):
+            return None, language_note(None, "resposta-malformada")
+        return lang, language_note(lang)
 
     def _recent_creators(self, recent: Sequence[str], off: str) -> RecentCreators:
         """The creators the draw avoids — or why not, in the report's words."""
@@ -2437,6 +2466,9 @@ class TargetPreparer:
                                  "outro")
                 larder.consume(cand.id())
                 continue
+            # THE LANGUAGE OF THE NAME (Pedro, 06/11, after #31): measured
+            # once Clue 1 is in hand, so a refused candidate costs no call
+            name_language, lang_note = self._language_of(target)
             # The commitment is PUBLISHED IN CLUE 1, so it is born here, with
             # the clue — not at launch. Same v2 formula as ever: nothing
             # about the protocol changes because the moment moved.
@@ -2451,7 +2483,8 @@ class TargetPreparer:
                             attempts=attempt, salt=salt, commitment=commitment,
                             prepared_at=self._now(), rare_last=rare_last,
                             rarity_note=rarity_note,
-                            creator_note=creators.render(sealed=_contract_key(cand.id()))
+                            creator_note=creators.render(sealed=_contract_key(cand.id())),
+                            name_language=name_language, language_note=lang_note,
                             ), larder
 
         # The tally is the diagnosis, so it has to name the RIGHT cause:

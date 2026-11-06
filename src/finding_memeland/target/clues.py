@@ -80,6 +80,7 @@ from ..content.relic_clues import (
     spent_angles,
     target_ramp_plan,
 )
+from .name_language import language_hint_errors, language_rule_for
 from .search_guard import ClueSearchGuard
 from .selector import ARTIST_KEYS, Target
 
@@ -580,7 +581,8 @@ def parse_target_clue(text: str):
                      angle=(str(data["angle"]).strip() if data.get("angle") else None),
                      image_aspect=(str(data["image_aspect"]).strip().lower()
                                    if data.get("image_aspect") else None),
-                     claims=claims if isinstance(claims, list) else [])
+                     claims=claims if isinstance(claims, list) else [],
+                     language_hint=_json_text(data.get("language_hint")) or None)
 
 
 # --------------------------------------------------------------------------- #
@@ -610,11 +612,14 @@ class TargetClueContext(RelicClueContext):
 
     target_id: str = ""
     name_onchain: str = ""
+    # THE LANGUAGE OF THE NAME, measured at /prepare (06/11): a NameLanguage,
+    # or None — not measured (a preparation from before, or the call failed)
+    name_language: object = None
 
     @classmethod
     def from_target(cls, target: Target, *, image_description: str,
                     metadata: dict | None = None,
-                    rare_last=None) -> "TargetClueContext":
+                    rare_last=None, name_language=None) -> "TargetClueContext":
         """`image_description` comes from the vision step (see
         describe_image_batched); `metadata` (the full token metadata, if the
         caller has it) contributes the artist/creator name to the never-write
@@ -642,6 +647,7 @@ class TargetClueContext(RelicClueContext):
             angle_offset=sum(ord(c) for c in target.name) % len(PUZZLE_ANGLES),
             target_id=target.id(),
             name_onchain=target.name_onchain,
+            name_language=name_language,
         )
 
 
@@ -890,11 +896,13 @@ is rejected. If a structural idea cannot be expressed as one of these types \
 (compound, portmanteau, hidden word, prefix, suffix, anagram, rhyme, initials), \
 you may NOT assert it — do not guess how a word is built. An empty list means \
 your clue says nothing about the letters, which is the normal case.
+- "language_hint": ONLY when the message asks for a hint about the LANGUAGE of \
+the name — the exact phrase of your clue that carries it. null otherwise.
 
 Respond with ONLY a JSON object — no reasoning before it (verify your claims \
 silently; text outside the JSON is discarded and wastes your budget): \
 {{"clue": "...", "taunt": "...", "angle": "<label or null>", "image_aspect": \
-"<aspect or null>", "claims": [...]}}"""
+"<aspect or null>", "claims": [...], "language_hint": "<phrase or null>"}}"""
 
 
 _RELIC_WORD_RE = re.compile(r"\b(the\s+)?relic('s)?\b", re.IGNORECASE)
@@ -998,6 +1006,8 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
             if clue_index <= puzzle_clues_of(ctx) and ctx.enumerable_words else ""
         )
         + f"FACET for this clue: {vector} — {_treasure_wording(relic_guidance_for(vector, ctx, clue_index))}\n"
+        # the first clue of the reveal points at a name not in English (06/11)
+        + language_rule_for(ctx, clue_index)
         + f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )
@@ -1320,6 +1330,11 @@ class TargetClueEngine(RelicClueEngine):
             logging.getLogger(__name__).warning(
                 "clue #%s: declaration check rejected (%d)", clue_index, len(decl))
             return self._reject("declaration", ["DECLARE-AND-VERIFY failed: " + " | ".join(decl)])
+        # 4b. the language of the name (Pedro, 06/11): on the first clue of
+        #     the reveal, the hint is in the clue and names nothing too plainly
+        language = language_hint_errors(draft, persona, clue_index)
+        if language:
+            return self._reject("language", language)
         # 5. the consistency judge — clue + answer, must be TRUE (every phase)
         if self._truth_judge is not None:
             facet, _ = relic_slot_for(clue_index, persona)

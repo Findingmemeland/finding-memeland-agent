@@ -278,9 +278,13 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
     # the order Clue 1 was written in (28/10, the rarity order); a
     # preparation sealed before that has none and runs in the order of before
     rare_last = tuple(getattr(prepared, "rare_last", ()) or ())
+    # the language of the name (06/11), measured at /prepare; None = not
+    # measured, and the first clue of the reveal asks it as a condition
+    name_language = getattr(prepared, "name_language", None)
     ctx = TargetClueContext.from_target(target,
                                         image_description=image_description,
-                                        rare_last=rare_last or None)
+                                        rare_last=rare_last or None,
+                                        name_language=name_language)
 
     number = orch._next_number()
     prize_fmml = int(prize_fmml)
@@ -314,7 +318,10 @@ def prepare_target_hunt(orch, prize_fmml: int, min_balance_fmml: int, *,
         target_ctx_sealed=ports.cipher._cipher.encrypt(  # noqa: SLF001 — same key
             json.dumps({"image_description": image_description,
                         # sealed with the art: a restart rebuilds the same plan
-                        **({"rare_last": list(rare_last)} if rare_last else {})},
+                        **({"rare_last": list(rare_last)} if rare_last else {}),
+                        # …and the same hint about the language (06/11)
+                        **({"name_language": name_language.to_doc()}
+                           if name_language is not None else {})},
                        ensure_ascii=False)),
         target_epoch=ports.epoch.epoch_id,
         **extra,
@@ -856,9 +863,11 @@ def resume_target_hunt(orch, row: dict, hunt):
     payloads. A row that cannot be unsealed is a hunt we do not serve."""
     ports: TargetPorts = orch._target
     sealed = ports.cipher.unseal(str(row["target_sealed"]))
+    from .name_language import NameLanguage
     from .prepare import rare_last_of
     image_description = ""
     rare_last: tuple = ()
+    name_language = None
     blob = row.get("target_ctx_sealed")
     if blob:
         try:
@@ -866,6 +875,8 @@ def resume_target_hunt(orch, row: dict, hunt):
             image_description = str(doc.get("image_description") or "")
             # absent on a hunt launched before 28/10: the order of before
             rare_last = rare_last_of(doc.get("rare_last"))
+            # absent before 06/11: not measured — the hint becomes a condition
+            name_language = NameLanguage.from_doc(doc.get("name_language"))
         except Exception:  # noqa: BLE001 — clues degrade (no art pieces), hunt survives
             # the PUBLIC number, like every other notice (09/10) — this one
             # used the DB id, the same slip the /status headline had
@@ -874,7 +885,8 @@ def resume_target_hunt(orch, row: dict, hunt):
     hunt.target = sealed
     hunt.ctx = TargetClueContext.from_target(sealed.target,
                                             image_description=image_description,
-                                            rare_last=rare_last or None)
+                                            rare_last=rare_last or None,
+                                            name_language=name_language)
     hunt.persona = ReadyPersona(
         id=f"target-{hunt.number}", handle=target_label(hunt.number),
         x_user_id="", access_token="", access_secret="",

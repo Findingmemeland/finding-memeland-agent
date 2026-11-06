@@ -103,6 +103,8 @@ class ClueDraft:
     angle: str | None = None            # declared angle label ("SEMANTIC FIELD")
     image_aspect: str | None = None     # declared aspect of an art piece
     claims: list = field(default_factory=list)   # structural claims about the name
+    # the phrase that points at the NAME'S LANGUAGE (target engine, 06/11)
+    language_hint: str | None = None
 
 
 def obliqueness_for(clue_index: int, persona: "PersonaContext | None" = None) -> float:
