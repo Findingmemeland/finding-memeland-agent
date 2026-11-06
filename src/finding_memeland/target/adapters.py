@@ -352,6 +352,49 @@ def creator_credit(rpcs: dict[str, ChainRpc], chain: str, contract: str,
 
 
 # --------------------------------------------------------------------------- #
+# The contract's owner (06/11): who the larder calls the CREATOR              #
+# --------------------------------------------------------------------------- #
+#
+# Hunts #29 and #32 came from two different contracts with the same owner():
+# one series, one creator (measured 05/11 on the 22 revealed pieces — the
+# only pair of different contracts sharing an owner). The metadata's artist
+# field could not have told: empty in both, and in 10 of the 22.
+
+SEL_OWNER = "0x8da5cb5b"              # owner() — Ownable
+
+
+def contract_owner(rpc: ChainRpc, contract: str) -> str | None:
+    """owner() → the address, lowercase. None when the CONTRACT answers that
+    there is none: a revert (no such function), an empty answer, the zero
+    address. Raises ChainUnavailable when the read is OURS to have failed —
+    transport, or a node error that is not a revert — so the caller counts
+    the two apart (R8)."""
+    try:
+        data = rpc.eth_call(contract, SEL_OWNER)
+    except ChainUnavailable:
+        raise
+    except RpcError as e:
+        if not e.revert:
+            raise _rpc_down(f"owner(): node error {e.code}", f"erro-rpc:{e.code}") from e
+        return None
+    except Exception:  # noqa: BLE001 — a revert, by the ChainRpc contract
+        return None
+    addr = address_from_word(data)
+    return addr.lower() if addr else None
+
+
+def owner_reader(rpcs: dict[str, ChainRpc]) -> Callable[[str, str], str | None]:
+    """owner_of(chain, contract) for the larder's draw (prepare.RecentCreators).
+    A chain without an RPC is OUR gap — ChainUnavailable, never a default."""
+    def owner_of(chain: str, contract: str) -> str | None:
+        rpc = rpcs.get(chain)
+        if rpc is None:
+            raise _rpc_down(f"owner(): no rpc for {chain}", "sem-rpc")
+        return contract_owner(rpc, contract)
+    return owner_of
+
+
+# --------------------------------------------------------------------------- #
 # Mint fetcher + code bytes for EraDiscovery                                   #
 # --------------------------------------------------------------------------- #
 

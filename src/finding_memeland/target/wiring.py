@@ -51,6 +51,7 @@ from .adapters import (
     gateway_url,
     inline_artwork,
     mint_fetcher,
+    owner_reader,
     probe_inline_image,
     rasterize_svg,
     shrink_for_vision,
@@ -350,9 +351,11 @@ class TargetWiring:
         self.larder_store.save(larder)          # the target is spent
         self.prepared_store.save(prepared)
         note = getattr(prepared, "rarity_note", "")
+        creators = getattr(prepared, "creator_note", "")
         return (f"prepare: alvo selado à {prepared.attempts}.ª tentativa · "
                 f"despensa {larder.size()} · válido {PREPARED_TTL_HOURS}h"
-                + (f" · ordem por raridade: {note}" if note else ""))
+                + (f" · ordem por raridade: {note}" if note else "")
+                + (f" · criador: {creators}" if creators else ""))
 
     def larder_size(self) -> int:
         if self.larder_store is None:
@@ -1428,6 +1431,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         epoch_id=s.target_epoch_id, key=s.target_pool_key,
         used_hmacs=lambda: repo.used_target_hmacs(),
         now_iso=_now_iso, rng=rng, notify=say,
+        # the same creator, a few hunts apart (06/11): owner() on the keyed RPCs
+        owner_of=owner_reader(rpcs),
         # a surface without ranked results (Rarible) measures nothing:
         # the order of before, and the report says so
         word_reach=word_reach_for(market))

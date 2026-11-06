@@ -268,8 +268,24 @@ class Larder:
         parts = self.used[-1].split(":")
         return f"{parts[0]}:{parts[1].lower()}" if len(parts) == 3 else ""
 
+    def last_hunts(self, n: int, *, ran: Callable[[str], bool]) -> list[str]:
+        """The ids of the last `n` targets that RAN a hunt, newest first.
+
+        `used` is not that list on its own: the /prepare consumes every
+        candidate it throws away, and a preparation replaced before /launch
+        stays there too. `ran(id)` — the hunt rows' fingerprints — keeps
+        only what went out (06/11)."""
+        out: list[str] = []
+        for cid in reversed(self.used):
+            if len(out) >= n:
+                break
+            if ran(cid):
+                out.append(cid)
+        return out
+
     def take(self, rng: random.Random, *, avoid_contract: str = "",
-             chain: str | None = None) -> Candidate | None:
+             chain: str | None = None,
+             avoid_creator: Callable[[str], bool] | None = None) -> Candidate | None:
         """Um candidato ao calhas — evitando o contrato do hunt anterior.
 
         Os hunts #12 e #13 saíram do MESMO contrato e havia jogadores a
@@ -293,7 +309,14 @@ class Larder:
         UMA CADEIA SÓ, quando pedida (22/10, `/prepare base`): o balde passa
         a ser só essa cadeia e tudo o resto acontece lá dentro — uniforme por
         contrato, o contrato anterior evitado e, se for o único dessa cadeia,
-        repetido. Nunca se muda de cadeia: sem candidatos dela, None."""
+        repetido. Nunca se muda de cadeia: sem candidatos dela, None.
+
+        O MESMO CRIADOR NAS ÚLTIMAS HUNTS (Pedro, 06/11, depois da #29 e da
+        #32: contratos diferentes, o mesmo criador): `avoid_creator(chave)`
+        diz se um contrato ("cadeia:contrato") é de um criador recente. O
+        sorteio continua uniforme por contrato entre os que sobram: tira-se
+        um ao calhas, e um contrato recusado sai e tira-se outro. Se todos
+        forem recusados, a regra cai e vale a de antes."""
         pool = (self.candidates if chain is None
                 else [c for c in self.candidates if c.chain == chain])
         if not pool:
@@ -307,6 +330,14 @@ class Larder:
         for c in pool:
             by_contract.setdefault(f"{c.chain}:{c.contract.lower()}", []).append(c)
         keys = sorted(by_contract)          # fixed order: a seed reproduces
+        if avoid_creator is not None:
+            left = list(keys)
+            while left:
+                key = left.pop(rng.randrange(len(left)))
+                if not avoid_creator(key):
+                    group = by_contract[key]
+                    return group[rng.randrange(len(group))]
+            # every contract left is a recent creator's: the hunt has to run
         group = by_contract[keys[rng.randrange(len(keys))]]
         return group[rng.randrange(len(group))]
 
@@ -1811,6 +1842,9 @@ class Prepared:
     # neither and keeps the order of before.
     rare_last: tuple = ()
     rarity_note: str = ""
+    # THE SAME CREATOR (06/11): what the draw avoided, for the /prepare
+    # report only — counts, never sealed with the preparation
+    creator_note: str = ""
 
     def id(self) -> str:
         return self.target.id()
@@ -1959,6 +1993,115 @@ def _draft_from(stored):
     return stored          # already a draft object
 
 
+# --------------------------------------------------------------------------- #
+# The same creator, a few hunts apart (Pedro, 06/11)                           #
+# --------------------------------------------------------------------------- #
+
+# How many hunts back a creator is avoided. #29 → #32 was three hunts apart;
+# at the pace of 29/10–05/11 (#27 → #32), five hunts is about a week.
+RECENT_CREATOR_HUNTS = 5
+
+
+def _contract_key(cid: str) -> str:
+    """"chain:contract" (lowercase) of a "chain:contract:tokenId" id."""
+    parts = cid.split(":")
+    return f"{parts[0]}:{parts[1].lower()}" if len(parts) == 3 else ""
+
+
+class RecentCreators:
+    """Who made the last hunts' targets, and whether a contract is theirs.
+
+    THE CREATOR IS THE CONTRACT'S owner() (decided 06/11; measured 05/11 on
+    the 22 revealed pieces: it answers in 21, and it is what joins #29 and
+    #32 — two contracts, one owner — where the metadata's artist field is
+    empty in both). No owner (a revert, the zero address) or a read of ours
+    that failed: the contract stands for itself — so a recent contract is
+    always avoided, and one we could not read never is. Owners are compared
+    as addresses, whatever the chain. Each contract is read once.
+
+    THE HUNT HAS TO RUN: this only ever says "not this one" to the draw; the
+    draw keeps the last word (`Larder.take`). COUNTS ONLY in `render()` —
+    never an address, a contract or an id."""
+
+    def __init__(self, *, recent: Sequence[str] = (),
+                 owner_of: Callable[[str, str], str | None] | None = None,
+                 off: str = ""):
+        self.off = off
+        self._owner_of = owner_of
+        self._read: dict[str, tuple[str | None, bool]] = {}   # key → (owner, ours?)
+        self._keys: set[str] = set()      # recent contracts AND their owners
+        self.hunts = self.creators = 0
+        self.read = self.no_owner = self.ours = 0
+        self.refused: set[str] = set()    # contracts the draw was told to skip
+        self.draw_ours = 0                # candidates' owners we could not read
+        if off:
+            return
+        creators = set()
+        for cid in recent:
+            key = _contract_key(cid)
+            if not key:
+                continue
+            self.hunts += 1
+            self._keys.add(key)
+            owner, ours = self._owner(key)
+            if owner:
+                self.read += 1
+                self._keys.add(owner)
+            elif ours:
+                self.ours += 1
+            else:
+                self.no_owner += 1
+            creators.add(owner or key)
+        self.creators = len(creators)
+
+    def _owner(self, key: str) -> tuple[str | None, bool]:
+        if key not in self._read:
+            chain, contract = key.split(":", 1)
+            try:
+                owner = str(self._owner_of(chain, contract) or "").lower() or None
+                self._read[key] = (owner, False)
+            except Exception:  # noqa: BLE001 — ours: the contract stands for itself
+                self._read[key] = (None, True)
+        return self._read[key]
+
+    def __call__(self, key: str) -> bool:
+        """Is this contract ("chain:contract") a recent creator's?"""
+        if self.off:
+            return False
+        if key in self._keys:
+            hit = True
+        else:
+            fresh = key not in self._read
+            owner, ours = self._owner(key)
+            if ours and fresh:
+                self.draw_ours += 1
+            hit = owner is not None and owner in self._keys
+        if hit:
+            self.refused.add(key)
+        return hit
+
+    def render(self, *, sealed: str = "") -> str:
+        """The report's words. `sealed` = the sealed target's contract key:
+        a refused one means every contract left was a recent creator's."""
+        if self.off:
+            return f"não medido ({self.off})"
+        how = [f"owner lido em {self.read} de {self.hunts}"]
+        if self.no_owner:
+            how.append(f"sem owner {self.no_owner}")
+        if self.ours:
+            how.append(f"RPC NOSSO {self.ours}")
+        hunts = "última hunt" if self.hunts == 1 else f"últimas {self.hunts} hunts"
+        parts = [f"{hunts}, {self.creators} criador(es) ({', '.join(how)})",
+                 f"{len(self.refused)} contrato(s) recusado(s) no sorteio"]
+        if self.draw_ours:
+            parts.append(f"{self.draw_ours} contrato(s) sem owner lido (RPC NOSSO) "
+                         "— contaram por si")
+        if sealed and sealed in self.refused:
+            parts.append("todos os contratos que sobravam eram de criadores "
+                         "recentes — valeu a regra de antes")
+        return " · ".join(parts)
+
+
 class TargetPreparer:
     """Extra ports on top of the finder's:
 
@@ -1976,7 +2119,8 @@ class TargetPreparer:
                  now_iso: Callable[[], str] | None = None,
                  rng: random.Random | None = None,
                  notify: Callable[[str], None] | None = None,
-                 word_reach: Callable | None = None):
+                 word_reach: Callable | None = None,
+                 owner_of: Callable[[str, str], str | None] | None = None):
         self._finder = finder
         self._fetch_image = fetch_image
         self._describe = describe
@@ -1991,6 +2135,20 @@ class TargetPreparer:
         # word_reach(word, target) -> (position WITHOUT filter | None,
         # position WITH the chain | None); raises RarityUnmeasured (28/10)
         self._word_reach = word_reach
+        # owner_of(chain, contract) -> address | None; raises when the read
+        # is ours to have failed (adapters.owner_reader). None: no RPC — the
+        # draw is the one of before (06/11)
+        self._owner_of = owner_of
+
+    def _recent_creators(self, recent: Sequence[str], off: str) -> RecentCreators:
+        """The creators the draw avoids — or why not, in the report's words."""
+        if self._owner_of is None:
+            return RecentCreators(off="sem RPC")
+        if off:
+            return RecentCreators(off=off)
+        if not recent:
+            return RecentCreators(off="nenhuma hunt no histórico da despensa")
+        return RecentCreators(recent=recent, owner_of=self._owner_of)
 
     def _rarity_order(self, target: Target) -> tuple[tuple, str]:
         """Which words of the name reach the target ALONE in a search, and
@@ -2047,15 +2205,23 @@ class TargetPreparer:
             self._chain_or_refuse(larder, chain)    # before a single read
         self._finder.load_sizes()
 
+        # The hunt rows' fingerprints, read ONCE: what is already spent, and
+        # which of the larder's used ids actually ran a hunt (06/11).
+        ran: set[str] | None = None
+        ran_off = "sem chave"
+        if self._key:
+            try:
+                ran = set(self._used_hmacs())
+            except Exception as e:  # noqa: BLE001 — the DB is not a reason to stop
+                ran_off = f"base de dados: {type(e).__name__}"
+        # the last hunts, BEFORE anything below adds to `used`
+        recent = ([] if ran is None else larder.last_hunts(
+            RECENT_CREATOR_HUNTS, ran=lambda cid: used_hmac(cid, self._key) in ran))
         # A restored backup can resurrect a target this project already
         # revealed. The hunt rows are the authority, not the blob.
         if self._key:
-            try:
-                spent = excluded_ids(larder.candidates,
-                                     used_hmacs=list(self._used_hmacs()),
-                                     key=self._key)
-            except Exception:  # noqa: BLE001 — the DB is not a reason to stop
-                spent = set()
+            spent = (excluded_ids(larder.candidates, used_hmacs=list(ran),
+                                  key=self._key) if ran is not None else set())
             for cid in spent:
                 larder.consume(cid)
             if spent:
@@ -2115,8 +2281,13 @@ class TargetPreparer:
         # descarte e isto volta a apontar ao sítio errado. Resolver a sério
         # exige distinguir as duas coisas no histórico.
         avoid = larder.last_contract()
+        # THE SAME CREATOR, A FEW HUNTS APART (Pedro, 06/11): #29 and #32
+        # came from two contracts with one owner, and the rule above only
+        # sees the contract. Read once, here, for the same reason as `avoid`.
+        creators = self._recent_creators(recent, "" if ran is not None else ran_off)
         for attempt in range(1, self._max_attempts + 1):
-            cand = larder.take(self._rng, avoid_contract=avoid, chain=chain)
+            cand = larder.take(self._rng, avoid_contract=avoid, chain=chain,
+                               avoid_creator=None if creators.off else creators)
             if cand is None:
                 if chain is not None:
                     raise PrepareRefused(
@@ -2279,7 +2450,9 @@ class TargetPreparer:
                             image_description=description,
                             attempts=attempt, salt=salt, commitment=commitment,
                             prepared_at=self._now(), rare_last=rare_last,
-                            rarity_note=rarity_note), larder
+                            rarity_note=rarity_note,
+                            creator_note=creators.render(sealed=_contract_key(cand.id()))
+                            ), larder
 
         # The tally is the diagnosis, so it has to name the RIGHT cause:
         # "sem-pista" (the guards refuse every draft for this target) and
