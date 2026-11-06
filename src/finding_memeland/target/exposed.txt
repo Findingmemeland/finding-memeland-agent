@@ -1,7 +1,7 @@
 # Finding Memeland — exposed tokens (see exposed.py). One truncated
 # SHA-256 per contract:tokenId ever written in a versioned file of this
 # repository. Written by scripts/build_exposed_list.py — never by hand.
-# entries: 2377
+# entries: 2378
 00041e281d7d4b64
 004be62e0ead6040
 00ab784152e19c91
@@ -2331,6 +2331,7 @@ fa89a54514726350
 faa101f6788a4dd7
 faa44a3d97baa5fa
 faa7f919fd416c05
+fab6d4f768831138
 fae61f02e0faf498
 fb006c8ba8b6df34
 fb0115aa6172d286

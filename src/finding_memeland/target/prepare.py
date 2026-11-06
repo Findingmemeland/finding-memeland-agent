@@ -76,6 +76,7 @@ from typing import Callable, Sequence
 
 from ..content.name_words import content_words
 from .commitment import compute_commitment_v2, generate_salt
+from .defi import DefiDetector
 from .harvest import HARVEST_CHAINS
 from .name_language import NameLanguage, language_note
 from .refresh import (
@@ -286,7 +287,8 @@ class Larder:
 
     def take(self, rng: random.Random, *, avoid_contract: str = "",
              chain: str | None = None,
-             avoid_creator: Callable[[str], bool] | None = None) -> Candidate | None:
+             avoid_creator: Callable[[str], bool] | None = None,
+             exclude: Callable[[Candidate], bool] | None = None) -> Candidate | None:
         """Um candidato ao calhas — evitando o contrato do hunt anterior.
 
         Os hunts #12 e #13 saíram do MESMO contrato e havia jogadores a
@@ -317,9 +319,15 @@ class Larder:
         diz se um contrato ("cadeia:contrato") é de um criador recente. O
         sorteio continua uniforme por contrato entre os que sobram: tira-se
         um ao calhas, e um contrato recusado sai e tira-se outro. Se todos
-        forem recusados, a regra cai e vale a de antes."""
+        forem recusados, a regra cai e vale a de antes.
+
+        `exclude(candidato)` (depois da #34): o que nunca sai, por regra que
+        não é de variedade — as posições DeFi. Fica na despensa e não entra
+        no balde; sem nada fora dele, None."""
         pool = (self.candidates if chain is None
                 else [c for c in self.candidates if c.chain == chain])
+        if exclude is not None:
+            pool = [c for c in pool if not exclude(c)]
         if not pool:
             return None
         if avoid_contract:
@@ -812,6 +820,10 @@ class Tally:
     long_fits: int = 0
     no_identity: int = 0     # the tokenURI has no content id to seal (09/10)
     exposed: int = 0         # named in a public file of the repository (09/10)
+    # a DeFi position — LP, lock, stream (after hunt #34): a receipt, not a
+    # collectible; by protocol or by the signal that caught it (defi.py)
+    defi: int = 0
+    defi_kinds: dict = field(default_factory=dict)
     image: int = 0           # the gateway ANSWERED without bytes (dead pin)
     too_big: int = 0         # bigger than vision can use (171 MB, measured)
     owner: int = 0           # owner is a contract (escrow, vault, fraction)
@@ -867,6 +879,11 @@ class Tally:
         self.unavailable += 1
         self.unavailable_kinds[kind] = self.unavailable_kinds.get(kind, 0) + 1
 
+    def note_defi(self, label: str) -> None:
+        """A DeFi position refused, by protocol or signal (defi.py)."""
+        self.defi += 1
+        self.defi_kinds[label] = self.defi_kinds.get(label, 0) + 1
+
     def notes(self) -> str:
         """What the report says that is NOT a cause — measurements about
         candidates that went on. '' when there is nothing to say."""
@@ -887,7 +904,7 @@ class Tally:
             ("metadata", self.metadata), ("nome", self.name),
             ("nome-longo", self.long_name),
             ("sem-identidade", self.no_identity),
-            ("exposto", self.exposed),
+            ("exposto", self.exposed), ("posição-DeFi", self.defi),
             ("imagem", self.image), ("tamanho", self.too_big),
             ("dono", self.owner), ("único", self.unique),
             ("repetido", self.duplicate), ("visão-recusou", self.blind),
@@ -897,7 +914,8 @@ class Tally:
             kinds = ", ".join(f"{k} {v}" for k, v in sorted(self.image_kinds.items()))
             causes = causes.replace(f"imagem {self.image}",
                                     f"imagem {self.image} ({kinds})", 1)
-        for label, n, split in (("nome-longo", self.long_name, self.long_name_kinds),
+        for label, n, split in (("posição-DeFi", self.defi, self.defi_kinds),
+                                ("nome-longo", self.long_name, self.long_name_kinds),
                                 ("único", self.unique, self.unique_kinds),
                                 ("dono", self.owner, self.owner_kinds),
                                 ("indisponível-NOSSO", self.unavailable,
@@ -1116,9 +1134,13 @@ class TargetFinder:
                  retry_gap_s: float = SECOND_PASS_GAP_S,
                  third_gap_s: float = THIRD_PASS_GAP_S,
                  sleep: Callable[[float], None] | None = None,
-                 clock: Callable[[], float] | None = None):
+                 clock: Callable[[], float] | None = None,
+                 defi: DefiDetector | None = None):
         if not sources:
             raise ValueError("TargetFinder needs at least one source")
+        # DeFi POSITIONS NEVER GO IN (after hunt #34, defi.py): LP positions,
+        # locks, streams. None = no detector (tests and simulations).
+        self._defi = defi
         # The second pass of the uniqueness search (10/10): how long after a
         # failure of ours it may be asked again, and the clock that says so.
         self._retry_gap = max(0.0, float(retry_gap_s))
@@ -1236,6 +1258,14 @@ class TargetFinder:
                 raise ReadUnavailable("lista-de-expostos") from None
             tally.note_ours("lista-de-expostos")
             return None
+        # A KNOWN DeFi CONTRACT costs nothing to refuse either (after hunt
+        # #34). Not under `strict`: /prepare keeps them out of the draw
+        # itself, and never drops one before the operator confirms.
+        defi = self._defi if not strict else None
+        label = defi.offline(src.chain, src.contract) if defi else None
+        if label:
+            tally.note_defi(label)
+            return None
         try:
             read = (known if known is not None
                     else self._read_token(src.chain, src.contract, tid))
@@ -1259,6 +1289,10 @@ class TargetFinder:
             tally.metadata += 1
             return None
         meta = read.metadata
+        label = defi.offline(src.chain, src.contract, meta) if defi else None
+        if label:                   # the position's name or description
+            tally.note_defi(label)
+            return None
         image = str(meta.get("image") or "")
         if not self._accepts(image):
             kind = uri_kind(image)
@@ -1290,6 +1324,12 @@ class TargetFinder:
             # checks, so every other refusal keeps its own cause: this counts
             # only a token that would otherwise have gone on.
             tally.no_identity += 1
+            return None
+        # the collection's name / symbol: one RPC read per contract, so only
+        # for what every free check let through
+        label = defi.collection(src.chain, src.contract) if defi else None
+        if label:
+            tally.note_defi(label)
             return None
         return read, base
 
@@ -2111,6 +2151,16 @@ class RecentCreators:
         return " · ".join(parts)
 
 
+def _defi_count(labels: Sequence[str]) -> str:
+    """'N posição(ões) DeFi (uniswap-v3 2, …)' — one label per candidate,
+    counted by label; never an id."""
+    by: dict[str, int] = {}
+    for label in labels:
+        by[label] = by.get(label, 0) + 1
+    kinds = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
+    return f"{len(labels)} posição(ões) DeFi ({kinds})"
+
+
 class TargetPreparer:
     """Extra ports on top of the finder's:
 
@@ -2130,7 +2180,8 @@ class TargetPreparer:
                  notify: Callable[[str], None] | None = None,
                  word_reach: Callable | None = None,
                  owner_of: Callable[[str, str], str | None] | None = None,
-                 name_language: Callable[[str], NameLanguage] | None = None):
+                 name_language: Callable[[str], NameLanguage] | None = None,
+                 defi: DefiDetector | None = None):
         self._finder = finder
         self._fetch_image = fetch_image
         self._describe = describe
@@ -2153,6 +2204,9 @@ class TargetPreparer:
         # (name_language.AnthropicNameLanguage). None: the hint at the reveal
         # becomes a condition (06/11)
         self._name_language = name_language
+        # DeFi POSITIONS ARE NEVER DRAWN (after hunt #34): kept in the larder,
+        # out of the draw, until the operator confirms /purge_defi
+        self._defi = defi
 
     def _language_of(self, target: Target) -> tuple[NameLanguage | None, str]:
         """The language of the name — ONE call, the name only — and the
@@ -2314,18 +2368,49 @@ class TargetPreparer:
         # came from two contracts with one owner, and the rule above only
         # sees the contract. Read once, here, for the same reason as `avoid`.
         creators = self._recent_creators(recent, "" if ran is not None else ran_off)
+        # DeFi POSITIONS (after hunt #34): out of the draw, never dropped
+        # here. What costs nothing first — the known contract and the token's
+        # own metadata, over the whole larder; the collection's name for the
+        # contract that comes out of the draw (below), one read each.
+        defi_ids: dict[str, str] = {}
+        defi_contracts: dict[str, str] = {}
+        if self._defi is not None:
+            for c in larder.candidates:
+                label = self._defi.offline(c.chain, c.contract, c.metadata)
+                if label:
+                    defi_ids[c.id()] = label
+            if defi_ids:
+                self._notify(f"prepare: {_defi_count(list(defi_ids.values()))} na "
+                             "despensa — fora do sorteio; ficam até /purge_defi confirm")
+
+        def out_of_draw(c: Candidate) -> bool:
+            return c.id() in defi_ids or _contract_key(c.id()) in defi_contracts
+
         for attempt in range(1, self._max_attempts + 1):
-            cand = larder.take(self._rng, avoid_contract=avoid, chain=chain,
-                               avoid_creator=None if creators.off else creators)
+            while True:
+                cand = larder.take(self._rng, avoid_contract=avoid, chain=chain,
+                                   avoid_creator=None if creators.off else creators,
+                                   exclude=out_of_draw if self._defi is not None else None)
+                label = (self._defi.collection(cand.chain, cand.contract)
+                         if cand is not None and self._defi is not None else None)
+                if not label:
+                    break
+                defi_contracts[_contract_key(cand.id())] = label     # costs no attempt
+                self._notify("prepare: o contrato sorteado é de posições DeFi (pelo "
+                             "nome da colecção) — fora do sorteio, sorteio outro")
             if cand is None:
+                out = [defi_ids.get(c.id()) or defi_contracts[_contract_key(c.id())]
+                       for c in larder.candidates
+                       if (chain is None or c.chain == chain) and out_of_draw(c)]
+                defi_tail = f"; {_defi_count(out)} fora do sorteio" if out else ""
                 if chain is not None:
                     raise PrepareRefused(
                         f"alvos de {chain} esgotados ao fim de {attempt - 1} "
-                        f"tentativa(s) — {tally.render()}; nunca tiro de outra "
-                        f"cadeia. Corre /harvest {chain}.")
+                        f"tentativa(s) — {tally.render()}{defi_tail}; nunca tiro "
+                        f"de outra cadeia. Corre /harvest {chain}.")
                 raise PrepareRefused(
                     f"despensa esgotada ao fim de {attempt - 1} tentativa(s) — "
-                    f"{tally.render()}; corre /fill")
+                    f"{tally.render()}{defi_tail}; corre /fill")
             src = Source("larder", cand.chain, cand.contract)
             tally.draws += 1
 

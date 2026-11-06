@@ -36,7 +36,7 @@ TELEGRAM_COMMANDS = frozenset({
     "launch", "dress", "silence", "resume", "status", "post",
     "abort_prep", "delay_golive",
     "tease", "approve", "reject", "relic_new", "relic_mint",
-    "scan", "snapshot", "fill", "harvest", "prepare", "probe",
+    "scan", "snapshot", "fill", "harvest", "prepare", "probe", "purge_defi",
 })
 
 

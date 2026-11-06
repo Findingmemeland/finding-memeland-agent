@@ -1566,6 +1566,20 @@ def build_agent(settings: Settings | None = None) -> Agent:
             return _target_job("prepare", lambda: target_wiring.prepare())
         return _target_job("prepare", lambda: target_wiring.prepare(chain))
 
+    def _purge_defi(arg: str = "") -> str:
+        """As POSIÇÕES DeFi na despensa (depois da #34 — uma posição de
+        liquidez da Uniswap foi o tesouro): `/purge_defi` só as CONTA, por
+        protocolo ou pelo sinal que as apanhou, e não retira nada;
+        `/purge_defi confirm` retira-as de vez. Até lá o /prepare já as deixa
+        fora do sorteio. Pelo `_target_job`: recusado durante uma hunt e
+        nunca ao mesmo tempo que /fill, /harvest ou /prepare, que gravariam
+        a despensa por cima."""
+        word = arg.strip().lower()
+        if word not in ("", "confirm"):
+            return "usage: /purge_defi [confirm] — sem argumento só conta"
+        return _target_job("purge_defi",
+                           lambda: target_wiring.purge_defi(confirm=word == "confirm"))
+
     actions = {
         "launch": _launch,
         "scan": _scan,
@@ -1574,6 +1588,7 @@ def build_agent(settings: Settings | None = None) -> Agent:
         "harvest": _harvest,
         "probe": _probe,
         "prepare": _prepare,
+        "purge_defi": _purge_defi,
         "relic_new": _relic_new,
         "relic_mint": _relic_mint,
         "dress": _dress,

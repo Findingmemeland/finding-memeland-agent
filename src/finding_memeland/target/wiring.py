@@ -50,6 +50,7 @@ from .adapters import (
     arweave_url,
     gateway_url,
     inline_artwork,
+    collection_reader,
     mint_fetcher,
     owner_reader,
     probe_inline_image,
@@ -63,6 +64,7 @@ from .clues import (
     TargetClueEngine,
     describe_image_batched,
 )
+from .defi import DefiDetector
 from .discovery import DiscoveryStateStore, EraDiscovery
 from .creator_harvest import (
     MANIFOLD_BASE_CANARY_CREATION,
@@ -280,6 +282,9 @@ class TargetWiring:
     # versionado do repositório público — nunca depositadas, sorteadas nem
     # lançadas. Aqui só para o /status dizer QUANTAS (exposed.ExposedList).
     exposed: object = None
+    # As posições DeFi (depois da #34): o detector que o depósito e o
+    # /prepare usam — aqui para o /purge_defi (defi.DefiDetector).
+    defi: object = None
 
     # -- the prepared hunt: read from the DATABASE, never from memory ------ #
 
@@ -359,6 +364,37 @@ class TargetWiring:
                 + (f" · ordem por raridade: {note}" if note else "")
                 + (f" · criador: {creators}" if creators else "")
                 + (f" · pista de língua: {language}" if language else ""))
+
+    def purge_defi(self, *, confirm: bool = False) -> str:
+        """As POSIÇÕES DeFi que estão na despensa (depois da #34): sem
+        `confirm`, só as conta — por protocolo ou pelo sinal que as apanhou,
+        nunca um nome, um contrato ou um tokenId — e não retira nada; com
+        `confirm`, retira-as de vez (como os expostos: nunca voltam a
+        entrar) e grava a despensa. Todos os sinais, o nome da colecção
+        incluído (uma leitura por contrato)."""
+        if self.larder_store is None or self.defi is None:
+            return "despensa ou detector de posições DeFi não configurados"
+        larder: Larder = self.larder_store.load()
+        found = {c.id(): label for c in larder.candidates
+                 if (label := self.defi(c.chain, c.contract, c.metadata))}
+        by: dict[str, int] = {}
+        for label in found.values():
+            by[label] = by.get(label, 0) + 1
+        kinds = ", ".join(f"{k} {v}" for k, v in sorted(by.items()))
+        unread = getattr(self.defi, "unread", 0)
+        tail = (f" · nome da colecção por ler (RPC NOSSO): {unread} contrato(s)"
+                if unread else "")
+        if not found:
+            return f"posições DeFi na despensa: 0 de {larder.size()}{tail} — nada a retirar"
+        if not confirm:
+            return (f"posições DeFi na despensa: {len(found)} de {larder.size()} "
+                    f"({kinds}){tail} — nada foi retirado. Para as retirar: "
+                    "/purge_defi confirm")
+        for cid in found:
+            larder.retire(cid)
+        self.larder_store.save(larder)
+        return (f"retiradas {len(found)} posição(ões) DeFi da despensa ({kinds}){tail} "
+                f"· despensa {larder.size()}")
 
     def larder_size(self) -> int:
         if self.larder_store is None:
@@ -1360,6 +1396,10 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
     # which rightly assumes build_target is pure composition.
     # TargetFinder.load_sizes() already drops a source that will not answer,
     # at the moment it matters, and refuses loudly when none does.
+    # DeFi POSITIONS NEVER IN, NEVER DRAWN (after hunt #34): one detector for
+    # the deposit, the /probe, the /prepare and /purge_defi — the collection's
+    # name read once per contract, on the keyed RPCs
+    defi = DefiDetector(collection_of=collection_reader(rpcs))
     finder = TargetFinder(
         sources=SOURCES,
         total_supply=lambda c, k: int(rpcs[c].eth_call(k, SEL_TOTAL), 16),
@@ -1367,7 +1407,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
             rpcs[c].eth_call(k, SEL_TOKENBYINDEX + abi_uint(i)), 16),
         read_token=larder_meta.read, probe_image=probe_image,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
-        accepts_uri=accepts, is_exposed=exposed.has, rng=rng, now_iso=_now_iso)
+        accepts_uri=accepts, is_exposed=exposed.has, rng=rng, now_iso=_now_iso,
+        defi=defi)
 
     larder_store = LarderStore(**store(BLOB_LARDER))
     prepared_store = PreparedStore(**store(BLOB_PREPARED))
@@ -1438,6 +1479,8 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         owner_of=owner_reader(rpcs),
         # the language of the name (06/11): one call, the name only
         name_language=AnthropicNameLanguage(anthropic, s.target_judge_model),
+        # DeFi positions out of the draw (after hunt #34)
+        defi=defi,
         # a surface without ranked results (Rarible) measures nothing:
         # the order of before, and the report says so
         word_reach=word_reach_for(market))
@@ -1519,7 +1562,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         read_token=larder_meta.read, probe_image=probe_image_measuring,
         owner_is_eoa=eoa_check, name_is_unique=uniqueness,
         accepts_uri=lambda u: uri_is_content_addressed(u) or arweave_url(u) is not None,
-        is_exposed=exposed.has, rng=rng, now_iso=_now_iso)
+        is_exposed=exposed.has, rng=rng, now_iso=_now_iso, defi=defi)
 
     probes: dict[str, ContractProbe] = {}
     if s.base_rpc_url and "base" in rpcs:
@@ -1571,6 +1614,7 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
                         arweave_image=arweave_image,
                         arweave_gateways=len(arweave_gateways),
                         exposed=exposed,
+                        defi=defi,
                         notify=say,
                         harvesters=harvesters,
                         deposit_chains=deposit_chains,

@@ -383,6 +383,46 @@ def contract_owner(rpc: ChainRpc, contract: str) -> str | None:
     return addr.lower() if addr else None
 
 
+SEL_NAME = "0x06fdde03"               # name()
+SEL_SYMBOL = "0x95d89b41"             # symbol()
+
+
+def _text_call(rpc: ChainRpc, contract: str, selector: str) -> str:
+    """A string the contract returns (a `string`, or an old-style bytes32).
+    "" when the CONTRACT says there is none (a revert, no such function, an
+    answer that is not text); ChainUnavailable when the read is ours."""
+    try:
+        data = rpc.eth_call(contract, selector)
+    except ChainUnavailable:
+        raise
+    except RpcError as e:
+        if not e.revert:
+            raise _rpc_down(f"{selector}: node error {e.code}", f"erro-rpc:{e.code}") from e
+        return ""
+    except Exception:  # noqa: BLE001 — a revert, by the ChainRpc contract
+        return ""
+    try:
+        return decode_abi_string(data)
+    except ValueError:
+        raw = data[2:66] if isinstance(data, str) and data.startswith("0x") else ""
+        try:
+            return bytes.fromhex(raw).rstrip(b"\x00").decode("utf-8", "ignore")
+        except ValueError:
+            return ""
+
+
+def collection_reader(rpcs: dict[str, ChainRpc]) -> Callable[[str, str], tuple[str, str]]:
+    """collection_of(chain, contract) -> (name(), symbol()) for the DeFi
+    detector (defi.DefiDetector, 06/11 after hunt #34). A chain without an
+    RPC is OUR gap — ChainUnavailable, never a default."""
+    def collection_of(chain: str, contract: str) -> tuple[str, str]:
+        rpc = rpcs.get(chain)
+        if rpc is None:
+            raise _rpc_down(f"collection: no rpc for {chain}", "sem-rpc")
+        return _text_call(rpc, contract, SEL_NAME), _text_call(rpc, contract, SEL_SYMBOL)
+    return collection_of
+
+
 def owner_reader(rpcs: dict[str, ChainRpc]) -> Callable[[str, str], str | None]:
     """owner_of(chain, contract) for the larder's draw (prepare.RecentCreators).
     A chain without an RPC is OUR gap — ChainUnavailable, never a default."""
