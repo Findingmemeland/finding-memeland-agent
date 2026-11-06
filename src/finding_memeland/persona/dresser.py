@@ -2,8 +2,9 @@
 
 Takes a warmed, OAuth-authorized account from the pipeline and applies the
 generated identity (display name, bio, avatar) via the single developer app.
-The @ handle is NEVER changed (X API cannot change handles). After the 1h reveal
-window, retires the account: wipes it to a dormant state and schedules deletion.
+The @ handle is NEVER changed (X API cannot change handles). After the 30 min
+reveal window, retires the account: wipes it to a dormant state and schedules
+deletion.
 
 The claim code is embedded in the bio — finding the persona is the only way to
 read the code that the winner must DM to the main account.

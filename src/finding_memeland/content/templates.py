@@ -253,9 +253,9 @@ POST_REPLY_INVALID_WALLET = (
     "that address doesn't check out. reply with a valid Base wallet (0x…) — "
     "same account, the clock is still ticking."
 )
+# Text set by Pedro (05/11). With nobody waiting, the hunt reopens.
 POST_REPLY_TIMED_OUT = (
-    "submission timed out. failed to send wallet.\n"
-    "miss your window → next in line."
+    "window closed — no wallet in time. the prize moves to the next in line."
 )
 POST_REPLY_LATE = (
     "right code, but someone beat you to it — you're in line. "

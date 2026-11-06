@@ -23,7 +23,7 @@ create type hunt_state as enum (
   'live',
   'resolving',
   'paying',
-  'pending_cleanup',   -- 1h reveal window
+  'pending_cleanup',   -- 30 min reveal window
   'retiring',
   'done',
   'voided'             -- platform interruption / abort

@@ -3,7 +3,7 @@
 States (frozen, mirrors db hunt_state):
 
     idle -> preparing -> live -> resolving -> paying
-         -> pending_cleanup (1h reveal) -> retiring -> done
+         -> pending_cleanup (30 min reveal) -> retiring -> done
     (any live phase -> voided on platform interruption)
 
 Implemented as a plain, deterministic state machine (not LangGraph): the flow is
@@ -87,7 +87,9 @@ TRANSITIONS: dict[HuntState, set[HuntState]] = {
     HuntState.VOIDED: {HuntState.RETIRING},
 }
 
-CLEANUP_WINDOW_SECONDS = 60 * 60  # 1h reveal window before retiring the persona
+# The reveal window before retiring the persona: 30 min (Pedro, 05/11 — it was
+# 1h). /launch, /prepare, /fill and /harvest wait for it after a win.
+CLEANUP_WINDOW_SECONDS = 30 * 60
 
 
 def can_transition(src: HuntState, dst: HuntState) -> bool:
@@ -261,7 +263,7 @@ class Orchestrator:
         self._poll_interval_s = poll_interval_s
         self._max_rounds = max_rounds
         self._avatar_writer = avatar_writer  # callable(bytes) -> path, or None
-        # Cadence hooks: defaults preserve production (1-3h between clues, 1h reveal).
+        # Cadence hooks: defaults preserve production (1-3h between clues, 30 min reveal).
         # The live-test harness injects short intervals so a rehearsal runs in minutes.
         self._clue_due_fn = clue_due_fn or next_clue_due
         # the REVEAL PHASE of a target hunt (23/10): its own, shorter band;
@@ -2641,7 +2643,7 @@ class Orchestrator:
                 else:
                     self._notify(f"winner announcement failed (retrying): {e!r}")
                     self._clock.sleep(30)
-        self._clock.sleep(self._cleanup_window_s)  # reveal window (1h prod; short in test)
+        self._clock.sleep(self._cleanup_window_s)  # reveal window (30 min prod; short in test)
 
     # THE RETIRE TAIL NEVER KILLS A HUNT (Pedro, 26/10, after hunts #24 and
     # #25: "HUNT DIED (ReadTimeout)" there, twice in a row). The winner is
