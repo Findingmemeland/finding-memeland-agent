@@ -111,6 +111,45 @@ def target_clue_followup(clue_index: int, clue_text: str, taunt: str, *,
 # --------------------------------------------------------------------------- #
 
 
+# X's limit for a long post (Premium), the number content/guardrails.py
+# already checks clues against. Counted as X counts it (twitter-text): one
+# for Latin and most punctuation, two for anything else (CJK, emoji). A URL
+# is counted by its length, which for the item link (longer than X's 23) is
+# more than X counts — the safe side.
+X_LONG_POST_MAX = 25_000
+_X_LIGHT = ((0x0000, 0x10FF), (0x2000, 0x200D), (0x2010, 0x201F), (0x2032, 0x2037))
+
+
+def x_weighted_len(text: str) -> int:
+    return sum(1 if any(lo <= ord(ch) <= hi for lo, hi in _X_LIGHT) else 2
+               for ch in text or "")
+
+
+def fit_x_post(text: str, limit: int = X_LONG_POST_MAX) -> str:
+    """Never over X's limit (Pedro, after hunt #34). The fields are capped
+    before they get here, so a real post is never touched. If one ever must
+    be cut, it is cut at a line, says so, and keeps its last two paragraphs
+    — in the reveal, the item link (the card) and the closing line."""
+    if x_weighted_len(text) <= limit:
+        return text
+    paras = text.split("\n\n")
+    keep = 2 if len(paras) >= 3 else 1
+    head, last = "\n\n".join(paras[:-keep]), "\n\n".join(paras[-keep:])
+    marker = "\n…\n\n"
+    budget = limit - x_weighted_len(marker + last)
+    if not head or budget <= 0:
+        return _cut(text, limit // 2)            # no paragraph to keep: half, cut
+    kept = []
+    used = 0
+    for line in head.split("\n"):
+        w = x_weighted_len(line) + 1
+        if used + w > budget:
+            break
+        kept.append(line)
+        used += w
+    return "\n".join(kept).rstrip() + marker + last
+
+
 def _split_id(target_id: str) -> tuple[str, str, str]:
     parts = (target_id or "").split(":")
     if len(parts) == 3 and all(parts):
@@ -118,13 +157,47 @@ def _split_id(target_id: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
+# NO URI GOES OUT RAW WHEN IT IS THE DATA ITSELF (after hunt #34). The #34
+# reveal printed its tokenURI whole: a `data:` URI of 13 005 characters of
+# base64 (a JSON whose image is another 9 142 of SVG). It is not part of the
+# commitment, and anyone reads it at the source with tokenURI(tokenId) — so
+# in its place goes the short line below. The same for the live tokenURI of
+# a void and of a mutation note.
+DATA_URI_LINE = "fully on-chain (data: URI)"
+# How much of anything that is NOT the data itself a post prints, and how
+# much of the name and of the credit: never reached by a real target, there
+# so that the post's length has a ceiling whatever the metadata says.
+MAX_URI_CHARS = 300
+MAX_NAME_CHARS = 300
+MAX_CREDIT_CHARS = 120
+
+
+def _is_data_uri(uri: str) -> bool:
+    return (uri or "").lstrip()[:5].lower() == "data:"
+
+
+def _cut(text: str, limit: int) -> str:
+    """At most `limit` characters, cut at a space when there is one near,
+    with "…" — the elegant cut, for fields no real target fills."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    head = text[:limit - 1]
+    space = head.rfind(" ")
+    if space >= limit // 2:
+        head = head[:space]
+    return head.rstrip() + "…"
+
+
 def _safe_uri(uri: str) -> str:
     """O mesmo princípio para a nota de mutação: nada de um segundo link a
     disputar o cartão com a página do item. Um ipfs:// passa; um https vira
-    a frase que manda ler on-chain."""
+    a frase que manda ler on-chain; um data: vira a linha curta (#34)."""
     if uri and uri.lower().startswith(("http://", "https://")):
         return "an https URL — read it on-chain with tokenURI(tokenId)"
-    return uri
+    if _is_data_uri(uri):
+        return DATA_URI_LINE
+    return _cut(uri, MAX_URI_CHARS)
 
 
 def _token_uri_lines(uri: str) -> str:
@@ -153,7 +226,11 @@ def _token_uri_lines(uri: str) -> str:
                 "carries exactly one link (the item page) — read it at the "
                 "source instead: call tokenURI(tokenId) on the contract "
                 "above. It is not part of the commitment.\n")
-    return f"  tokenURI at launch: {uri}\n"
+    if _is_data_uri(uri):
+        # the #34 dump (Pedro): the data itself, never printed
+        return (f"  tokenURI at launch: {DATA_URI_LINE} — call tokenURI(tokenId) "
+                "on the contract above to read it.\n")
+    return f"  tokenURI at launch: {_cut(uri, MAX_URI_CHARS)}\n"
 
 
 def commitment_block(*, target_id: str, metadata_sha256: str, salt: str,
@@ -222,8 +299,9 @@ class TargetWinnerData:
 def _treasure_line(name_onchain: str, artist: str) -> str:
     """R9 — 'The treasure was “X”, by Y' when the metadata names the author;
     the title alone when it does not (nothing invented)."""
-    return (f"The treasure was “{name_onchain}”, by {artist}" if artist
-            else f"The treasure was “{name_onchain}”")
+    name = _cut(name_onchain, MAX_NAME_CHARS)
+    return (f"The treasure was “{name}”, by {_cut(artist, MAX_CREDIT_CHARS)}" if artist
+            else f"The treasure was “{name}”")
 
 
 def artwork_alt_text(name_onchain: str, artist: str, hunt_n: int) -> str:
@@ -234,9 +312,10 @@ def artwork_alt_text(name_onchain: str, artist: str, hunt_n: int) -> str:
 
 def target_winner_announcement(d: TargetWinnerData) -> str:
     """Long-post (X Premium). Winner + what the treasure was + the v2
-    verification block + (if it happened) the post-claim mutation note."""
+    verification block + (if it happened) the post-claim mutation note.
+    Never over X's limit (`fit_x_post`)."""
     winner = d.winner_handle.lstrip("@")
-    return (
+    return fit_x_post(
         f"Hunt #{d.hunt_n} is halted. We have a winner!\n\n"
         f"Congratulations @{winner} — solved in {d.time_to_win}.\n"
         f"{d.prize_amount} $FIND transferred to your wallet ({d.tx_link}).\n"
@@ -337,9 +416,12 @@ def void_reveal(d: VoidRevealData) -> str:
     cause = _CAUSE_LINE.get(d.cause, d.cause)
     live = ""
     if d.live_token_uri:
-        live += f"  live tokenURI: {d.live_token_uri}\n"
+        # as it was, an https one included — but never the data itself (#34)
+        uri = (f"{DATA_URI_LINE} — call tokenURI(tokenId) on the contract above"
+               if _is_data_uri(d.live_token_uri) else _cut(d.live_token_uri, MAX_URI_CHARS))
+        live += f"  live tokenURI: {uri}\n"
     live += "  " + _live_hash_phrase(d.live_hash_status, d.live_metadata_sha256) + "\n"
-    return (
+    return fit_x_post(
         f"Hunt #{d.hunt_n} is void — {cause}.\n"
         "The prize goes back to the vault. Nobody loses anything they had.\n\n"
         + _treasure_line(d.target_name_onchain, d.artist)
