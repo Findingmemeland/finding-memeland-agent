@@ -45,6 +45,29 @@ ERC20_ABI = [
 ]
 
 
+# THE BASE BUILDER CODE ON EVERY PAYOUT (Pedro, 15/11) — ERC-8021: a suffix at
+# the END of the calldata. The token reads only the first 4 + 64 bytes
+# (selector, to, value), so the transfer is the same; indexers read the code
+# from the end. NOT WRITTEN BY HAND — the docs disagree on the byte order:
+# generated on 15/11 by the ERC-8021 checker (builder-code-checker.vercel.app,
+# Encode, Schema 0) and the same layout as `Attribution.toDataSuffix` of ox
+# (ox/erc8021, the library Base's docs name): codes ∥ codesLength (1 byte) ∥
+# schemaId (1 byte) ∥ 0x8021 × 8. Measured on Base the same day: the #34 payout
+# simulated with it returns true and emits the same Transfer; it costs ~460 gas.
+BUILDER_CODE = "bc_lcripzqu"
+BUILDER_CODE_SUFFIX = "62635f6c637269707a71750b0080218021802180218021802180218021"
+
+
+def with_builder_code(data) -> str:
+    """The calldata with the builder code at its end — once."""
+    if isinstance(data, (bytes, bytearray)):
+        data = "0x" + bytes(data).hex()
+    data = data if data.startswith("0x") else "0x" + data
+    if data.lower().endswith(BUILDER_CODE_SUFFIX):
+        return data
+    return data + BUILDER_CODE_SUFFIX
+
+
 @dataclass
 class PayoutResult:
     tx_hash: str
@@ -116,6 +139,13 @@ class PayoutEngine:
                 "gasPrice": w3.eth.gas_price,
             }
         )
+        # The builder code (ERC-8021, 15/11) — and the gas estimated again
+        # WITH it: the suffix is calldata and costs gas, and the estimate
+        # above was made without it. The #34 payout ran with 378 gas to spare;
+        # the suffix needs ~460 more.
+        tx["data"] = with_builder_code(tx["data"])
+        tx["gas"] = w3.eth.estimate_gas({"from": account.address, "to": tx["to"],
+                                         "data": tx["data"], "value": tx.get("value", 0)})
         signed = w3.eth.account.sign_transaction(tx, private_key=self._key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
