@@ -33,6 +33,7 @@ from finding_memeland.chain.payout import (
     BUILDER_CODE,
     BUILDER_CODE_SUFFIX,
     PayoutEngine,
+    gas_limit_for,
     with_builder_code,
 )
 
@@ -167,8 +168,9 @@ def test_the_gas_is_estimated_with_the_suffix():
     assert not without.endswith(BUILDER_CODE_SUFFIX)        # web3's own, first
     assert with_it == "0x" + data.hex()                     # then the final calldata
     cost = sum(16 if b else 4 for b in bytes.fromhex(BUILDER_CODE_SUFFIX))
-    assert gas == int(_estimate_of(with_it), 16)
-    assert gas - int(_estimate_of(without), 16) == cost == 452
+    estimate = int(_estimate_of(with_it), 16)
+    assert gas == gas_limit_for(estimate)          # + the margin (15/11)
+    assert estimate - int(_estimate_of(without), 16) == cost == 452
 
 
 def _estimate_of(data: str) -> str:

@@ -58,6 +58,21 @@ BUILDER_CODE = "bc_lcripzqu"
 BUILDER_CODE_SUFFIX = "62635f6c637269707a71750b0080218021802180218021802180218021"
 
 
+# THE GAS LIMIT: the estimate — made with the final calldata, the builder code
+# included — plus 15%, rounded up (Pedro, 15/11). The #34 payout ran with 378
+# gas to spare. Only the gas USED is paid: measured on #34, the wallet's ETH
+# fell by used × price + the L1 fee, not by the limit — so the margin costs
+# nothing. The preflight's MIN_GAS_ETH (0.0002) covers the limit with the
+# margin up to ~2.78 gwei (measured 15/11: 0.006 gwei, the worst estimate
+# 62 641 → 72 038).
+GAS_MARGIN_PCT = 15
+
+
+def gas_limit_for(estimate: int) -> int:
+    """The estimate plus GAS_MARGIN_PCT, rounded UP — integer arithmetic."""
+    return -(-int(estimate) * (100 + GAS_MARGIN_PCT) // 100)
+
+
 def with_builder_code(data) -> str:
     """The calldata with the builder code at its end — once."""
     if isinstance(data, (bytes, bytearray)):
@@ -142,10 +157,11 @@ class PayoutEngine:
         # The builder code (ERC-8021, 15/11) — and the gas estimated again
         # WITH it: the suffix is calldata and costs gas, and the estimate
         # above was made without it. The #34 payout ran with 378 gas to spare;
-        # the suffix needs ~460 more.
+        # the suffix needs ~460 more. On top of that estimate, the margin.
         tx["data"] = with_builder_code(tx["data"])
-        tx["gas"] = w3.eth.estimate_gas({"from": account.address, "to": tx["to"],
-                                         "data": tx["data"], "value": tx.get("value", 0)})
+        tx["gas"] = gas_limit_for(w3.eth.estimate_gas(
+            {"from": account.address, "to": tx["to"], "data": tx["data"],
+             "value": tx.get("value", 0)}))
         signed = w3.eth.account.sign_transaction(tx, private_key=self._key)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
