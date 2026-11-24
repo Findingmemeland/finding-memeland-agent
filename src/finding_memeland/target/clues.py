@@ -170,6 +170,22 @@ _CONTAINS_RE = re.compile(
     r"\b(?:contains|holds|hides|carries|conceals)\s+(?:the\s+word\s+)?"
     r"['\u2018\u2019\"\u201c\u201d](?P<w>[A-Za-z]{2,})['\u2018\u2019\"\u201c\u201d]",
     re.IGNORECASE)
+# A letter compared with another word's (hunt #41): "the same last letter",
+# "shares its first letter with", "ends like 'adventurer'". The last form
+# needs the quote: "ends like a sigh" is about meaning, not letters.
+_COMPARE_RE = re.compile(
+    r"\bsame\s+(?:(?:first|last|opening|closing|final|starting|ending)\s+)?letter\b"
+    r"|\bshares?\s+(?:its|a|the|their)\s+(?:first|last|opening|closing|final)\s+letter\b"
+    r"|\b(?:starts?|begins?|opens?|ends?|closes?|finish(?:es)?)\s+(?:just\s+|exactly\s+)?"
+    r"(?:like|as|the\s+(?:same\s+)?way\s+(?:as\s+)?)\s*['\u2018\u2019\"\u201c\u201d]",
+    re.IGNORECASE)
+# A word in quotes \u2014 an example, in a letter clue. Never an apostrophe inside
+# a word ("don't", "players'"), never a lone letter ('r' is a letter claim).
+_QUOTED_WORD_RE = re.compile(
+    r"(?<![A-Za-z\u00c0-\u00ff])['\u2018\u2019\"\u201c\u201d]"
+    r"(?P<w>[A-Za-z\u00c0-\u00ff]{2,}(?:[-'\u2019][A-Za-z\u00c0-\u00ff]+)*)"
+    r"['\u2018\u2019\"\u201c\u201d](?![A-Za-z\u00c0-\u00ff])")
+_LETTER_RUN = re.compile(r"[A-Za-z\u00c0-\u00ff]+")
 _VOWELS = set("aeiou")
 
 
@@ -516,6 +532,144 @@ def verify_claims(claims, name: str) -> list[str]:
             why = "every word here has a vowel"
         if not ok:
             errs.append(f"claim {t} (word {w}, value {v!r}) is FALSE: {why}")
+        errs += example_errors(c)          # hunt #41: the words AROUND the fact
+    return errs
+
+
+# --------------------------------------------------------------------------- #
+# EXAMPLES IN A LETTER CLUE — each one checked (Pedro, 24/11, hunt #41)       #
+# --------------------------------------------------------------------------- #
+#
+# Hunt #41, clue 4: "detour", "corridor" and "contender" were given as words
+# that do NOT end with the same letter as "adventurer" — all four end in R.
+# The declaration covered the NAME only, and the judge reads a clue against
+# the answer: the examples are not the answer, so nobody checked them. An
+# example is data now, declared inside its claim as "like" (it shares the
+# fact) or "unlike" (it does not), and tested on its own spelling with the
+# same test as the name. In a letter clue, a quoted word that is not declared
+# is refused, and so is a comparison ("the same letter as …", "ends like
+# '…'") with no starts/ends claim behind it.
+
+_LETTER_FACTS = ("starts", "ends", "contains", "double_letter", "palindrome", "no_vowels")
+
+
+def _letter_test(t: str, v: str):
+    """The test a declared letter fact applies to a spelling (lower-case
+    letters) — the same one for the examples as for the name. None when
+    the fact has no letter test (word_count) or its value is not valid."""
+    if t in ("starts", "ends"):
+        if v == "vowel":
+            def is_(ch):
+                return ch in _VOWELS
+        elif v == "consonant":
+            def is_(ch):
+                return ch.isalpha() and ch not in _VOWELS
+        elif len(v) == 1 and v.isalpha():
+            def is_(ch):
+                return ch == v
+        else:
+            return None
+        at = 0 if t == "starts" else -1
+        return lambda s: bool(s) and is_(s[at])
+    if t == "contains":
+        return (lambda s: v in s) if len(v) >= 2 and v.isalpha() else None
+    if t == "double_letter":
+        return lambda s: any(a == b for a, b in zip(s, s[1:], strict=False))
+    if t == "palindrome":
+        return lambda s: len(s) > 1 and s == s[::-1]
+    if t == "no_vowels":
+        return lambda s: bool(s) and not any(ch in _VOWELS for ch in s)
+    return None
+
+
+def _fact(t: str, v: str) -> str:
+    return {"starts": f"starts with {v}", "ends": f"ends with {v}",
+            "contains": f"contains '{v}'", "double_letter": "has a doubled letter",
+            "palindrome": "reads the same backwards", "no_vowels": "has no vowel"}[t]
+
+
+def _spelling_says(t: str, v: str, s: str, holds: bool) -> str:
+    """What the example's own spelling shows, for the writer."""
+    if t == "starts":
+        return f"'{s}' starts with '{s[0]}'"
+    if t == "ends":
+        return f"'{s}' ends with '{s[-1]}'"
+    if t == "contains":
+        return f"'{v}' is {'' if holds else 'not '}spelt inside '{s}'"
+    if t == "double_letter":
+        return f"'{s}' has {'a' if holds else 'no'} doubled letter"
+    if t == "palindrome":
+        return f"'{s}' {'reads' if holds else 'does not read'} the same backwards"
+    return f"'{s}' has {'no vowel' if holds else 'a vowel'}"
+
+
+def _example_key(word) -> str:
+    return "".join(_LETTER_RUN.findall(str(word))).lower()
+
+
+def example_errors(claim) -> list[str]:
+    """The examples a claim declares, each tested on its own spelling:
+    every "like" word must share the fact, every "unlike" word must not."""
+    like, unlike = claim.get("like") or [], claim.get("unlike") or []
+    if not like and not unlike:
+        return []
+    t = claim.get("type")
+    if not isinstance(like, list) or not isinstance(unlike, list):
+        return [f"claim {t}: 'like' and 'unlike' must be lists of words"]
+    v = str(claim.get("value", "")).strip().lower()
+    test = _letter_test(t, v)
+    if test is None:
+        return [f"claim {t}: examples ('like'/'unlike') only go with a letter fact "
+                f"({', '.join(_LETTER_FACTS)}) that has a valid value"]
+    errs: list[str] = []
+    for side, examples, want in (("like", like, True), ("unlike", unlike, False)):
+        for raw in examples:
+            s = _example_key(raw)
+            if len(s) < 2:
+                errs.append(f"claim {t}: example {raw!r} is not a word")
+                continue
+            holds = test(s)
+            if holds != want:
+                errs.append(
+                    f"example '{raw}' is declared {side.upper()} the fact "
+                    f"({_fact(t, v)}), but {_spelling_says(t, v, s, holds)} — a false "
+                    "example sends players the wrong way: drop it, or pick a word "
+                    f"that really {'shares the fact' if want else 'differs'}")
+    return errs
+
+
+def example_prose_errors(text: str, claims) -> list[str]:
+    """Writer feedback when a LETTER clue — one that declares a letter fact,
+    or whose prose talks about letters — quotes a word it did not declare
+    as an example, or compares letters with no starts/ends claim behind
+    the comparison. Quoted words in a clue about meaning are left alone."""
+    good = [c for c in claims if isinstance(c, dict)] if isinstance(claims, list) else []
+    facts = [c for c in good if c.get("type") in _LETTER_FACTS]
+    errs: list[str] = []
+    compare = _COMPARE_RE.search(text)
+    if compare and not any(c.get("type") in ("starts", "ends") for c in good):
+        errs.append(f"the prose compares letters ('{compare.group(0).strip()}') but no "
+                    "'starts'/'ends' claim is declared — declare it, with the compared "
+                    "words as its examples, or drop the comparison")
+    talks_letters = compare or _FIRST_LETTER_RE.search(text) or any(
+        rx.search(text) for rx, t in _PROSE_DETECTORS if t != "word_count")
+    if not (facts or talks_letters):
+        return errs
+    declared = {_example_key(w) for c in facts
+                for w in [*(c.get("like") or []), *(c.get("unlike") or [])]
+                if isinstance(c.get("like") or [], list)
+                and isinstance(c.get("unlike") or [], list)}
+    values = ({str(c.get("value", "")).strip().lower() for c in facts
+               if c.get("type") == "contains"}
+              | {m.group("w").lower() for m in _CONTAINS_RE.finditer(text)})
+    for m in _QUOTED_WORD_RE.finditer(text):
+        key = _example_key(m.group("w"))
+        if key in declared or key in values:
+            continue
+        errs.append(f"the clue quotes '{m.group('w')}' next to a letter fact without "
+                    "declaring it — put it in that claim's \"like\" (it shares the "
+                    "fact) or \"unlike\" (it does not), where it is checked on its "
+                    "spelling, or drop it")
     return errs
 
 
@@ -563,7 +717,7 @@ def undeclared_prose_errors(text: str, claims) -> list[str]:
 # letters, syllables, vowels and consonants never get this far: the base text
 # rules refuse them on every clue (guardrails, rule 1c).
 _EARLY_LETTER_DETECTORS = (*(rx for rx, _t in _PROSE_DETECTORS), _FIRST_LETTER_RE,
-                           _UNVERIFIABLE_RE)
+                           _UNVERIFIABLE_RE, _COMPARE_RE)
 
 
 def early_letter_errors(draft, clue_index: int) -> list[str]:
@@ -608,6 +762,7 @@ def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
                         "aspect — two pieces on the same aspect is one piece")
     errs += verify_claims(draft.claims, ctx.display_name)
     errs += undeclared_prose_errors(draft.text, draft.claims)
+    errs += example_prose_errors(draft.text, draft.claims)       # hunt #41
     return errs
 
 
@@ -973,6 +1128,12 @@ is rejected. If a structural idea cannot be expressed as one of these types \
 (compound, portmanteau, hidden word, prefix, suffix, anagram, rhyme, initials), \
 you may NOT assert it — do not guess how a word is built. An empty list means \
 your clue says nothing about the letters, which is the normal case.
+- EXAMPLES in a letter clue: if you give a word that shares the letter fact \
+("the same last letter as 'anchor'") or one that does not ("unlike 'cloud'"), \
+put it in quotes and declare it INSIDE that claim — "like": [the words that \
+share the fact], "unlike": [the words that do not]. Every example is checked on \
+its own spelling exactly like the name: one false example rejects the clue, and \
+so does a quoted word in a letter clue that you did not declare.
 - "language_hint": ONLY when the message asks for a hint about the LANGUAGE of \
 the name — the exact phrase of your clue that carries it. null otherwise.
 
@@ -1159,7 +1320,11 @@ TRUTH_JUDGE_SYSTEM = (
     "'present' for the word 'future', or says a letter is the only vowel when the "
     "word has three. Read the clue literally first, then charitably; if the "
     "literal reading is false and a player obeying it would discard the right "
-    "answer, it is inconsistent. Never reward cleverness, never punish "
+    "answer, it is inconsistent. The same holds for any EXAMPLE words the clue "
+    "gives: a word offered as sharing a property with the answer must really "
+    "share it, and one offered as NOT sharing it must really lack it — 'ends "
+    "like X, unlike Y' is inconsistent when Y ends the same way. Never reward "
+    "cleverness, never punish "
     "obscurity. You may reason BRIEFLY first (a few lines at most — checking "
     "letters, weighing a reading), then END with the JSON object on its own "
     'line: {"consistent": true|false, "reason": "<one sentence, may name the '
