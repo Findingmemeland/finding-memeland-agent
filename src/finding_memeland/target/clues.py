@@ -24,6 +24,9 @@ the blind solver. What is target-specific lives here, and only this:
    · NO LETTERS ON CLUES 1-3 (early_letter_errors): no declared claim and
      no talk about the letters, the spelling or a count of the name before
      clue 4 (Pedro, 16/10, after Hunt #22 opened on a letter fact).
+   · WORD NUMBERING (word_position_errors): a word number the prose states
+     must exist in the one reading, and a clue about word k calls it k
+     (Pedro, 24/11, after Hunt #40 counted an "&" in one clue only).
    · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
      about the name's letters is tested against the string; what cannot
      be tested (compound/fused/portmanteau/hidden word) is refused. Born
@@ -310,6 +313,80 @@ def structural_claim_errors(text: str, name: str) -> list[str]:
     for m in _CONTAINS_RE.finditer(text):
         inner = m.group("w").lower()
         false(m, lambda w: _spells_inside(w, inner))
+    return errs
+
+
+# --------------------------------------------------------------------------- #
+# WORD NUMBERING — the prose counts the one way too (Pedro, 24/11, hunt #40)  #
+# --------------------------------------------------------------------------- #
+#
+# Hunt #40: clue 2 counted the "&" of the name as a word and the clues after
+# it did not, so one word had two numbers in the same thread. The one reading
+# (name_words, 10/10) never counted the "&". The WRITER did, by itself, and
+# nothing read its number back: a position past the end of the name fell
+# through to "any word" (`_scope_at`, permissive by design). Now every
+# position the prose STATES is read off the text and checked against the
+# one reading. The number must exist, and a clue about word k must call it
+# word k. The writer is also handed the numbered words, not only the name.
+
+_POS_ORD = {"first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+            "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6,
+            "seventh": 7, "7th": 7, "eighth": 8, "8th": 8, "opening": 1,
+            "last": -1, "final": -1, "closing": -1}
+# "the third word", "the name's 2nd word", "word two", "word 3", "the last
+# word". A determiner is required before an ordinal, and "word" is singular:
+# "famous last words" and "the first two words" state no position.
+_POSITION_RE = re.compile(
+    r"\b(?:the|its|their|this|that|your|name['’]s)\s+(?P<ord>"
+    + "|".join(_POS_ORD) + r")[\s-]+word\b"
+    r"|\bword\s+(?:no\.?\s*|number\s+|#\s*)?(?P<wn>[1-8]|one|two|three|four|five|six|"
+    r"seven|eight)\b",
+    re.IGNORECASE)
+
+
+def stated_positions(text: str, n_words: int) -> list[tuple[str, int]]:
+    """Every word position the clue's prose states, as (phrase, position).
+    'the last word' is word `n_words`."""
+    out: list[tuple[str, int]] = []
+    for m in _POSITION_RE.finditer(text or ""):
+        k = (_POS_ORD[m.group("ord").lower()] if m.group("ord")
+             else _n(m.group("wn")))
+        out.append((m.group(0), n_words if k == -1 else k))
+    return out
+
+
+def numbered_words(name: str) -> str:
+    """The words of the name as every clue must number them: "1 'Salt',
+    2 'Harbor'". The one reading (name_words): a symbol is not a word."""
+    return ", ".join(f"{w.position} '{w.text}'" for w in name_words(name))
+
+
+def word_position_errors(text: str, name: str, facet: str | None) -> list[str]:
+    """Writer feedback when the clue numbers the words its own way: a
+    position the name does not have ("the third word" of a two-word name,
+    the "&" counted), or a clue about word k that calls it something else.
+    Image pieces may mention a word, by its true number."""
+    words = name_words(name)
+    if not words:
+        return []
+    n = len(words)
+    refs = stated_positions(text, n)
+    if not refs:
+        return []
+    numbering = numbered_words(name)
+    errs = [f"'{phrase}' is word {k}, but the name has {n} word"
+            f"{'s' if n != 1 else ''}, numbered the one way every clue counts "
+            f"them: {numbering}. A symbol such as '&' is not a word and takes "
+            "no number"
+            for phrase, k in refs if not 1 <= k <= n]
+    if not errs and facet and facet.startswith("name_word_"):
+        k = int(facet.rsplit("_", 1)[1])
+        if all(pos != k for _phrase, pos in refs):
+            said = ", ".join(f"'{phrase}'" for phrase, _pos in refs)
+            mine = words[k - 1].text if 1 <= k <= n else "?"
+            errs.append(f"this clue is about word {k} ('{mine}') but it says {said}. "
+                        f"Call it word {k}, the number the FACET gives — the words "
+                        f"are numbered {numbering}")
     return errs
 
 
@@ -974,6 +1051,10 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
     return (
         "The NFT's REAL attributes (point clues AT these; never write them verbatim):\n"
         f"- name ({n_words} words): {ctx.display_name}\n"
+        # hunt #40: the writer counted the "&" by itself (Pedro, 24/11)
+        f"- its words, numbered the ONE way every clue counts them: "
+        f"{numbered_words(ctx.display_name)} (a symbol such as '&' is not a word "
+        "and takes no number; when a clue says which word, it uses THIS number)\n"
         f"- artwork: {ctx.image_description}\n"
         f"- lore (on-chain description, FLAVOUR ONLY, never quote it): {ctx.lore or '(none)'}\n"
         "\n"
@@ -1311,6 +1392,16 @@ class TargetClueEngine(RelicClueEngine):
             logging.getLogger(__name__).warning(
                 "clue #%s: letter talk before clue %s rejected", clue_index, STRUCTURE_EARLIEST)
             return self._reject("early letters", early)
+        # 2b. the word numbers the prose states — the one reading (Pedro,
+        #     24/11, hunt #40: the "&" was word 2 in one clue and nothing after)
+        facet, _ = relic_slot_for(clue_index, persona)
+        numbering = word_position_errors(draft.text, persona.display_name, facet)
+        if numbering:
+            logging.getLogger(__name__).warning(
+                "clue #%s: a word number off the one reading rejected", clue_index)
+            return self._reject("word numbering", [
+                "the clue numbers the words of the name its own way — "
+                + " | ".join(numbering)])
         # 3. structural claims about the name's string — true, or gone
         #    (Opus, live test 09/09: "word two is a compound" — it was FUTURE)
         structural = structural_claim_errors(draft.text, persona.display_name)
