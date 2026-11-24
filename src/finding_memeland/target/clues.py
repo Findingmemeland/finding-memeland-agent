@@ -27,6 +27,10 @@ the blind solver. What is target-specific lives here, and only this:
    · WORD NUMBERING (word_position_errors): a word number the prose states
      must exist in the one reading, and a clue about word k calls it k
      (Pedro, 24/11, after Hunt #40 counted an "&" in one clue only).
+     In the declaration check, two more from the same day (Hunt #41):
+     every EXAMPLE word of a letter clue is declared and tested on its own
+     spelling (example_errors), and every clue about a HYPHENATED word
+     says so plainly and declares it (hyphen_errors).
    · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
      about the name's letters is tested against the string; what cannot
      be tested (compound/fused/portmanteau/hidden word) is refused. Born
@@ -142,7 +146,7 @@ _WORD_REF_RE = re.compile(
     r"(?P<whole>the\s+(?:whole\s+|full\s+)?name|both\s+words))\b",
     re.IGNORECASE)
 _UNVERIFIABLE_RE = re.compile(
-    r"\b(compound|portmanteau|fused|welded|two\s+(?:complete\s+|whole\s+)?words\s+"
+    r"\b((?<!hyphenated\s)compound|portmanteau|fused|welded|two\s+(?:complete\s+|whole\s+)?words\s+"
     r"(?:in\s+one|joined|stitched|glued|fused|merged)|hides?\s+(?:a|another)\s+word|"
     r"a\s+word\s+(?:hiding|hidden|inside)|find\s+(?:that|the)\s+seam|"
     r"(?:hidden|smaller|shorter|secret|buried|nested)\s+(?:\w+\s+){0,2}word\b|"
@@ -185,6 +189,9 @@ _QUOTED_WORD_RE = re.compile(
     r"(?<![A-Za-z\u00c0-\u00ff])['\u2018\u2019\"\u201c\u201d]"
     r"(?P<w>[A-Za-z\u00c0-\u00ff]{2,}(?:[-'\u2019][A-Za-z\u00c0-\u00ff]+)*)"
     r"['\u2018\u2019\"\u201c\u201d](?![A-Za-z\u00c0-\u00ff])")
+# "hyphenated", "a hyphen" — the one structural fact due on EVERY clue
+# about a hyphenated word, the first three included (Pedro, 24/11, #41)
+_HYPHEN_PROSE_RE = re.compile(r"\bhyphen(?:ated|s)?\b", re.IGNORECASE)
 _LETTER_RUN = re.compile(r"[A-Za-z\u00c0-\u00ff]+")
 _VOWELS = set("aeiou")
 
@@ -374,7 +381,9 @@ def stated_positions(text: str, n_words: int) -> list[tuple[str, int]]:
 def numbered_words(name: str) -> str:
     """The words of the name as every clue must number them: "1 'Salt',
     2 'Harbor'". The one reading (name_words): a symbol is not a word."""
-    return ", ".join(f"{w.position} '{w.text}'" for w in name_words(name))
+    return ", ".join(f"{w.position} '{w.text}'"
+                     + (" (ONE hyphenated word)" if w.hyphenated else "")
+                     for w in name_words(name))
 
 
 def word_position_errors(text: str, name: str, facet: str | None) -> list[str]:
@@ -429,7 +438,7 @@ def word_position_errors(text: str, name: str, facet: str | None) -> list[str]:
 # Same jump as emoji: from "banned by prompt" to a deterministic test.
 
 CLAIM_TYPES = ("starts", "ends", "contains", "double_letter", "palindrome",
-               "no_vowels", "word_count")
+               "no_vowels", "word_count", "hyphenated")
 
 IMAGE_ASPECTS = {
     "subject": "WHAT is in the frame — one object, figure or element, obliquely",
@@ -527,6 +536,9 @@ def verify_claims(claims, name: str) -> list[str]:
         elif t == "palindrome":
             ok = any(_is_palindrome(x) for x in scope) or (whole_ok and joined == joined[::-1])
             why = "nothing here reads the same backwards"
+        elif t == "hyphenated":
+            ok = any(x.hyphenated for x in scope)
+            why = "no hyphen joins two parts in " + ", ".join(f"'{x.text}'" for x in scope)
         else:  # no_vowels
             ok = any(not any(ch in _VOWELS for ch in x.letters) for x in scope)
             why = "every word here has a vowel"
@@ -652,7 +664,7 @@ def example_prose_errors(text: str, claims) -> list[str]:
                     "'starts'/'ends' claim is declared — declare it, with the compared "
                     "words as its examples, or drop the comparison")
     talks_letters = compare or _FIRST_LETTER_RE.search(text) or any(
-        rx.search(text) for rx, t in _PROSE_DETECTORS if t != "word_count")
+        rx.search(text) for rx, t in _PROSE_DETECTORS if t not in ("word_count", "hyphenated"))
     if not (facts or talks_letters):
         return errs
     declared = {_example_key(w) for c in facts
@@ -677,6 +689,7 @@ _PROSE_DETECTORS = (                 # prose pattern → the claim type it must 
     (_STARTS_RE, "starts"), (_ENDS_RE, "ends"), (_DOUBLE_RE, "double_letter"),
     (_PALINDROME_RE, "palindrome"), (_NO_VOWELS_RE, "no_vowels"),
     (_CONTAINS_RE, "contains"), (_WORDS_RE, "word_count"),
+    (_HYPHEN_PROSE_RE, "hyphenated"),
 )
 _ENUM_LIST_RE = re.compile(r"\b[\w-]+,\s+[\w-]+,?\s+(?:and|or|nor)\s+[\w-]+\b", re.IGNORECASE)
 
@@ -716,8 +729,8 @@ def undeclared_prose_errors(text: str, claims) -> list[str]:
 # prose these detectors read as talk about the letters, is refused. Counts of
 # letters, syllables, vowels and consonants never get this far: the base text
 # rules refuse them on every clue (guardrails, rule 1c).
-_EARLY_LETTER_DETECTORS = (*(rx for rx, _t in _PROSE_DETECTORS), _FIRST_LETTER_RE,
-                           _UNVERIFIABLE_RE, _COMPARE_RE)
+_EARLY_LETTER_DETECTORS = (*(rx for rx, t in _PROSE_DETECTORS if t != "hyphenated"),
+                           _FIRST_LETTER_RE, _UNVERIFIABLE_RE, _COMPARE_RE)
 
 
 def early_letter_errors(draft, clue_index: int) -> list[str]:
@@ -726,7 +739,9 @@ def early_letter_errors(draft, clue_index: int) -> list[str]:
     (Pedro, 16/10). Empty from clue STRUCTURE_EARLIEST on."""
     if clue_index >= STRUCTURE_EARLIEST:
         return []
-    if not draft.claims and not any(rx.search(draft.text) for rx in _EARLY_LETTER_DETECTORS):
+    letters = [c for c in draft.claims
+               if not (isinstance(c, dict) and c.get("type") == "hyphenated")]
+    if not letters and not any(rx.search(draft.text) for rx in _EARLY_LETTER_DETECTORS):
         return []
     return [f"clue #{clue_index} is one of the first three: it says NOTHING about the "
             "letters, the spelling or any count of the name (word count included) — "
@@ -763,7 +778,57 @@ def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
     errs += verify_claims(draft.claims, ctx.display_name)
     errs += undeclared_prose_errors(draft.text, draft.claims)
     errs += example_prose_errors(draft.text, draft.claims)       # hunt #41
+    errs += hyphen_errors(draft, ctx, clue_index)                 # hunt #41
     return errs
+
+
+# --------------------------------------------------------------------------- #
+# HYPHENATED WORDS — every clue says so (Pedro, 24/11, hunt #41)              #
+# --------------------------------------------------------------------------- #
+#
+# Hunt #41: a word of the name was hyphenated ("X-Contour") and the clues
+# described only the part after the hyphen. A player who decoded them had
+# "contour" and searched the wrong thing. Pedro's two options: each part a
+# word of its own, or a clue that says plainly the word is hyphenated. The
+# second keeps the one reading (10/10: one word, one number), the plan and
+# every preparation already sealed. Every clue about such a word, from
+# clue 1, says "hyphenated" and declares it. The claim is verified like the
+# others, and it is the one structural fact allowed before clue 4.
+
+
+def _facet_word(ctx, clue_index: int):
+    facet, _ = relic_slot_for(clue_index, ctx)
+    if not facet.startswith("name_word_"):
+        return None
+    return word_at(ctx.display_name, int(facet.rsplit("_", 1)[1]))
+
+
+def _declares_hyphen(claims, k: int) -> bool:
+    for c in claims if isinstance(claims, list) else []:
+        if isinstance(c, dict) and c.get("type") == "hyphenated":
+            try:
+                if int(c.get("word", -1)) == k:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def hyphen_errors(draft, ctx, clue_index: int) -> list[str]:
+    """Writer feedback when a clue about a HYPHENATED word does not say
+    plainly that it is hyphenated, or does not declare it."""
+    w = _facet_word(ctx, clue_index)
+    if w is None or not w.hyphenated:
+        return []
+    if _HYPHEN_PROSE_RE.search(draft.text) and _declares_hyphen(draft.claims, w.position):
+        return []
+    parts = " + ".join(f"'{p}'" for p in w.parts)
+    return [f"word {w.position} ('{w.text}') is ONE word made of parts joined by a "
+            f"hyphen ({parts}). Every clue about it says so PLAINLY — use the word "
+            "'hyphenated' — and declares {\"type\": \"hyphenated\", \"word\": "
+            f"{w.position}}}. A clue that describes one part as if it were the "
+            "whole word sends players to search the wrong thing; if you point at "
+            "one part, say which (before or after the hyphen)"]
 
 
 # What the writer is told after an answer that could not be read. ONE object:
@@ -1120,7 +1185,8 @@ pieces and reveal clues.
 - "claims": EVERY statement your clue makes about the LETTERS or SPELLING of the \
 name, as data. Allowed types: "starts" / "ends" (value: a single letter, \
 "vowel" or "consonant"), "contains" (value: a shorter real word spelt inside), \
-"double_letter", "palindrome", "no_vowels", "word_count" (value: the number). \
+"double_letter", "palindrome", "no_vowels", "word_count" (value: the number), \
+"hyphenated" (no value: the word is ONE word made of parts joined by a hyphen). \
 "word" is 1 for the first word, 2 for the second, 0 for the whole name. Each \
 claim is CHECKED against the real spelling: a false one rejects the clue. If \
 your prose asserts something about the letters that is not declared, the clue \
@@ -1238,6 +1304,7 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
         + ("ALREADY SPENT on this word — do NOT repeat these angles: "
            + ", ".join(spent) + "\n" if spent else "")
         + (FIRST_THREE_CLUES_RULE if clue_index < STRUCTURE_EARLIEST else "")
+        + hyphen_note_for(ctx, clue_index)
         + (
             "ENUMERABLE WORD(S) IN THIS NAME: " + ", ".join(ctx.enumerable_words)
             + ". These belong to a set a player can list out loud. NEVER let a "
@@ -1253,6 +1320,24 @@ def build_target_user_message(ctx: TargetClueContext, clue_index: int,
         + f"Previous clues:\n{prior}\n\n"
         f"Write clue #{clue_index}."
     )
+
+
+def hyphen_note_for(ctx, clue_index: int) -> str:
+    """What the writer is told when THIS clue is about a hyphenated word
+    (Pedro, 24/11, hunt #41). Empty otherwise."""
+    w = _facet_word(ctx, clue_index)
+    if w is None or not w.hyphenated:
+        return ""
+    parts = " + ".join(f"'{p}'" for p in w.parts)
+    return (f"HYPHENATED WORD: word {w.position} ('{w.text}') is ONE word made of "
+            f"parts joined by a hyphen ({parts}). This clue — like every clue about "
+            "it, from clue 1 on, the first-three rule notwithstanding — says PLAINLY "
+            "that the word is hyphenated (use the word \"hyphenated\"; never "
+            "\"compound\" alone, never \"two words joined\": the guard refuses those) "
+            f"and declares {{\"type\": \"hyphenated\", \"word\": {w.position}}}. "
+            "Never describe one part as if it were the whole word: if you point at "
+            "one part, say which (before or after the hyphen), and across this "
+            "word's clues point at BOTH parts.\n")
 
 
 # --------------------------------------------------------------------------- #

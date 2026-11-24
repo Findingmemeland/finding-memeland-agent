@@ -217,7 +217,8 @@ RAW = object()      # marker: the next draft is raw text, sent as-is (no JSON)
 
 class FakeAnthropic:
     """Scripted clue drafts, in order. A str draft is an OBEDIENT writer: it
-    declares the angle/aspect the prompt assigned and no claims. A dict
+    declares the angle/aspect the prompt assigned and no claims (but the
+    word count on a STRUCTURE piece, and the hyphen on a hyphenated word). A dict
     draft is the JSON as-is (to script disobedience or claims). A (RAW,
     text) pair is sent verbatim — a writer that reasoned out loud."""
 
@@ -238,6 +239,11 @@ class FakeAnthropic:
                     n = re.search(r"name \((\d+) words\)", user)
                     claims = ([{"type": "word_count", "word": 0, "value": int(n.group(1))}]
                               if ang and ang.group(1).strip() == "STRUCTURE" and n else [])
+                    # obedient to the hyphen note too (24/11): says it, declares it
+                    hy = re.search(r"HYPHENATED WORD: word (\d+)", user)
+                    if hy:
+                        claims.append({"type": "hyphenated", "word": int(hy.group(1))})
+                        d += " (hyphenated)"
                     d = {"clue": d, "taunt": "", "claims": claims,
                          "angle": ang.group(1).strip() if ang else None,
                          "image_aspect": asp.group(1) if asp else None}

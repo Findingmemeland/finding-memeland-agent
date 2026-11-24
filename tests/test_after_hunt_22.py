@@ -189,10 +189,11 @@ def test_letter_talk_is_refused_on_clues_one_to_three_only(text):
     assert early_letter_errors(draft(text), STRUCTURE_EARLIEST) == []
 
 
-@pytest.mark.parametrize("claim_type", CLAIM_TYPES)
+@pytest.mark.parametrize("claim_type", [t for t in CLAIM_TYPES if t != "hyphenated"])
 def test_any_declared_claim_is_refused_on_clues_one_to_three(claim_type):
     """Todos os tipos, a contagem de palavras incluída (D1) — mesmo com a
-    prosa limpa."""
+    prosa limpa. A excepção é o hífen (Pedro, 24/11, depois da #41): uma
+    palavra hifenizada diz-se desde a pista 1 (test_hyphenated_words)."""
     d = draft(claims=[{"type": claim_type, "word": 1, "value": "s"}])
     for i in range(1, STRUCTURE_EARLIEST):
         assert early_letter_errors(d, i), (claim_type, i)

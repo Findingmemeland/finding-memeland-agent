@@ -34,6 +34,11 @@ ONE READING NOW (Pedro, 10/10):
 
   The word COUNT a clue may state is the count of words, content or not.
 
+  HYPHENATED  "Self-Portrait" stays ONE word with ONE number. What changed
+            (Pedro, 24/11, after hunt #41 described only the part after
+            the hyphen): every clue about such a word says plainly that it
+            is hyphenated (target.clues.hyphen_errors).
+
 What is not content is not the puzzle: the writer may write it, and the
 first clue of the reveal phase shows it to everyone (`name_skeleton`).
 """
@@ -51,6 +56,9 @@ FUNCTION_WORDS = frozenset({"the", "an", "of", "and", "in", "on", "to", "at"})
 
 _RUN = re.compile(r"[A-Za-zÀ-ÿ]+")
 _TERM_MIN = 2                       # a term has 2+ letters (selector._WORD)
+# hyphen, non-breaking hyphen, figure dash, en dash — between two letters
+_HYPHENS = re.compile(r"[-‐‑‒–]")
+_HYPHEN_IN_WORD = re.compile(r"[A-Za-zÀ-ÿ][-‐‑‒–][A-Za-zÀ-ÿ]")
 
 # What stands for a content word in the public skeleton. A fixed width: the
 # length of a word is a count, and counts are not given away.
@@ -69,6 +77,19 @@ class NameWord:
         """Its letters and nothing else — what a claim about the spelling
         (first letter, last letter, palindrome) is checked against."""
         return "".join(self.runs)
+
+    @property
+    def hyphenated(self) -> bool:
+        """Letters on both sides of a hyphen: ONE word made of parts
+        ("Self-Portrait"). Still one word, with one number (10/10); every
+        clue about it has to say it is hyphenated (Pedro, 24/11, hunt #41).
+        An apostrophe does not make parts."""
+        return bool(_HYPHEN_IN_WORD.search(self.text))
+
+    @property
+    def parts(self) -> tuple[str, ...]:
+        """The parts on either side of each hyphen, as the name writes them."""
+        return tuple(p for p in _HYPHENS.split(self.text) if _RUN.search(p))
 
 
 def _runs(token: str) -> tuple[str, ...]:
