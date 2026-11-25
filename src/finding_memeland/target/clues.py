@@ -30,7 +30,8 @@ the blind solver. What is target-specific lives here, and only this:
      In the declaration check, two more from the same day (Hunt #41):
      every EXAMPLE word of a letter clue is declared and tested on its own
      spelling (example_errors), and every clue about a HYPHENATED word
-     says so plainly and declares it (hyphen_errors).
+     says so plainly and declares it (hyphen_errors). The no-lists rule of
+     a puzzle piece sees a list in quotes too (enumerates_list, 25/11).
    · STRUCTURAL CLAIMS (structural_claim_errors): anything the clue asserts
      about the name's letters is tested against the string; what cannot
      be tested (compound/fused/portmanteau/hidden word) is refused. Born
@@ -692,6 +693,16 @@ _PROSE_DETECTORS = (                 # prose pattern → the claim type it must 
     (_HYPHEN_PROSE_RE, "hyphenated"),
 )
 _ENUM_LIST_RE = re.compile(r"\b[\w-]+,\s+[\w-]+,?\s+(?:and|or|nor)\s+[\w-]+\b", re.IGNORECASE)
+# Hunt #41: clue 4 listed three words in quotes ('"x", "y" and "z"') and the
+# rule never saw it — the closing quote sat between each word and its comma.
+# The quotes come off before the list is looked for: a list in quotes, straight
+# or curly, single or double, is still a list (Pedro, 25/11).
+_LIST_QUOTES_RE = re.compile(r"['\u2018\u2019\"\u201c\u201d]")
+
+
+def enumerates_list(text: str) -> bool:
+    """'a, b, and c' — with or without quotes round the words."""
+    return bool(_ENUM_LIST_RE.search(_LIST_QUOTES_RE.sub("", text)))
 
 
 def undeclared_prose_errors(text: str, claims) -> list[str]:
@@ -764,10 +775,11 @@ def declaration_errors(draft, ctx, clue_index: int) -> list[str]:
         if assigned == "STRUCTURE" and not draft.claims:
             errs.append("a STRUCTURE piece must DECLARE the fact it states as a claim "
                         "(it is verified on the spelling); no claim, no piece")
-        if _ENUM_LIST_RE.search(draft.text):
-            errs.append("the clue enumerates a list ('a, b, and c') — that reads as a "
-                        "synonym list, solved by lookup in ten seconds. ONE oblique "
-                        "constraint, no lists")
+        if enumerates_list(draft.text):
+            errs.append("the clue enumerates a list ('a, b, and c', in quotes or not) — "
+                        "that reads as a synonym list, solved by lookup in ten seconds. "
+                        "ONE oblique constraint, no lists; a letter clue gives at most "
+                        "two examples")
     if puzzle and facet == "image":
         assigned = image_aspect_for(clue_index, ctx)
         got = (draft.image_aspect or "").strip().lower() or None
@@ -1199,7 +1211,8 @@ your clue says nothing about the letters, which is the normal case.
 put it in quotes and declare it INSIDE that claim — "like": [the words that \
 share the fact], "unlike": [the words that do not]. Every example is checked on \
 its own spelling exactly like the name: one false example rejects the clue, and \
-so does a quoted word in a letter clue that you did not declare.
+so does a quoted word in a letter clue that you did not declare. At most TWO \
+examples: three in a row ('a', 'b' and 'c') is a list, refused in quotes or not.
 - "language_hint": ONLY when the message asks for a hint about the LANGUAGE of \
 the name — the exact phrase of your clue that carries it. null otherwise.
 
