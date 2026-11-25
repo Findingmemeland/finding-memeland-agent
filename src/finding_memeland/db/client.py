@@ -94,6 +94,19 @@ class Repo:
         top = rows[0].get("hunt_number") if rows else 0
         return int(top or 0) + 1
 
+    def last_opening_variant(self) -> str | None:
+        """The opening the most recent hunt published (target/templates.
+        OPENINGS; Pedro, 24/11) — the next hunt draws any other. None before
+        the first one. The hunt being launched has no opening yet, so it is
+        never its own "previous"."""
+        resp = (
+            self._db.table("hunts").select("opening_variant")
+            .not_.is_("opening_variant", "null")
+            .order("id", desc=True).limit(1).execute()
+        )
+        rows = resp.data or []
+        return str(rows[0]["opening_variant"]) if rows else None
+
     # --- target hunts (Option A, soldadura 5/6) ---
     def used_target_hmacs(self, n: int = 500) -> list[str]:
         """Keyed fingerprints of every target this project has already used.

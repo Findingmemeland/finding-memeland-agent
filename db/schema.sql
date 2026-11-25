@@ -360,3 +360,12 @@ create index if not exists hunts_target_used_hmac_idx
 -- Supabase: esta linha sozinha) e ANTES de o código novo estar no ar — sem
 -- ela, cada resposta de formato deixa um aviso "format post … not logged".
 alter type submission_outcome add value if not exists 'format';
+
+-- Migration 2026-11-24 — a abertura da hunt roda (Pedro, depois da #41). O post
+-- de abertura começa por uma de dez aberturas (target/templates.OPENINGS),
+-- tirada à sorte e nunca a da hunt anterior; o id fica aqui ("o01"…"o10")
+-- para se comparar o alcance por abertura. Correr no editor SQL do Supabase
+-- ANTES do push. Sem a coluna nenhuma hunt deixa de arrancar: o registo e a
+-- leitura da anterior falham à parte, com um aviso no Telegram, e a abertura
+-- sai na mesma (só que pode repetir a anterior).
+alter table hunts add column if not exists opening_variant text;

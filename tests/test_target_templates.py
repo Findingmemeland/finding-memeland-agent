@@ -15,7 +15,8 @@ from finding_memeland.target.templates import (
     POST_REPLY_FORMAT,
     POST_REPLY_UNRESOLVED_LINK,
     POST_REPLY_WRONG_DOOR_TARGET,
-    TARGET_CLUE_ONE_EXPLAINER,
+    BRAND_LINE,
+    OPENINGS,
     TargetWinnerData,
     VoidRevealData,
     commitment_block,
@@ -44,7 +45,7 @@ def cashtags(text: str) -> int:
 def test_clue_one_brand_line_format_and_commitment_label():
     post = target_clue_one(11, "patience is a coin nobody spends", "100,000,000",
                            COMMIT)
-    assert "Hunt #11 is live." in post
+    assert post.startswith("hunt #11. ")              # the opening rotates (24/11)
     assert "the prize is always on Base. the treasure can be anywhere onchain." in post
     assert "chain:contract:tokenId" in post and "marketplace link" in post
     assert f"commitment v2: {COMMIT}" in post
@@ -60,7 +61,7 @@ def test_clue_one_never_uses_old_game_vocabulary():
     for bad in ("code in its bio", "code in its description", "persona",
                 "account", "fake", "keeps the relic"):
         assert bad not in low, bad
-    assert "made by someone else" in low and "stays with its owner" in low
+    assert "someone else" in low and "stays with its owner" in low
 
 
 def test_clue_one_holder_line_optional():
@@ -256,7 +257,8 @@ def test_system_replies_have_no_urls_and_teach_the_format():
     for r in (POST_REPLY_FORMAT, POST_REPLY_UNRESOLVED_LINK):
         assert "cost you nothing" in r
         assert "wrong" not in r.lower()
-    assert "Base" not in TARGET_CLUE_ONE_EXPLAINER.split("\n")[0]  # 1ª linha sem cadeia
+    for o in OPENINGS:                       # "Base" only inside the brand line
+        assert "Base" not in o.text.replace(BRAND_LINE, "")
 
 
 def test_artist_of_reads_the_tokens_own_keys_and_never_an_address():

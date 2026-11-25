@@ -20,6 +20,7 @@ when the live DM listener lands (step 26).
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -885,12 +886,18 @@ class Orchestrator:
         # than advertise a rule that isn't enforced. Reactivates by itself
         # the moment the floor is set again (Hunt #5).
         pct = self._non_holder_pct if hunt.min_balance_fmml > 0 else None
+        opening = None
         if getattr(hunt, "target", None) is not None:
-            from ..target.templates import target_clue_one
+            from ..target.templates import pick_opening, target_clue_one
+            # THE OPENING ROTATES (Pedro, 24/11): one of OPENINGS at random,
+            # never the one the previous hunt published.
+            opening = pick_opening(self._previous_opening(),
+                                   getattr(self._target, "opening_rng", None)
+                                   or random.Random())
             post = target_clue_one(
                 hunt_n=hunt.number, clue_text=draft.text,
                 prize=f"{hunt.prize_fmml:,}", commitment=hunt.integrity_hash,
-                non_holder_pct=pct,
+                non_holder_pct=pct, opening=opening,
             )
         else:
             post = clue_one(
@@ -913,7 +920,39 @@ class Orchestrator:
         self._transition(
             hunt, HuntState.LIVE, reshare_post_id=tweet_id, live_at=hunt.live_at
         )
-        self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})")
+        if opening is not None:
+            self._record_opening(hunt, opening.id)
+        self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})"
+                     + (f" · opening {opening.id}" if opening is not None else ""))
+
+    def _previous_opening(self) -> str | None:
+        """The opening the previous hunt published (hunts.opening_variant),
+        so this one never repeats it. Best effort: a read that fails (the
+        column not created yet, the DB down) costs the no-repeat rule for
+        one hunt, never the launch."""
+        read = getattr(self._repo, "last_opening_variant", None)
+        if read is None:
+            return None
+        try:
+            return read()
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"⚠️ previous opening unknown ({type(e).__name__}) — this "
+                         "hunt may repeat it; does hunts.opening_variant exist?")
+            return None
+
+    def _record_opening(self, hunt: PreparedHunt, opening_id: str) -> None:
+        """hunts.opening_variant, for the reach comparison (Pedro, 24/11).
+        Apart from the LIVE transition and after it: a column that is not
+        there yet must never stop a hunt that is already on X."""
+        update = getattr(self._repo, "update_hunt", None)
+        if update is None:
+            return
+        try:
+            update(hunt.id, opening_variant=opening_id)
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"⚠️ hunt #{hunt.number}: opening {opening_id} NOT recorded "
+                         f"({type(e).__name__}) — run the hunts.opening_variant "
+                         "migration (db/schema.sql)")
 
     # A submission whose processing keeps erroring (X lookup down, DB hiccup) is
     # retried this many times before being skipped, so one poisoned DM can never

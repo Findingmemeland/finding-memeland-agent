@@ -137,6 +137,10 @@ class TargetPorts:
     # and without a second notice is a void in slow motion with nobody
     # watching. Re-notify every `hold_renotify_s`; past `max_hold_s` the
     # operator is CALLED to decide — nothing is decided automatically.
+    # The draw of the opening post's opening (target/templates.OPENINGS;
+    # Pedro, 24/11). None = a fresh random.Random() per launch; tests and
+    # the dry-run pass a seeded one.
+    opening_rng: object | None = None
     hold_renotify_s: float = 3600.0
     max_hold_s: float = 6 * 3600.0            # one EPISODE
     # The accumulated ceiling (Opus, 06/09, P1): an RPC that oscillates —

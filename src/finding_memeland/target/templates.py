@@ -33,16 +33,97 @@ from dataclasses import dataclass
 from ..content.templates import _ordinal
 
 # --------------------------------------------------------------------------- #
-# Clue 1 — cold-traffic explainer for the target game                          #
+# Clue 1 — the opening: a rotating hook, then rules that never change         #
 # --------------------------------------------------------------------------- #
 
-TARGET_CLUE_ONE_EXPLAINER = (
-    "every hunt i pick an NFT that already exists, made by someone else, "
-    "hidden in plain sight. \U0001F438\n"
-    "the prize is always on Base. the treasure can be anywhere onchain.\n"
-    "decode the clues, work out its name, find the exact token — reply to "
-    "this post with its chain:contract:tokenId (or the marketplace link). "
-    "first one wins the prize. the NFT stays with its owner."
+# THE OPENING ROTATES (Pedro, 24/11): one fixed text opened every hunt from #11
+# to #41, and the reach of the opening post fell hunt after hunt. The first
+# part — the line that says the hunt is on and what the game is — now comes
+# from these, in the oracle's voice (first person, lower case, dry, one 🐸),
+# drawn at random and never the one the previous hunt used. Everything a
+# player needs to ACT stays fixed below the clue (target_clue_one).
+#
+# Every opening says the same four things, so a newcomer reading any of them
+# knows the game: the hunt number; an NFT that already exists, made by
+# someone else; the brand line (Pedro, 05/09), word for word — and "Base"
+# nowhere else, so nobody reads the treasure as being on Base; and the way
+# in (clues → name → the exact token). No cashtag (one per post, X 403: the
+# prize line has it), no URL, no @, nothing asking for likes. Each one fits in
+# 280 characters as X counts them.
+#
+# The id goes on the hunt row (hunts.opening_variant) so the reach can be
+# compared per opening. NEVER renumber: retire an id, never reuse it.
+
+BRAND_LINE = "the prize is always on Base. the treasure can be anywhere onchain."
+
+
+@dataclass(frozen=True)
+class Opening:
+    id: str           # hunts.opening_variant — stable forever
+    text: str         # "{n}" = the hunt number
+
+    def render(self, hunt_n: int) -> str:
+        return self.text.replace("{n}", str(hunt_n))
+
+
+_FROG = "\U0001F438"
+OPENINGS: tuple[Opening, ...] = (
+    Opening("o01", f"hunt #{{n}}. i've hidden something again. {_FROG}\n\n"
+                   "an NFT that already exists, made by someone else, sitting in "
+                   f"plain sight.\n{BRAND_LINE}\n"
+                   "read the clues, work out its name, find the exact token."),
+    Opening("o02", f"hunt #{{n}} is open. {_FROG}\n\n"
+                   "out of everything ever minted, i picked one NFT. someone else "
+                   f"made it. it's still out there.\n{BRAND_LINE}\n"
+                   "the clues give you the name. the name gives you the token."),
+    Opening("o03", f"hunt #{{n}}. i'm thinking of an NFT. {_FROG}\n\n"
+                   "it already exists. someone else made it. i never touched it.\n"
+                   f"{BRAND_LINE}\n"
+                   "decode the clues, name it, find the exact token."),
+    Opening("o04", f"hunt #{{n}}. i found something at the bottom of the pond. {_FROG}\n\n"
+                   "one NFT, already minted by someone else, hiding in plain sight.\n"
+                   f"{BRAND_LINE}\n"
+                   "the clues lead to its name. the name leads to the token."),
+    Opening("o05", f"hunt #{{n}}. i already know who won't find it. {_FROG}\n\n"
+                   "an NFT someone else made, sitting where it has always been. i "
+                   f"chose it. you find it.\n{BRAND_LINE}\n"
+                   "clues first, then the name, then the exact token."),
+    Opening("o06", f"hunt #{{n}}. patience is cheaper than guessing. {_FROG}\n\n"
+                   "there's an NFT out there, made by someone else, and i've picked it "
+                   f"for you.\n{BRAND_LINE}\n"
+                   "work out its name from the clues, then find the exact token."),
+    Opening("o07", f"hunt #{{n}}. one NFT, one winner. {_FROG}\n\n"
+                   "the piece already exists and someone else made it. i only point "
+                   f"at it.\n{BRAND_LINE}\n"
+                   "read the clues, find the name, then the exact token."),
+    Opening("o08", f"hunt #{{n}}. you may have scrolled past it already. {_FROG}\n\n"
+                   "an NFT made by someone else, minted before i wrote a word of this.\n"
+                   f"{BRAND_LINE}\n"
+                   "decode the clues, work out its name, find the exact token."),
+    Opening("o09", f"hunt #{{n}}. i've chosen. {_FROG}\n\n"
+                   "one NFT that already exists, made by someone else. no name yet, "
+                   f"just the first clue.\n{BRAND_LINE}\n"
+                   "the clues point to its name. the name points to the token."),
+    Opening("o10", f"hunt #{{n}}. quiet start. {_FROG}\n\n"
+                   "i picked an NFT that someone else made. it has no idea.\n"
+                   f"{BRAND_LINE}\n"
+                   "work out the name from the clues and find the exact token first."),
+)
+
+
+def pick_opening(previous: str | None, rng) -> Opening:
+    """A random opening, never `previous` (the id the last hunt used). An
+    unknown or missing `previous` leaves all of them in the draw."""
+    pool = [o for o in OPENINGS if o.id != previous]
+    return rng.choice(pool or list(OPENINGS))
+
+
+# The fixed half: how to answer (it used to sit in the explainer, above the
+# clue — now it is the first line below it), the prize, the holder line, the
+# reshare gate, the commitment and the pinned rules. The same on every hunt.
+TARGET_CLUE_ONE_REPLY = (
+    "found it? reply to this post with its chain:contract:tokenId (or the "
+    "marketplace link). the NFT stays with its owner."
 )
 
 # The published example of the format (Pedro, 14/10): it names NO chain. The
@@ -52,15 +133,18 @@ CLAIM_FORMAT_EXAMPLE = "<chain>:0xabc…def:42"
 
 
 def target_clue_one(hunt_n: int, clue_text: str, prize: str, commitment: str,
-                    non_holder_pct: int | None = 10) -> str:
-    """Opening post: announcement + explainer + clue 1 + reshare gate +
-    commitment v2. The footer 'Check pinned for rules' appears ONLY here.
+                    non_holder_pct: int | None = 10, *,
+                    opening: Opening | None = None) -> str:
+    """Opening post: the rotating opening (OPENINGS) + clue 1 + the fixed
+    rules (how to reply, the prize, the holder line, the reshare gate, the
+    commitment v2). The footer 'Check pinned for rules' appears ONLY here.
     non_holder_pct=None: holding floor OFF, the split line is omitted."""
+    opening = opening or OPENINGS[0]
     return (
-        f"Hunt #{hunt_n} is live.\n\n"
-        f"{TARGET_CLUE_ONE_EXPLAINER}\n\n"
+        f"{opening.render(hunt_n)}\n\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
+        f"{TARGET_CLUE_ONE_REPLY}\n"
         f"The first to find it wins {prize} $FIND.\n"
         + (
             f"hold FIND to win the full prize — non-holders win {non_holder_pct}%.\n"

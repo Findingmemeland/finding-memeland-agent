@@ -156,6 +156,10 @@ class FakeRepo:
     def update_hunt(self, hunt_id, **fields) -> None:
         self.hunts[hunt_id].update(fields)
 
+    def last_opening_variant(self) -> str | None:
+        rows = sorted(self.hunts.values(), key=lambda r: r["id"], reverse=True)
+        return next((r["opening_variant"] for r in rows if r.get("opening_variant")), None)
+
     # --- persona prep posts (P2) ---
     def create_persona_post(self, **fields) -> int:
         row = dict(fields)

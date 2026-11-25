@@ -240,6 +240,8 @@ class TargetWorld:
             used_hmac=lambda tid: "hmac:" + tid,
             # as production derives them today (wiring.build_target)
             larder_chains=frozenset({"ethereum", "base"}),
+            # the opening is drawn from the seed: same seed, same opening (24/11)
+            opening_rng=random.Random(seed),
         )
         self.rig = build_simulation(poll_interval_s=60, verbose=verbose)
         self.orch = self.rig.orchestrator
