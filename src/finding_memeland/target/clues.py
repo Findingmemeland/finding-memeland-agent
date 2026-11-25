@@ -20,7 +20,9 @@ the blind solver. What is target-specific lives here, and only this:
 
 3. FIVE GUARDS in `_post_guardrail_reasons`, before the solver — four
    mechanical, one LLM (the consistency judge: clue + answer, must be true;
-   the blind solver's inverted twin, see TRUTH_JUDGE_SYSTEM):
+   the blind solver's inverted twin, see TRUTH_JUDGE_SYSTEM; since Hunt #42
+   it checks EVERY assertion of the clue against the word — part of speech,
+   meanings, homophones — and one false assertion rejects the clue):
    · NO LETTERS ON CLUES 1-3 (early_letter_errors): no declared claim and
      no talk about the letters, the spelling or a count of the name before
      clue 4 (Pedro, 16/10, after Hunt #22 opened on a letter fact).
@@ -1166,6 +1168,13 @@ The SIDEWAYS DEFINITION is the most common failure: rephrasing what a word MEANS
 is still a definition. A hard clue attacks from a direction that is NOT the \
 word's meaning: how it is built, where culture puts it to work, which world it \
 lives in, how it leans on the other words.
+- TRUE OF THE WORD: oblique is not false. Every statement your clue makes about \
+a word must hold for THAT word as the name uses it — its part of speech (never \
+call a naming word an "action word", nor the reverse), its own meanings and the \
+worlds they live in (never DENY one: telling players the word is NOT where it \
+plainly lives pushes them off the answer), and never the meaning or world of a \
+different word that only SOUNDS like it. The consistency judge checks every \
+statement against the word; one false statement rejects the clue.
 - Each clue must add a NEW angle, roughly 30% clearer than the previous one.
 - NEVER build a clue on counting: do not state how many syllables, letters, \
 characters, vowels or consonants anything has. The only number you may state \
@@ -1404,11 +1413,21 @@ class TruthJudgeUnavailable(ClueGuardUnavailable):
 # It also closes the other half of declare-and-verify: prose that adds a
 # structural embellishment the declaration did not carry ("the only one
 # doing that job" over ANCIENT's three vowels) is judged against the word.
+#
+# Hunt #42 (Pedro, 25/11): two clues about HAIR passed it. One put the word
+# "on the same shelf as grief and inheritance — not the same shelf as
+# scissors or salons" (HEIR's shelf, and HAIR's own denied); the other called
+# it an "action word" (a noun there). So the judge now settles the word
+# first — its part of speech as the name uses it, its own meanings, its
+# homophones — then lists EVERY assertion of the clue with whether it holds,
+# and the code rejects the clue on ONE that does not, whatever the judge's
+# own summary says (_truth_verdict).
 
 TRUTH_JUDGE_SYSTEM = (
     "You are the fact-checker of a word-puzzle treasure hunt. You are given the "
-    "ANSWER — the name of an NFT (its words) and a description of its artwork — "
-    "and ONE clue written about it. The clue is meant to be hard, oblique and "
+    "ANSWER — the name of an NFT (its words, numbered) and a description of its "
+    "artwork — and ONE clue written about it, with the part of the answer the "
+    "clue is about. The clue is meant to be hard, oblique and "
     "sideways; difficulty is NOT your concern. Your only question: taken as a "
     "statement about the answer, is the clue TRUE? A clue is consistent when the "
     "answer satisfies it under a fair reading; it is INCONSISTENT when it describes "
@@ -1421,13 +1440,84 @@ TRUTH_JUDGE_SYSTEM = (
     "answer, it is inconsistent. The same holds for any EXAMPLE words the clue "
     "gives: a word offered as sharing a property with the answer must really "
     "share it, and one offered as NOT sharing it must really lack it — 'ends "
-    "like X, unlike Y' is inconsistent when Y ends the same way. Never reward "
-    "cleverness, never punish "
-    "obscurity. You may reason BRIEFLY first (a few lines at most — checking "
-    "letters, weighing a reading), then END with the JSON object on its own "
-    'line: {"consistent": true|false, "reason": "<one sentence, may name the '
-    'answer>"}. The JSON must be the last thing you write.'
+    "like X, unlike Y' is inconsistent when Y ends the same way. "
+    "CHECK THE WORD ITSELF. When the clue is about a word of the name, first "
+    "settle what that word is: its part of speech AS THE NAME USES IT, its own "
+    "meanings and the worlds they live in, and its homophones (other words that "
+    "sound the same). Then take EVERY assertion the clue makes, explicit or "
+    "implied — every negation ('not', 'never', 'unlike'), every comparison ('the "
+    "same shelf as', 'kin to'), every grammatical label ('action word', 'naming "
+    "word', 'describing word', 'verb', 'plural') — and test each one against "
+    "those facts. An assertion is FALSE when a grammatical label does not match "
+    "the word's part of speech in the name; when the meaning or world it gives "
+    "is not one of the word's own; when it DENIES the word one of its own "
+    "meanings or worlds; or when it describes a word that only sounds like it as "
+    "if it were the word. Hunt #42, word 'Hair': 'on the same shelf as grief and "
+    "inheritance — not the same shelf as scissors or salons' is false twice "
+    "(that shelf is HEIR's, and scissors and salons are exactly HAIR's), and "
+    "'action word' is false (HAIR is a noun there). A metaphor holds when the "
+    "resemblance it draws is real; oblique and hard are fine, false is not. ONE "
+    "false assertion makes the clue inconsistent — a charitable reading of the "
+    "rest never rescues it. Never reward cleverness, never punish obscurity. "
+    "You may reason BRIEFLY first (a few lines at most — checking letters, "
+    "weighing a reading), then END with the JSON object on its own line, nothing "
+    'after it: {"word": {"part_of_speech": "<as the name uses it>", "meanings": '
+    '["<its own>"], "homophones": ["<words that sound the same>"]}, '
+    '"assertions": [{"says": "<one assertion of the clue>", "holds": true|false, '
+    '"why": "<a few words>"}], "consistent": true|false, "reason": "<one '
+    'sentence, may name the answer>"}. For a clue about the ARTWORK, "word" is '
+    "null and each assertion is checked against the artwork. The JSON must be "
+    "the last thing you write."
 )
+
+
+def _as_bool(v) -> bool | None:
+    """A JSON boolean, or "true"/"false" written as a string — never
+    bool("false"), which is True."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str) and v.strip().lower() in ("true", "false"):
+        return v.strip().lower() == "true"
+    return None
+
+
+def _final_json(text: str) -> dict:
+    """The LAST top-level JSON object of the judge's answer that carries the
+    verdict. It may reason first, and since 25/11 the object nests (the word,
+    the assertions), so the last "{" is no longer where it starts. The error
+    never carries the text: it may name the answer."""
+    dec = json.JSONDecoder()
+    found, i = None, text.find("{")
+    while i != -1:
+        try:
+            obj, end = dec.raw_decode(text, i)
+        except ValueError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and "consistent" in obj:
+            found = obj
+        i = text.find("{", end)
+    if found is None:
+        raise ValueError(f"no JSON in judge answer ({len(text)} chars)")   # never the text
+    return found
+
+
+def _truth_verdict(doc: dict) -> TruthVerdict:
+    """The verdict, from the judge's own assertions first (Hunt #42): ONE
+    assertion that does not hold rejects the clue, whatever the judge's
+    summary says. An answer without assertions (the old shape) is read by
+    its summary alone."""
+    consistent = _as_bool(doc.get("consistent"))
+    if consistent is None:
+        raise ValueError("'consistent' is not a boolean")
+    reason = str(doc.get("reason", ""))
+    false = [a for a in doc.get("assertions") or []
+             if isinstance(a, dict) and _as_bool(a.get("holds")) is False]
+    if false:
+        said = " | ".join(f"\"{a.get('says', '')}\" — {a.get('why', '')}" for a in false)
+        text = f"false about the word: {said}" + (f" ({reason})" if reason else "")
+        return TruthVerdict(False, text[:600])
+    return TruthVerdict(consistent, reason[:300])
 
 
 @dataclass(frozen=True)
@@ -1441,11 +1531,15 @@ class AnthropicTruthJudge:
     call per draft; any transport/parse trouble → consistent=None (the
     engine raises TruthJudgeUnavailable — fail-closed, like the search
     guard). The reason may name the answer: it goes to the WRITER (who
-    knows it) and to our logs, never to a post."""
+    knows it) and to our logs, never to a post. Since Hunt #42 the judge
+    sees the name's words numbered and which word the clue is about, lists
+    every assertion of the clue, and one that does not hold rejects it."""
 
     name = "anthropic-truth-judge"
 
-    def __init__(self, client, model: str, *, max_tokens: int = 900,
+    # room for the word's facts and the list of assertions (25/11): a cut
+    # answer has no JSON, and three of those fail the guard closed
+    def __init__(self, client, model: str, *, max_tokens: int = 1500,
                  tries: int = 3, sleep=None):
         self._client = client
         self._model = model
@@ -1459,11 +1553,20 @@ class AnthropicTruthJudge:
         before the engine fails closed — one blip must not freeze a hunt.
         The MEASURED cause travels in `reason` (R8: 'unavailable' alone told
         the operator nothing on 09/09)."""
-        about = (f"the word '{word}' of the name" if word else "the ARTWORK")
-        user = (f"ANSWER — name: {name}\nartwork: {artwork or '(no description)'}\n"
+        if word:
+            # its number in the one reading (name_words), when it is unique
+            at = [w.position for w in name_words(name) if w.text == word]
+            about = (f"word {at[0]} of the name, '{word}'" if len(at) == 1
+                     else f"the word '{word}' of the name")
+        else:
+            about = "the ARTWORK"
+        user = (f"ANSWER — name: {name}\n"
+                f"its words, numbered: {numbered_words(name)}\n"
+                f"artwork: {artwork or '(no description)'}\n"
                 f"This clue is about {about}.\n\nCLUE: {clue}\n\n"
-                "Is the clue TRUE of the answer? Reason briefly if you need to, "
-                "then end with the JSON object.")
+                "Is the clue TRUE of the answer? Check every assertion it makes "
+                "against the word, reason briefly if you need to, then end with "
+                "the JSON object.")
         last = "no attempt"
         for attempt in range(self._tries):
             try:
@@ -1472,12 +1575,7 @@ class AnthropicTruthJudge:
                     system=TRUTH_JUDGE_SYSTEM,
                     messages=[{"role": "user", "content": user}])
                 text = "".join(getattr(b, "text", "") for b in resp.content)
-                end = text.rfind("}")
-                start = text.rfind("{", 0, end) if end != -1 else -1
-                if start == -1:
-                    raise ValueError(f"no JSON in judge answer ({len(text)} chars)")   # never the text
-                doc = json.loads(text[start:end + 1])
-                return TruthVerdict(bool(doc["consistent"]), str(doc.get("reason", ""))[:300])
+                return _truth_verdict(_final_json(text))
             except Exception as e:  # noqa: BLE001 — retried, then fail closed
                 # Opus P1-1 (10/09): never str(e) — an SDK error can echo the
                 # request body, which starts with "ANSWER — name: <target>".
@@ -1710,7 +1808,10 @@ class TargetClueEngine(RelicClueEngine):
                         f"found it FALSE or pointing away from it: {v.reason}. A "
                         "player who reasons correctly must arrive at the answer, not "
                         "be pushed off it. Rewrite so the clue is TRUE of the word "
-                        "under a literal reading — hard is fine, wrong is not"])
+                        "under a literal reading — hard is fine, wrong is not. Every "
+                        "statement must hold for the word as the name uses it: its "
+                        "part of speech, its own meanings (never deny one), never the "
+                        "meaning of a word that only sounds like it"])
         # 6. the search guard, puzzle phase only
         if self._search_guard is not None and clue_index <= puzzle_clues_of(persona):
             v = self._search_guard.check(
