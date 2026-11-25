@@ -499,9 +499,10 @@ class XClient:
         X Premium on the account (no extra param needed). `media` (image bytes)
         is uploaded through v1.1 media/upload on the main account's OAuth 1.0a
         context, gets `media_alt` as alt-text, and is attached to the tweet;
-        if the upload fails the text still goes out without it (the reveal is
-        never blocked by a picture) and the operator is WARNED. NOT yet
-        measured against X — exercise with the live test before Hunt #11."""
+        if the upload fails, or X refuses the post with it (4xx), the text
+        still goes out without it — a picture never blocks a post — and the
+        operator is WARNED. NOT yet measured against X: the first opening
+        card is its live test (Pedro, 25/11, no separate test post)."""
         media_ids: list[str] = []
         if media:
             try:
@@ -516,7 +517,19 @@ class XClient:
         kwargs = {"text": text, "user_auth": True}
         if media_ids:
             kwargs["media_ids"] = media_ids
-        resp = _retry_server_error(lambda: self._v2().create_tweet(**kwargs))
+        try:
+            resp = _retry_server_error(lambda: self._v2().create_tweet(**kwargs))
+        except tweepy.errors.HTTPException as e:
+            # X refused the post WITH the picture (Pedro, 24/11: a picture
+            # never stops a hunt). A 4xx means nothing was created, so the
+            # text goes out alone. A 5xx is not about the picture, and the
+            # post may exist: it is raised as before, never risking a twin.
+            if not media_ids or isinstance(e, tweepy.errors.TwitterServerError):
+                raise
+            self._warn(f"⚠️ X refused the post with the picture ({type(e).__name__}) — "
+                       "posting the text without it")
+            resp = _retry_server_error(
+                lambda: self._v2().create_tweet(text=text, user_auth=True))
         return str(resp.data["id"])
 
     def _upload_media(self, data: bytes) -> str | None:

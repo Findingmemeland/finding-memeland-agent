@@ -886,7 +886,7 @@ class Orchestrator:
         # than advertise a rule that isn't enforced. Reactivates by itself
         # the moment the floor is set again (Hunt #5).
         pct = self._non_holder_pct if hunt.min_balance_fmml > 0 else None
-        opening = None
+        opening = card = None
         if getattr(hunt, "target", None) is not None:
             from ..target.templates import pick_opening, target_clue_one
             # THE OPENING ROTATES (Pedro, 24/11): one of OPENINGS at random,
@@ -899,6 +899,8 @@ class Orchestrator:
                 prize=f"{hunt.prize_fmml:,}", commitment=hunt.integrity_hash,
                 non_holder_pct=pct, opening=opening,
             )
+            # the card: "HUNT #N" and the logo, drawn from the number alone
+            card = self._opening_card(hunt.number)
         else:
             post = clue_one(
                 hunt_n=hunt.number,
@@ -910,7 +912,14 @@ class Orchestrator:
                 # publicada (auditoria v3, P0-A).
                 relic=getattr(hunt, "relic", None) is not None,
             )
-        tweet_id = self._publisher.post(post, long_post=True)
+        if card is not None:
+            from ..target.hunt_card import card_alt_text
+            # an upload that fails, or X refusing the picture, posts the text
+            # alone and warns the operator (XClient.post)
+            tweet_id = self._publisher.post(post, long_post=True, media=card,
+                                            media_alt=card_alt_text(hunt.number))
+        else:
+            tweet_id = self._publisher.post(post, long_post=True)
         hunt.reshare_post_id = tweet_id
         hunt.clues.append(draft.text)
         self._record_clue_audited(hunt, 1, draft.text, tweet_id)
@@ -924,6 +933,20 @@ class Orchestrator:
             self._record_opening(hunt, opening.id)
         self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})"
                      + (f" · opening {opening.id}" if opening is not None else ""))
+
+    def _opening_card(self, number: int) -> bytes | None:
+        """The opening post's card (Pedro, 24/11), or None: the post then goes
+        out as text alone. A picture never stops a hunt — a card that cannot
+        be drawn is a warning to the operator, not an error."""
+        draw = getattr(self._target, "opening_card", None)
+        if draw is None:
+            return None
+        try:
+            return draw(number) or None
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"⚠️ hunt #{number}: opening card not drawn "
+                         f"({type(e).__name__}) — posting the text alone")
+            return None
 
     def _previous_opening(self) -> str | None:
         """The opening the previous hunt published (hunts.opening_variant),

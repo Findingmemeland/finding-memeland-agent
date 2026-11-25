@@ -181,7 +181,9 @@ def test_full_hunt_pays_and_reveal_verifies():
     # Opus (dry-run 09/09): the reveal SHOWS the treasure — art as media,
     # item link in the text; the media never blocks the announcement
     assert f"see it: opensea.io/item/ethereum/{target.contract.lower()}/{target.token_id}" in reveal
-    assert w.rig.publisher.media == {}                 # decision 10/09: link, no image
+    # decision 10/09: link, no image on the reveal — the one picture of a
+    # hunt is the opening post's card (24/11)
+    assert set(w.rig.publisher.media) == {hunt.reshare_post_id}
     assert f"“{target.name_onchain}”, by {target.artist}" in reveal      # R9
     assert w.rig.payout.sent and w.rig.payout.sent[0]["wallet"] == WALLET_A
 
@@ -251,7 +253,8 @@ def test_reveal_without_usable_artwork_goes_out_with_the_link_and_tells_why():
         winner = w.orch._claim_loop(hunt)
         w.orch._reveal(hunt, winner, w.orch._pay(hunt, winner))
         reveal = next(p for p in w.rig.publisher.posts if "We have a winner" in p)
-        assert "see it: opensea.io/item/" in reveal and w.rig.publisher.media == {}
+        assert "see it: opensea.io/item/" in reveal
+        assert set(w.rig.publisher.media) == {hunt.reshare_post_id}      # the card only
         return [m for m in w.rig.notifier.messages if "reveal artwork" in m], target
 
     def unusable(sealed):

@@ -92,6 +92,7 @@ from .hunt import (
     SprayParams,
     TargetHuntPreparer,
 )
+from .hunt_card import render_hunt_card
 from .integration import ArtworkUnusable, TargetPorts
 from .name_language import AnthropicNameLanguage
 from .prepare import (
@@ -1212,6 +1213,9 @@ def build_target(s, *, anthropic, repo, http_get, http_post, http_get_bytes,
         prepared_max_age_h=float(PREPARED_TTL_HOURS),
         used_hmac=((lambda tid: used_hmac(tid, s.target_pool_key))
                    if s.target_pool_key else None),
+        # the opening post's card, "HUNT #N" + the logo (Pedro, 24/11): from
+        # the number alone; failing to draw or upload posts the text alone
+        opening_card=render_hunt_card,
     )
     # -- the larder: find targets in advance, use one per hunt -------------- #
     # a RANGED transport when main.py supplies one (8 s, 4 KB); otherwise the

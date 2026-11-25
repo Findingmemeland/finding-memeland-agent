@@ -57,6 +57,7 @@ from .hunt import (
     SprayParams,
     TargetHuntPreparer,
 )
+from .hunt_card import render_hunt_card
 from .integration import TargetPorts, rebuild_spray
 from .prepare import Prepared, PreparedStore
 from .refresh import content_id
@@ -242,6 +243,8 @@ class TargetWorld:
             larder_chains=frozenset({"ethereum", "base"}),
             # the opening is drawn from the seed: same seed, same opening (24/11)
             opening_rng=random.Random(seed),
+            # the opening post's card, as production draws it (24/11)
+            opening_card=render_hunt_card,
         )
         self.rig = build_simulation(poll_interval_s=60, verbose=verbose)
         self.orch = self.rig.orchestrator
@@ -412,9 +415,13 @@ def scenario_happy_path(world: TargetWorld) -> ScenarioReport:
     rep.check("reveal prints the tokenURI sealed at launch", target.token_uri in reveal)
     rep.check("reveal links the item (opensea.io/item/…)",
               f"see it: opensea.io/item/{target.chain}/{target.contract.lower()}/{target.token_id}" in reveal)
-    # decision 10/09: no image on the reveal — the link card shows the piece
+    # decision 10/09: no image on the reveal — the link card shows the piece.
+    # The ONE picture of a hunt is the opening post's card (24/11).
     rep.check("reveal post carries NO media (the OpenSea card renders the piece)",
-              world.rig.publisher.media == {})
+              set(world.rig.publisher.media) <= {hunt.reshare_post_id})
+    rep.check("the opening post carries the card (HUNT #N + logo, 24/11)",
+              world.rig.publisher.media.get(hunt.reshare_post_id, b"")[:8]
+              == b"\x89PNG\r\n\x1a\n")
     if target.artist:
         rep.check("R9: reveal credits the artist",
                   f"“{target.name_onchain}”, by {target.artist}" in reveal)
