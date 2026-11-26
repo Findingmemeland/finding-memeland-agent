@@ -12,7 +12,8 @@ hunt says different things in the same voice:
   · the claim is the token's IDENTITY — chain:contract:tokenId, or a
     marketplace link — never a code
   · the commitment is v2: SHA-256(target_id + metadata_sha256 + salt),
-    labelled "commitment v2" in Clue 1 so a verifier knows which formula
+    labelled "commitment v2" so a verifier knows which formula — in the
+    bot's own reply under Clue 1 (25/11), public before any claim counts
   · a VOID is as verifiable as a win (commitment.py): the void post
     publishes every ingredient, including the live hash that failed
   · a mutation/burn AFTER a valid claim is NOTED, never used against the
@@ -121,8 +122,11 @@ def pick_opening(previous: str | None, rng) -> Opening:
 
 
 # The fixed half: how to answer (it used to sit in the explainer, above the
-# clue — now it is the first line below it), the prize, the holder line, the
-# reshare gate, the commitment and the pinned rules. The same on every hunt.
+# clue — now it is the first line below it), the prize and the pinned rules.
+# The same on every hunt. The reshare gate, the holder line and the
+# commitment left the opening on 25/11 for the bot's own reply under it
+# (target_commitment_reply): five of the ten posts X hid as SPAM_HIGH_RECALL
+# in October were openings.
 TARGET_CLUE_ONE_REPLY = (
     "found it? reply to this post with its chain:contract:tokenId (or the "
     "marketplace link). the NFT stays with its owner."
@@ -134,28 +138,41 @@ TARGET_CLUE_ONE_REPLY = (
 CLAIM_FORMAT_EXAMPLE = "<chain>:0xabc…def:42"
 
 
-def target_clue_one(hunt_n: int, clue_text: str, prize: str, commitment: str,
-                    non_holder_pct: int | None = 10, *,
+def target_clue_one(hunt_n: int, clue_text: str, prize: str, *,
                     opening: Opening | None = None) -> str:
     """Opening post: the rotating opening (OPENINGS) + clue 1 + the fixed
-    rules (how to reply, the prize, the holder line, the reshare gate, the
-    commitment v2). The footer 'Check pinned for rules' appears ONLY here.
-    non_holder_pct=None: holding floor OFF, the split line is omitted."""
+    rules (how to reply, the prize). The footer 'Check pinned for rules'
+    appears ONLY here. The reshare gate, the holder line and the commitment
+    go in the bot's own reply under it (target_commitment_reply)."""
     opening = opening or OPENINGS[0]
     return (
         f"{opening.render(hunt_n)}\n\n"
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
         f"{TARGET_CLUE_ONE_REPLY}\n"
-        f"The first to find it wins {prize} FIND.\n"
-        + (
-            f"hold FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
-            if non_holder_pct is not None else ""
-        )
-        + "Quote or repost this post to enter.\n\n"
-        f"commitment v2: {commitment}\n\n"
-        f"Check pinned for rules."
+        f"The first to find it wins {prize} FIND.\n\n"
+        "Check pinned for rules."
     )
+
+
+# The reply's first line (Pedro, 25/11): it sits right under the hunt post and
+# will draw claims. A claim posted under it is still a wrong door — logged,
+# never counted, told once that the claim goes under the hunt post.
+COMMITMENT_REPLY_WHERE = "claims go as replies to the hunt post above, not here."
+
+
+def target_commitment_reply(commitment: str, non_holder_pct: int | None = 10) -> str:
+    """The bot's own reply under the opening post (Pedro, 25/11): where the
+    claims go, the reshare gate — repost or quote, the rule itself does not
+    change, and it stays in the pinned post — the holder line (only here
+    since 25/11) and the commitment v2. Posted right after the opening; no
+    claim counts before it is public (orchestrator._go_live).
+    non_holder_pct=None: holding floor OFF, the holder sentence is omitted."""
+    holders = (f" hold FIND for the full prize — non-holders win {non_holder_pct}%."
+               if non_holder_pct is not None else "")
+    return (f"{COMMITMENT_REPLY_WHERE}\n"
+            f"to be eligible: repost or quote the hunt post.{holders}\n\n"
+            f"commitment v2: {commitment}")
 
 
 # Clues 2+: the line late joiners need — where and in what shape to claim.
@@ -342,7 +359,7 @@ def commitment_block(*, target_id: str, metadata_sha256: str, salt: str,
         f"{id_lines}"
         f"  metadata_sha256: {metadata_sha256}\n"
         f"  salt: {salt}\n"
-        "It matches the commitment in Clue 1.\n"
+        "It matches the commitment in our reply under Clue 1.\n"
         "metadata_sha256 is SHA-256 of the token's metadata JSON (keys "
         "sorted, no ASCII escaping, utf-8) — fetch its tokenURI and check it "
         "yourself."
@@ -650,9 +667,20 @@ POST_REPLY_NAME_ONLY = (
     f"marketplace link, or chain:contract:tokenId (like {CLAIM_FORMAT_EXAMPLE})."
 )
 
+# "a DIRECT reply" (Pedro, 26/11): since 25/11 our commitment reply sits right
+# under the Clue 1 post and draws claims, and whoever answered it is already
+# "in the replies of the Clue 1 post" — the old wording read as "you did it".
 POST_REPLY_WRONG_DOOR_TARGET = (
-    "the claim goes in the replies of the Clue 1 post — drop the "
+    "the claim goes as a direct reply to the Clue 1 post — drop the "
     "chain:contract:tokenId (or link) there and it counts. \U0001F438"
+)
+# A claim before the hunt is OPEN (25/11): open = the opening post AND the
+# commitment reply under it are up. True in both windows — before the
+# opening, and between it and the commitment (which can fail and be retried)
+# — where POST_REPLY_EARLY's "no clue 1" would be false in the second.
+POST_REPLY_EARLY_TARGET = (
+    "not open yet — a claim only counts once the hunt post and my commitment "
+    "under it are up. post it again then."
 )
 
 # The consequence of the spray detector, worded for the pinned rules —

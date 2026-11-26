@@ -13,7 +13,8 @@ What a target hunt carries on the hunt row (all set at prepare time):
   · `target_ctx_sealed` — the artwork description (vision output), also
                           encrypted: it describes the answer's picture
   · `target_epoch`      — the curation epoch id
-  · `integrity_hash`    — the v2 COMMITMENT (published in Clue 1);
+  · `integrity_hash`    — the v2 COMMITMENT (published in the bot's reply
+                          under Clue 1, 25/11);
                           `integrity_salt` the salt; `claim_code` is EMPTY —
                           a target hunt has no code
   · `target_void_id`    — set when a hunt is voided over the target's

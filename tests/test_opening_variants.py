@@ -5,8 +5,9 @@ tem descido de hunt para hunt. A primeira parte (a frase de entrada e a
 explicação do jogo) passa a sair de dez aberturas na voz do oráculo:
 primeira pessoa, minúsculas, seca, com 🐸. É tirada à sorte e nunca é a da
 hunt anterior. O bloco das regras fica igual em todas e passa todo para
-baixo da pista: como responder, o prémio, a linha dos holders, o "Quote or
-repost", o commitment e o "Check pinned for rules".
+baixo da pista: como responder, o prémio e o "Check pinned for rules". O
+"Quote or repost", a linha dos holders e o commitment saíram da abertura a
+25/11 para a resposta do bot por baixo dela (tests/test_commitment_reply.py).
 
 O id da abertura fica na linha da hunt (hunts.opening_variant), para comparar
 o alcance. Uma coluna que ainda não exista nunca impede a hunt de arrancar.
@@ -30,7 +31,6 @@ from finding_memeland.target.templates import (
     x_weighted_len,
 )
 
-COMMIT = "c0ffee" * 10 + "abcd"
 URL_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
 # pedir interacção é o que o X castiga; e as do filtro do oráculo (filler)
 BAIT = ("like", "likes", "retweet", "repost", "follow", "share", "tag", "moon",
@@ -77,16 +77,13 @@ def test_each_opening_is_the_oracle_and_explains_the_game(o):
 
 
 def test_the_rules_below_the_clue_are_the_same_for_every_opening():
-    tails = {target_clue_one(42, "a clue", "200,000,000", COMMIT, opening=o)
+    tails = {target_clue_one(42, "a clue", "200,000,000", opening=o)
              .split("1st clue:", 1)[1] for o in OPENINGS}
     assert tails == {
         "\n\na clue\n\n"
         "found it? reply to this post with its chain:contract:tokenId (or the "
         "marketplace link). the NFT stays with its owner.\n"
-        "The first to find it wins 200,000,000 FIND.\n"
-        "hold FIND to win the full prize — non-holders win 10%.\n"
-        "Quote or repost this post to enter.\n\n"
-        f"commitment v2: {COMMIT}\n\n"
+        "The first to find it wins 200,000,000 FIND.\n\n"
         "Check pinned for rules."}
     assert TARGET_CLUE_ONE_REPLY.startswith("found it? reply to this post")
 
@@ -96,11 +93,12 @@ def test_the_full_post_opens_with_the_opening_and_has_no_cashtag():
     5 dos 10 posts que o X escondeu como SPAM_HIGH_RECALL em outubro eram
     aberturas."""
     o = OPENINGS[4]
-    post = target_clue_one(42, "a clue", "200,000,000", COMMIT, opening=o)
+    post = target_clue_one(42, "a clue", "200,000,000", opening=o)
     assert post.startswith(o.render(42) + "\n\n1st clue:\n\na clue\n\n")
     assert not re.findall(r"\$[A-Za-z]+", post) and "$" not in post
     assert "wins 200,000,000 FIND." in post
-    assert "non-holders" not in target_clue_one(42, "c", "1", COMMIT, None, opening=o)
+    # the holder line lives in the commitment reply since 25/11
+    assert "non-holders" not in post and "hold FIND" not in post
 
 
 # --------------------------------------------------------------------------- #

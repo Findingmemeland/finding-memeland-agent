@@ -10,21 +10,23 @@ v2 (Option A: the target is an existing third-party NFT, no claim code):
                       (selector.metadata_hash: canonical JSON, sort_keys,
                       ensure_ascii=False, utf-8)
 
-Published in Clue 1 before any other clue exists. The Winner Announcement
+Published before any claim can count: in Clue 1 itself until 24/11, and
+since 25/11 in the bot's own reply under Clue 1 (orchestrator._go_live
+opens the claims only once that reply is up). The Winner Announcement
 reveals target_id, metadata_sha256 and the salt; anyone recomputes the
 commitment AND recomputes metadata_sha256 from the token's live metadata.
 If the owner mutated the metadata mid-hunt the second check fails publicly
 — that hunt is VOIDED by rule, prize back to the vault.
 
 ⚠️ Why the metadata hash lives INSIDE the salted commitment and is NOT
-published raw in Clue 1 (this corrects the 04/09 sketch, flagged to Opus):
+published raw next to it (this corrects the 04/09 sketch, flagged to Opus):
 a raw metadata hash is an ENUMERATION ORACLE. Anyone can hash candidate
 metadata — and "the pool is probably art platforms" is a guessable
 strategy, so an attacker enumerates exactly the platforms we curate,
 hashes every item's metadata via the same public APIs, and matches the
 published hash with ZERO clues solved. That is the Hunt #10 harvest
-reborn one layer up. Salting it closes the oracle: nothing published in
-Clue 1 can be tested against any candidate without the salt, and the salt
+reborn one layer up. Salting it closes the oracle: nothing published at
+launch can be tested against any candidate without the salt, and the salt
 appears only at reveal, when the game is over.
 
 Two Opus implementation notes (04/09), both part of the protocol:

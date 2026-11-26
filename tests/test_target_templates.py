@@ -22,6 +22,7 @@ from finding_memeland.target.templates import (
     commitment_block,
     target_clue_followup,
     target_clue_one,
+    target_commitment_reply,
     target_winner_announcement,
     void_reveal,
 )
@@ -43,12 +44,13 @@ def cashtags(text: str) -> int:
 
 
 def test_clue_one_brand_line_format_and_commitment_label():
-    post = target_clue_one(11, "patience is a coin nobody spends", "100,000,000",
-                           COMMIT)
+    post = target_clue_one(11, "patience is a coin nobody spends", "100,000,000")
     assert post.startswith("hunt #11. ")              # the opening rotates (24/11)
     assert "the prize is always on Base. the treasure can be anywhere onchain." in post
     assert "chain:contract:tokenId" in post and "marketplace link" in post
-    assert f"commitment v2: {COMMIT}" in post
+    # the commitment and the reshare gate live in the bot's reply (25/11)
+    assert "commitment" not in post and "Quote or repost" not in post
+    assert f"commitment v2: {COMMIT}" in target_commitment_reply(COMMIT)
     assert "integrity:" not in post                       # v1 label never
     assert "Check pinned for rules." in post
     assert cashtags(post) == 0                            # none in the opening (25/11)
@@ -57,7 +59,7 @@ def test_clue_one_brand_line_format_and_commitment_label():
 
 
 def test_clue_one_never_uses_old_game_vocabulary():
-    post = target_clue_one(11, "clue", "1", COMMIT)
+    post = target_clue_one(11, "clue", "1")
     low = post.lower()
     for bad in ("code in its bio", "code in its description", "persona",
                 "account", "fake", "keeps the relic"):
@@ -65,10 +67,11 @@ def test_clue_one_never_uses_old_game_vocabulary():
     assert "someone else" in low and "stays with its owner" in low
 
 
-def test_clue_one_holder_line_optional():
-    assert "non-holders win 10%" in target_clue_one(1, "c", "1", COMMIT)
-    assert "non-holders" not in target_clue_one(1, "c", "1", COMMIT,
-                                                non_holder_pct=None)
+def test_the_holder_line_lives_in_the_commitment_reply_and_is_optional():
+    """25/11 (Pedro): out of the opening, into the bot's reply under it."""
+    assert "non-holders" not in target_clue_one(1, "c", "1")
+    assert "non-holders win 10%" in target_commitment_reply(COMMIT)
+    assert "non-holders" not in target_commitment_reply(COMMIT, None)
 
 
 def test_claim_hint_cadence_is_2_3_then_every_fifth():

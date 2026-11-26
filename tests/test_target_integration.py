@@ -44,7 +44,10 @@ def test_prepare_seals_the_row_and_clue_one_is_v2():
     assert hunt.target.target.name not in row["target_sealed"]     # cifrado
     assert hunt.persona.x_user_id == ""                             # nunca o id
     clue1 = w.rig.publisher.posts[0]
-    assert "commitment v2:" in clue1 and "the treasure can be anywhere onchain" in clue1
+    assert "the treasure can be anywhere onchain" in clue1
+    # the commitment, in the bot's own reply under clue 1 (25/11)
+    assert [t for r, t in w.rig.publisher.post_replies
+            if r == hunt.reshare_post_id and "commitment v2:" in t]
     assert "code in its" not in clue1
     # o operador vê estrutura, nunca o nome
     assert all("Whispering" not in m for m in w.rig.notifier.messages)

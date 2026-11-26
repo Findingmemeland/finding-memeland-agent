@@ -393,7 +393,17 @@ def scenario_happy_path(world: TargetWorld) -> ScenarioReport:
     world.orch._retire(hunt)
     posts = world.posts()
     rep.check("hunt ends DONE", hunt.state is HuntState.DONE)
-    rep.check("Clue 1 carries 'commitment v2:'", "commitment v2:" in posts[0])
+    # 25/11: the reshare gate and the commitment, in the bot's own reply
+    commitment_reply = next((t for r, t in world.rig.publisher.post_replies
+                             if r == hunt.reshare_post_id), "")
+    rep.check("the bot's reply under Clue 1: where claims go, the reshare gate, the commitment",
+              commitment_reply.startswith(
+                  "claims go as replies to the hunt post above, not here.\n")
+              and f"commitment v2: {hunt.integrity_hash}" in commitment_reply
+              and "repost or quote the hunt post" in commitment_reply)
+    rep.check("Clue 1 itself: no commitment, no 'Quote or repost', no holder line, no cashtag",
+              "commitment" not in posts[0] and "Quote or repost" not in posts[0]
+              and "non-holders" not in posts[0] and "$" not in posts[0])
     clue_body = posts[0].split("1st clue:", 1)[-1].split("The first to find", 1)[0].lower()
     rep.check("the clue itself never names a chain; the post never mentions a claim code",
               not any(w in clue_body for w in ("ethereum", "base", "polygon", "arbitrum"))
@@ -412,6 +422,8 @@ def scenario_happy_path(world: TargetWorld) -> ScenarioReport:
     except AttributeError:
         recomputes = False
     rep.check("commitment recomputes from the public posts alone", recomputes)
+    rep.check("the reveal points at the commitment in our reply under Clue 1",
+              "It matches the commitment in our reply under Clue 1." in reveal)
     rep.check("reveal prints the tokenURI sealed at launch", target.token_uri in reveal)
     rep.check("reveal links the item (opensea.io/item/…)",
               f"see it: opensea.io/item/{target.chain}/{target.contract.lower()}/{target.token_id}" in reveal)

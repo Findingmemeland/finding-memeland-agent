@@ -123,9 +123,11 @@ class PreparedHunt:
     clues: list[str] = field(default_factory=list)
     state: HuntState = HuntState.IDLE
     started_at: datetime | None = None
-    # P2 prepare/go-live split: live_at = when Clue 1 actually posted. The DM
-    # gate uses it: [0, started_at) = old noise; [started_at, live_at) = the
-    # prep window ('early', rejected + logged); [live_at, ...) = the game.
+    # P2 prepare/go-live split: live_at = when the claims opened — Clue 1
+    # posted and, for a target hunt since 25/11, its commitment reply up
+    # (None while that reply is still missing: claims closed). The gates use
+    # it: [0, started_at) = old noise; [started_at, live_at) = the prep window
+    # ('early', rejected + logged); [live_at, ...) = the game.
     live_at: datetime | None = None
     # Public "Hunt #N" — DB-derived at prepare time, stored on the row, reread
     # on resume. ONE source of truth (P3.2: posts said #1 forever while resume
@@ -894,10 +896,10 @@ class Orchestrator:
             opening = pick_opening(self._previous_opening(),
                                    getattr(self._target, "opening_rng", None)
                                    or random.Random())
+            # the holder line went to the commitment reply (Pedro, 25/11)
             post = target_clue_one(
                 hunt_n=hunt.number, clue_text=draft.text,
-                prize=f"{hunt.prize_fmml:,}", commitment=hunt.integrity_hash,
-                non_holder_pct=pct, opening=opening,
+                prize=f"{hunt.prize_fmml:,}", opening=opening,
             )
             # the card: "HUNT #N" and the logo, drawn from the number alone
             card = self._opening_card(hunt.number)
@@ -923,16 +925,72 @@ class Orchestrator:
         hunt.reshare_post_id = tweet_id
         hunt.clues.append(draft.text)
         self._record_clue_audited(hunt, 1, draft.text, tweet_id)
+        # THE COMMITMENT, IN OUR OWN REPLY (Pedro, 25/11): the reshare gate
+        # and the commitment v2 left the opening post for a reply under it.
+        # No claim may count before the commitment is public, so live_at —
+        # the boundary every claim is checked against — is set only once the
+        # reply is up. If it cannot be posted, the hunt goes LIVE with live_at
+        # empty: claims stay closed ('early', never a winner) and the claim
+        # loop retries the reply every cycle (Phase 0c).
+        committed, detail = True, ""
+        if getattr(hunt, "target", None) is not None:
+            committed, detail = self._post_commitment(hunt)
         # reshare_post_id persisted so a restarted agent keeps the SAME gate;
-        # live_at is the prep-window boundary for the DM gate (P2).
-        hunt.live_at = self._clock.now()
+        # live_at is the boundary of the claim gate (P2) — since 25/11, the
+        # moment the commitment is up.
+        hunt.live_at = self._clock.now() if committed else None
         self._transition(
             hunt, HuntState.LIVE, reshare_post_id=tweet_id, live_at=hunt.live_at
         )
         if opening is not None:
             self._record_opening(hunt, opening.id)
         self._notify(f"hunt #{hunt.number} LIVE — clue 1 posted ({tweet_id})"
+                     + (f" · commitment reply {detail}" if committed and detail else "")
                      + (f" · opening {opening.id}" if opening is not None else ""))
+        if not committed:
+            self._notify(f"⚠️ hunt #{hunt.number}: commitment reply NOT posted ({detail}) "
+                         "— claims stay CLOSED (logged 'early', none can win) until it "
+                         "is up; retrying every cycle")
+
+    def _post_commitment(self, hunt: PreparedHunt, *, tries: int = 3) -> tuple[bool, str]:
+        """The bot's own reply under the opening post: the reshare gate and
+        the commitment v2 (Pedro, 25/11). (True, reply id) once it is public,
+        (False, error type) if not. X refusing it as a DUPLICATE means an
+        earlier try reached X and only its answer was lost: it is up. Never
+        raises — a failure keeps the claims closed, it never kills the hunt."""
+        from ..target.templates import target_commitment_reply
+        pct = self._non_holder_pct if hunt.min_balance_fmml > 0 else None
+        text = target_commitment_reply(hunt.integrity_hash, pct)
+        why = "no attempt"
+        for attempt in range(tries):
+            try:
+                return True, str(self._publisher.reply_post(
+                    text, in_reply_to=hunt.reshare_post_id))
+            except Exception as e:  # noqa: BLE001
+                if "duplicate" in str(e).lower():
+                    return True, "already up (X: duplicate)"
+                why = type(e).__name__       # the type only: never the text (R8)
+                if attempt < tries - 1:
+                    self._clock.sleep(2.0 * (attempt + 1))
+        return False, why
+
+    def _open_claims(self, hunt: PreparedHunt) -> bool:
+        """Phase 0c: one more try at the commitment reply for a target hunt
+        that went LIVE without it. True once it is up — claims open from now
+        (live_at, persisted so a restart keeps it)."""
+        committed, detail = self._post_commitment(hunt, tries=1)
+        if not committed:
+            return False
+        hunt.live_at = self._clock.now()
+        try:
+            self._repo.update_hunt(hunt.id, live_at=hunt.live_at)
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"⚠️ hunt #{hunt.number}: live_at NOT saved ({type(e).__name__}) "
+                         "— after a restart the reply is tried again; X answers "
+                         "'duplicate' and the claims reopen")
+        self._notify(f"✅ hunt #{hunt.number}: commitment posted under clue 1 ({detail}) "
+                     "— claims OPEN")
+        return True
 
     def _opening_card(self, number: int) -> bytes | None:
         """The opening post's card (Pedro, 24/11), or None: the post then goes
@@ -1688,6 +1746,7 @@ class Orchestrator:
         poll_failures = 0
         pause_notified = False
         cycle_n = 0
+        commit_misses = 0          # Phase 0c tries that did not get the commitment up
 
         (processed, guesses, counted, taunted, sys_sent, pending, rebuilt_queue) = (
             self._rebuild_claim_state(hunt)
@@ -1712,10 +1771,15 @@ class Orchestrator:
         # operator hears about a shotgun account once it insists (P1-1).
         malformed_by_author: dict[str, int] = {}
         if is_target:
-            from ..target.templates import POST_REPLY_WRONG_DOOR_TARGET
+            from ..target.templates import (
+                POST_REPLY_EARLY_TARGET,
+                POST_REPLY_WRONG_DOOR_TARGET,
+            )
             wrong_door_reply = POST_REPLY_WRONG_DOOR_TARGET
+            early_reply = POST_REPLY_EARLY_TARGET
         else:
             wrong_door_reply = POST_REPLY_WRONG_DOOR
+            early_reply = POST_REPLY_EARLY
         judged: set[str] = set()               # authors whose chatter was LLM-judged
         taunt_budget = {"used": len(taunted)}  # global per-hunt cost cap
         ask_attempts: dict[str, int] = {}      # per-claim failed public asks
@@ -1772,6 +1836,18 @@ class Orchestrator:
             ):
                 self._void_unclaimed(hunt)
                 return None
+
+            # ---- Phase 0c: claims open only once the commitment is public ----
+            # (Pedro, 25/11) A target hunt whose commitment reply could not be
+            # posted at go-live runs with live_at empty. Every cycle tries it
+            # again; until it is up, every claim falls in Window 2 ('early',
+            # never a winner). The operator hears it every 20 misses, not
+            # every cycle.
+            if is_target and hunt.live_at is None and not self._open_claims(hunt):
+                commit_misses += 1
+                if commit_misses % 20 == 0:
+                    self._notify(f"⚠️ hunt #{hunt.number}: commitment reply still NOT "
+                                 f"posted ({commit_misses} more tries) — claims CLOSED")
 
             # ---- Phase 1: read the mentions stream (+ periodic thread sweep) ----
             raw_batch: list = []
@@ -1846,7 +1922,11 @@ class Orchestrator:
 
                 # Window 2 — prep window: a code-like post is logged 'early' +
                 # answered once; chatter is just skipped. Never able to win.
-                if live_boundary is not None and post.created_at < live_boundary:
+                # Since 25/11 a target hunt is not OPEN until its commitment
+                # reply is up (live_at empty): the same window, however late
+                # the post — no claim counts before the commitment is public.
+                closed = is_target and hunt.live_at is None
+                if closed or (live_boundary is not None and post.created_at < live_boundary):
                     if matcher.looks_like_claim(post.text):
                         try:
                             self._repo.log_submission(
@@ -1857,7 +1937,7 @@ class Orchestrator:
                             )
                         except Exception as e:  # noqa: BLE001
                             self._notify(f"early post {post.tweet_id} not logged: {e!r}")
-                        self._sys_reply("early", post, POST_REPLY_EARLY, sys_sent)
+                        self._sys_reply("early", post, early_reply, sys_sent)
                         print(f"{tag} post {post.tweet_id} rejected: early (prep window)")
                     _done(post)
                     continue

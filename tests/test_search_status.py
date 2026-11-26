@@ -578,7 +578,8 @@ def test_the_same_preparation_launches_once_the_search_is_back():
     w.guard_verdict = dryrun._GuardOk()
     hunt = w.launch()
     assert hunt.target.commitment == sealed                  # the SAME target, not another
-    assert len(w.posts()) == 1 and "commitment v2:" in w.posts()[0]
+    assert len(w.posts()) == 1 and [t for r, t in w.rig.publisher.post_replies
+                                    if r == hunt.reshare_post_id and "commitment v2:" in t]
 
 
 def test_a_recheck_that_blows_up_reads_the_same_way():
