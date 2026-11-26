@@ -51,7 +51,8 @@ def test_clue_one_brand_line_format_and_commitment_label():
     assert f"commitment v2: {COMMIT}" in post
     assert "integrity:" not in post                       # v1 label never
     assert "Check pinned for rules." in post
-    assert cashtags(post) == 1                            # X: one cashtag
+    assert cashtags(post) == 0                            # none in the opening (25/11)
+    assert "wins 100,000,000 FIND." in post
     assert not URL_RE.search(post)
 
 

@@ -83,7 +83,7 @@ def test_the_rules_below_the_clue_are_the_same_for_every_opening():
         "\n\na clue\n\n"
         "found it? reply to this post with its chain:contract:tokenId (or the "
         "marketplace link). the NFT stays with its owner.\n"
-        "The first to find it wins 200,000,000 $FIND.\n"
+        "The first to find it wins 200,000,000 FIND.\n"
         "hold FIND to win the full prize — non-holders win 10%.\n"
         "Quote or repost this post to enter.\n\n"
         f"commitment v2: {COMMIT}\n\n"
@@ -91,11 +91,15 @@ def test_the_rules_below_the_clue_are_the_same_for_every_opening():
     assert TARGET_CLUE_ONE_REPLY.startswith("found it? reply to this post")
 
 
-def test_the_full_post_opens_with_the_opening_and_keeps_one_cashtag():
+def test_the_full_post_opens_with_the_opening_and_has_no_cashtag():
+    """Sem cashtag em lado nenhum da abertura, nem no prémio (Pedro, 25/11):
+    5 dos 10 posts que o X escondeu como SPAM_HIGH_RECALL em outubro eram
+    aberturas."""
     o = OPENINGS[4]
     post = target_clue_one(42, "a clue", "200,000,000", COMMIT, opening=o)
     assert post.startswith(o.render(42) + "\n\n1st clue:\n\na clue\n\n")
-    assert len(re.findall(r"\$[A-Za-z]+", post)) == 1
+    assert not re.findall(r"\$[A-Za-z]+", post) and "$" not in post
+    assert "wins 200,000,000 FIND." in post
     assert "non-holders" not in target_clue_one(42, "c", "1", COMMIT, None, opening=o)
 
 

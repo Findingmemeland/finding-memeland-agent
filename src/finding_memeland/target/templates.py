@@ -47,9 +47,11 @@ from ..content.templates import _ordinal
 # knows the game: the hunt number; an NFT that already exists, made by
 # someone else; the brand line (Pedro, 05/09), word for word — and "Base"
 # nowhere else, so nobody reads the treasure as being on Base; and the way
-# in (clues → name → the exact token). No cashtag (one per post, X 403: the
-# prize line has it), no URL, no @, nothing asking for likes. Each one fits in
-# 280 characters as X counts them.
+# in (clues → name → the exact token). No cashtag anywhere in the opening
+# post, the prize line included: it says "FIND" (Pedro, 25/11 — five of the
+# ten posts X hid as SPAM_HIGH_RECALL in October were openings). No URL, no
+# @, nothing asking for likes. Each one fits in 280 characters as X counts
+# them.
 #
 # The id goes on the hunt row (hunts.opening_variant) so the reach can be
 # compared per opening. NEVER renumber: retire an id, never reuse it.
@@ -145,7 +147,7 @@ def target_clue_one(hunt_n: int, clue_text: str, prize: str, commitment: str,
         f"1st clue:\n\n"
         f"{clue_text}\n\n"
         f"{TARGET_CLUE_ONE_REPLY}\n"
-        f"The first to find it wins {prize} $FIND.\n"
+        f"The first to find it wins {prize} FIND.\n"
         + (
             f"hold FIND to win the full prize — non-holders win {non_holder_pct}%.\n"
             if non_holder_pct is not None else ""
